@@ -14,56 +14,78 @@ namespace Chimera {
     /**
      * Get data directory of a given script state
      * @param state     Lua script state
-     * @return          Path to data directory
+     * @return          Path to data directory; empty on filesystem failure
      */
-    fs::path get_script_data_path(lua_State *state) noexcept {
-        static auto &chimera = get_chimera();
-        static auto chimera_absolute_path = fs::absolute(chimera.get_path());
-        static auto scripts_data_directory = chimera_absolute_path / "lua" / "data";
+    static fs::path get_script_data_path(lua_State *state) noexcept {
+        if(!state) {
+            return {};
+        }
 
-        // Get script info
-        lua_getglobal(state, "script_name");
-        lua_getglobal(state, "script_type");
-        std::string script_filename = lua_tostring(state, -2);
-        std::string script_type = lua_tostring(state, -1);
-        lua_pop(state, 2);
+        auto &script = script_from_state(state);
+        std::error_code filesystem_error;
+        auto chimera_absolute_path = fs::absolute(get_chimera().get_path(), filesystem_error);
+        if(filesystem_error) {
+            return {};
+        }
 
-        // Remove script file extension
-        auto script_name = script_filename.substr(0, script_filename.size() - 4);
+        auto script_filename = fs::path(script.name).filename().string();
+        if(script_filename.size() >= 4) {
+            script_filename.resize(script_filename.size() - 4);
+        }
 
-        // Create script data folder
-        auto data_path = scripts_data_directory / script_type / script_name;
+        auto scripts_data_directory = chimera_absolute_path / "lua" / "data";
+        auto data_path = scripts_data_directory / (script.global ? "global" : "map") / script_filename;
 
-        if(!fs::exists(data_path)) {
-            fs::create_directory(data_path);
+        fs::create_directories(data_path, filesystem_error);
+        if(filesystem_error) {
+            return {};
         }
 
         return data_path;
     }
 
     /**
-     * Check if a path is inside of the data folder of a given script
-     * @param state     Lua script state
-     * @param path      Path to validate
-     * @return          true if the path valid, false if not
+     * Resolve a script-provided path and verify that it remains inside the script data directory.
+     * Existing symlinks/junctions are resolved by weakly_canonical().
      */
-    static bool check_path(lua_State *state, fs::path path) noexcept {
-        // Get script data directory
+    static bool resolve_script_path(lua_State *state, const fs::path &path, fs::path &resolved_path) noexcept {
         auto data_directory = get_script_data_path(state);
-
-        auto absolute_path = fs::absolute(data_directory / path);
-        if(absolute_path.string().find(data_directory.string()) == 0) {
-            return true;
+        if(data_directory.empty()) {
+            return false;
         }
-        return false;
+
+        std::error_code filesystem_error;
+        auto canonical_data_directory = fs::weakly_canonical(data_directory, filesystem_error);
+        if(filesystem_error) {
+            return false;
+        }
+
+        auto candidate = fs::weakly_canonical(data_directory / path, filesystem_error);
+        if(filesystem_error) {
+            return false;
+        }
+
+        auto data_component = canonical_data_directory.begin();
+        auto candidate_component = candidate.begin();
+        for(; data_component != canonical_data_directory.end(); ++data_component, ++candidate_component) {
+            if(candidate_component == candidate.end() || *data_component != *candidate_component) {
+                return false;
+            }
+        }
+
+        resolved_path = candidate;
+        return true;
     }
 
     static int lua_create_directory(lua_State *state) noexcept {
         int args = lua_gettop(state);
         if(args == 1) {
             const char *path = luaL_checkstring(state, 1);
-            if(check_path(state, path)) {
-                lua_pushboolean(state, fs::create_directories(get_script_data_path(state) / path));
+            fs::path resolved_path;
+            if(resolve_script_path(state, path, resolved_path)) {
+                std::error_code filesystem_error;
+                bool created = fs::create_directories(resolved_path, filesystem_error);
+                lua_pushboolean(state, !filesystem_error && created);
                 return 1;
             }
             else {
@@ -79,10 +101,12 @@ namespace Chimera {
         int args = lua_gettop(state);
         if(args == 1) {
             const char *path = luaL_checkstring(state, 1);
-            if(check_path(state, path)) {
-                auto data_directory = get_script_data_path(state);
-                if(fs::is_directory(data_directory / path)) {
-                    lua_pushboolean(state, fs::remove_all(data_directory / path));
+            fs::path resolved_path;
+            if(resolve_script_path(state, path, resolved_path)) {
+                std::error_code filesystem_error;
+                if(fs::is_directory(resolved_path, filesystem_error) && !filesystem_error) {
+                    auto removed = fs::remove_all(resolved_path, filesystem_error);
+                    lua_pushboolean(state, !filesystem_error && removed != 0);
                 }
                 else {
                     lua_pushboolean(state, false);
@@ -102,18 +126,32 @@ namespace Chimera {
         int args = lua_gettop(state);
         if(args == 1) {
             const char *path = luaL_checkstring(state, 1);
-            if(check_path(state, path)) {
-                auto data_directory = get_script_data_path(state);
-                if(fs::is_directory(data_directory / path)) {
+            fs::path resolved_path;
+            if(resolve_script_path(state, path, resolved_path)) {
+                std::error_code filesystem_error;
+                if(fs::is_directory(resolved_path, filesystem_error) && !filesystem_error) {
                     lua_newtable(state);
                     std::size_t table_index = 1;
-                    for(auto &entry : fs::directory_iterator(data_directory / path)) {
+
+                    fs::directory_iterator iterator(resolved_path, filesystem_error);
+                    fs::directory_iterator end;
+                    while(!filesystem_error && iterator != end) {
+                        const auto &entry = *iterator;
                         auto filename = entry.path().filename().string();
-                        if(fs::is_directory(entry.path())) {
+
+                        std::error_code entry_error;
+                        if(entry.is_directory(entry_error) && !entry_error) {
                             filename += "\\";
                         }
+
                         lua_pushstring(state, filename.c_str());
                         lua_rawseti(state, -2, table_index++);
+                        iterator.increment(filesystem_error);
+                    }
+
+                    if(filesystem_error) {
+                        lua_pop(state, 1);
+                        lua_pushboolean(state, false);
                     }
                 }
                 else {
@@ -134,14 +172,10 @@ namespace Chimera {
         int args = lua_gettop(state);
         if(args == 1) {
             const char *path = luaL_checkstring(state, 1);
-            if(check_path(state, path)) {
-                auto data_directory = get_script_data_path(state);
-                if(fs::exists(data_directory / path)) {
-                    lua_pushboolean(state, fs::is_directory(data_directory / path));
-                }
-                else {
-                    lua_pushboolean(state, false);
-                }
+            fs::path resolved_path;
+            if(resolve_script_path(state, path, resolved_path)) {
+                std::error_code filesystem_error;
+                lua_pushboolean(state, fs::is_directory(resolved_path, filesystem_error) && !filesystem_error);
                 return 1;
             }
             else {
@@ -157,12 +191,13 @@ namespace Chimera {
         int args = lua_gettop(state);
         if(args == 2 || args == 3) {
             const char *path = luaL_checkstring(state, 1);
-            if(check_path(state, path)) {
+            fs::path resolved_path;
+            if(resolve_script_path(state, path, resolved_path)) {
                 std::string content = luaL_checkstring(state, 2);
                 bool append_content = (args == 3 && (lua_isboolean(state, 3) && lua_toboolean(state, 3)));
 
                 std::ofstream file;
-                file.open(get_script_data_path(state) / path, (append_content ? std::ios::app : std::ios::trunc));
+                file.open(resolved_path, (append_content ? std::ios::app : std::ios::trunc));
                 if(file.is_open()) {
                     file << content;
                     lua_pushboolean(state, file.good());
@@ -186,9 +221,10 @@ namespace Chimera {
         int args = lua_gettop(state);
         if(args == 1) {
             const char *path = luaL_checkstring(state, 1);
-            if(check_path(state, path)) {
+            fs::path resolved_path;
+            if(resolve_script_path(state, path, resolved_path)) {
                 std::ifstream file;
-                file.open(get_script_data_path(state) / path);
+                file.open(resolved_path);
                 if(file.is_open()) {
                     std::stringstream file_content_stream;
                     std::string line_buffer;
@@ -221,10 +257,12 @@ namespace Chimera {
         int args = lua_gettop(state);
         if(args == 1) {
             const char *path = luaL_checkstring(state, 1);
-            if(check_path(state, path)) {
-                auto data_directory = get_script_data_path(state);
-                if(fs::is_regular_file(data_directory / path)) {
-                    lua_pushboolean(state, fs::remove(data_directory / path));
+            fs::path resolved_path;
+            if(resolve_script_path(state, path, resolved_path)) {
+                std::error_code filesystem_error;
+                if(fs::is_regular_file(resolved_path, filesystem_error) && !filesystem_error) {
+                    bool removed = fs::remove(resolved_path, filesystem_error);
+                    lua_pushboolean(state, !filesystem_error && removed);
                 }
                 else {
                     lua_pushboolean(state, false);
@@ -244,14 +282,10 @@ namespace Chimera {
         int args = lua_gettop(state);
         if(args == 1) {
             const char *path = luaL_checkstring(state, 1);
-            if(check_path(state, path)) {
-                auto data_directory = get_script_data_path(state);
-                if(fs::is_regular_file(data_directory / path)) {
-                    lua_pushboolean(state, fs::exists(data_directory / path));
-                }
-                else {
-                    lua_pushboolean(state, false);
-                }
+            fs::path resolved_path;
+            if(resolve_script_path(state, path, resolved_path)) {
+                std::error_code filesystem_error;
+                lua_pushboolean(state, fs::is_regular_file(resolved_path, filesystem_error) && !filesystem_error);
                 return 1;
             }
             else {
@@ -264,6 +298,10 @@ namespace Chimera {
     }
 
     void set_fs_functions(lua_State *state) noexcept {
+        if(!state) {
+            return;
+        }
+
         lua_register(state, "create_directory", lua_create_directory);
         lua_register(state, "remove_directory", lua_remove_directory);
         lua_register(state, "list_directory", lua_list_directory);

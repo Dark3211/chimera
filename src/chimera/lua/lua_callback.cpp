@@ -243,10 +243,10 @@ namespace Chimera {
     int lua_set_callback(lua_State *state) noexcept {
         int args = lua_gettop(state);
 
-        if(args == 1 || args == 2) {
+        if(args >= 1 && args <= 3) {
             const char *callback_name = luaL_checkstring(state,1);
             const char *function_name = "";
-            if(args == 2) {
+            if(args >= 2) {
                 function_name = luaL_checkstring(state,2);
                 if(function_name == nullptr) {
                     function_name = "";

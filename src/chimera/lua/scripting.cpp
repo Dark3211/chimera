@@ -8,31 +8,60 @@
 namespace fs = std::filesystem;
 
 namespace Chimera {
-    static void setup_lua_folder() {
+    static void setup_lua_folder() noexcept {
         auto lua_directory = get_chimera().get_path() / "lua";
 
-        bool update_dir = false;
-        if(!fs::exists(lua_directory / "scripts")) {
-            update_dir = true;
+        std::error_code filesystem_error;
+        bool scripts_directory_exists = fs::exists(lua_directory / "scripts", filesystem_error);
+        bool update_dir = !filesystem_error && !scripts_directory_exists;
+
+        // Create directories without allowing filesystem failures to escape into Halo startup.
+        const fs::path directories[] = {
+            lua_directory / "scripts" / "global",
+            lua_directory / "scripts" / "map",
+            lua_directory / "data" / "global",
+            lua_directory / "data" / "map",
+            lua_directory / "modules"
+        };
+
+        for(const auto &directory : directories) {
+            filesystem_error.clear();
+            fs::create_directories(directory, filesystem_error);
         }
 
-        // Create directories
-        fs::create_directories(lua_directory / "scripts" / "global");
-        fs::create_directories(lua_directory / "scripts" / "map");
-        fs::create_directories(lua_directory / "data" / "global");
-        fs::create_directories(lua_directory / "data" / "map");
-        fs::create_directories(lua_directory / "modules");
-
         if(update_dir) {
-            // Move scripts from old directories
-            auto move_scripts = [](fs::path origin, fs::path destination) {
-                if(fs::exists(origin)) {
-                    for(auto &entry : fs::directory_iterator(origin)) {
-                        fs::rename(entry.path(), destination / entry.path().filename());
+            // Move scripts from old directories. Failed entries are left in place.
+            auto move_scripts = [](const fs::path &origin, const fs::path &destination) noexcept {
+                std::error_code error;
+                if(!fs::is_directory(origin, error) || error) {
+                    return;
+                }
+
+                bool moved_everything = true;
+                fs::directory_iterator iterator(origin, error);
+                fs::directory_iterator end;
+                while(!error && iterator != end) {
+                    auto source = iterator->path();
+                    auto target = destination / source.filename();
+
+                    std::error_code rename_error;
+                    fs::rename(source, target, rename_error);
+                    if(rename_error) {
+                        moved_everything = false;
                     }
-                    fs::remove(origin);
+
+                    iterator.increment(error);
+                }
+
+                if(error) {
+                    moved_everything = false;
+                }
+
+                if(moved_everything) {
+                    fs::remove(origin, error);
                 }
             };
+
             move_scripts(lua_directory / "global", lua_directory / "scripts" / "global");
             move_scripts(lua_directory / "map", lua_directory / "scripts" / "map");
         }
