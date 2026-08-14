@@ -188,50 +188,87 @@ namespace Chimera {
     }
 
     static std::uint32_t calculate_crc32_of_map_file(const LoadedMap *map) noexcept {
+        if(!map) {
+            return 0;
+        }
+
+        const std::size_t map_size = map->decompressed_size;
+        if(map_size < sizeof(MapHeaderDemo)) {
+            return 0;
+        }
+
         std::uint32_t crc = 0;
-        std::uint32_t tag_data_size;
-        std::uint32_t tag_data_offset;
-        std::uint32_t current_offset = 0;
-
+        std::uint32_t tag_data_size = 0;
+        std::uint32_t tag_data_offset = 0;
+        std::size_t current_offset = 0;
         auto *maps_in_ram_region = map->memory_location.value_or(nullptr);
-        std::FILE *f = (maps_in_ram_region != nullptr) ? nullptr : std::fopen(map->path.string().c_str(), "rb");
 
-        auto seek = [&f, &current_offset](std::size_t offset) {
-            if(f) {
-                std::fseek(f, offset, SEEK_SET);
+        std::FILE *raw_file = nullptr;
+        if(maps_in_ram_region == nullptr) {
+            raw_file = std::fopen(map->path.string().c_str(), "rb");
+            if(!raw_file) {
+                return 0;
             }
-            else {
-                current_offset = offset;
+        }
+        struct FileCloser {
+            void operator()(std::FILE *file) const noexcept {
+                if(file) {
+                    std::fclose(file);
+                }
             }
         };
+        std::unique_ptr<std::FILE, FileCloser> file(raw_file);
+        std::FILE *f = file.get();
 
-        auto read = [&f, &current_offset, &maps_in_ram_region](void *where, std::size_t size) {
+        auto seek = [&]() -> bool {
+            if(current_offset > map_size) {
+                return false;
+            }
+            if(f && std::fseek(f, static_cast<long>(current_offset), SEEK_SET) != 0) {
+                return false;
+            }
+            return true;
+        };
+
+        auto read = [&](void *where, std::size_t size) -> bool {
+            if(size > map_size - current_offset) {
+                return false;
+            }
             if(f) {
-                std::fread(where, size, 1, f);
+                if(size != 0 && std::fread(where, size, 1, f) != 1) {
+                    return false;
+                }
             }
             else {
-                std::copy(maps_in_ram_region + current_offset, maps_in_ram_region + size + current_offset, reinterpret_cast<std::byte *>(where));
+                std::memcpy(where, maps_in_ram_region + current_offset, size);
             }
             current_offset += size;
+            return true;
         };
 
         CacheFileEngine engine;
         union {
             MapHeaderDemo demo_header;
             MapHeader fv_header;
-        } header;
-        seek(0);
-        read(&header, sizeof(header));
+        } header = {};
+
+        current_offset = 0;
+        if(!seek() || !read(&header, sizeof(header))) {
+            return 0;
+        }
 
         if(game_engine() == GameEngine::GAME_ENGINE_DEMO && header.demo_header.is_valid()) {
             engine = header.demo_header.engine_type;
             tag_data_size = header.demo_header.tag_data_size;
             tag_data_offset = header.demo_header.tag_data_offset;
         }
-        else {
+        else if(header.fv_header.is_valid()) {
             engine = header.fv_header.engine_type;
             tag_data_size = header.fv_header.tag_data_size;
             tag_data_offset = header.fv_header.tag_data_offset;
+        }
+        else {
+            return 0;
         }
 
         std::uint32_t tag_data_addr;
@@ -244,42 +281,81 @@ namespace Chimera {
                 break;
         }
 
-        // Load tag data
+        if(tag_data_offset > map_size || tag_data_size > map_size - tag_data_offset) {
+            return 0;
+        }
+
         auto tag_data_ptr = std::make_unique<std::byte []>(tag_data_size);
         auto *tag_data = tag_data_ptr.get();
-        seek(tag_data_offset);
-        read(tag_data, tag_data_size);
+        current_offset = tag_data_offset;
+        if(!seek() || !read(tag_data, tag_data_size) || tag_data_size < 8) {
+            return 0;
+        }
 
-        // Get the scenario tag so we can get the BSPs
-        auto *scenario_tag = tag_data + (*reinterpret_cast<std::uint32_t *>(tag_data) - tag_data_addr) + (*reinterpret_cast<std::uint32_t *>(tag_data + 4) & 0xFFFF) * 0x20;
-        auto *scenario_tag_data = tag_data + (*reinterpret_cast<std::uint32_t *>(scenario_tag + 0x14) - tag_data_addr);
+        auto relative_tag_ptr = [tag_data, tag_data_size, tag_data_addr](std::uint32_t virtual_address, std::size_t size) -> std::byte * {
+            if(virtual_address < tag_data_addr) {
+                return nullptr;
+            }
+            const std::size_t offset = static_cast<std::size_t>(virtual_address - tag_data_addr);
+            if(offset > tag_data_size || size > tag_data_size - offset) {
+                return nullptr;
+            }
+            return tag_data + offset;
+        };
 
-        // CRC32 the BSP(s)
-        auto &structure_bsp_count = *reinterpret_cast<std::uint32_t *>(scenario_tag_data + 0x5A4);
-        auto *structure_bsps = tag_data + (*reinterpret_cast<std::uint32_t *>(scenario_tag_data + 0x5A4 + 4) - tag_data_addr);
-        for(std::size_t b=0;b<structure_bsp_count;b++) {
+        const auto tag_virtual_base = *reinterpret_cast<const std::uint32_t *>(tag_data);
+        const auto scenario_index = *reinterpret_cast<const std::uint32_t *>(tag_data + 4) & 0xFFFF;
+        auto *scenario_tag = relative_tag_ptr(tag_virtual_base + scenario_index * 0x20, 0x20);
+        if(!scenario_tag) {
+            return 0;
+        }
+
+        const auto scenario_data_virtual = *reinterpret_cast<const std::uint32_t *>(scenario_tag + 0x14);
+        auto *scenario_tag_data = relative_tag_ptr(scenario_data_virtual, 0x5A4 + 8);
+        if(!scenario_tag_data) {
+            return 0;
+        }
+
+        const auto structure_bsp_count = *reinterpret_cast<const std::uint32_t *>(scenario_tag_data + 0x5A4);
+        const auto structure_bsps_virtual = *reinterpret_cast<const std::uint32_t *>(scenario_tag_data + 0x5A4 + 4);
+        if(structure_bsp_count > tag_data_size / 0x20) {
+            return 0;
+        }
+        auto *structure_bsps = relative_tag_ptr(structure_bsps_virtual, static_cast<std::size_t>(structure_bsp_count) * 0x20);
+        if(!structure_bsps) {
+            return 0;
+        }
+
+        for(std::size_t b = 0; b < structure_bsp_count; b++) {
             auto *bsp = structure_bsps + b * 0x20;
-            auto &bsp_offset = *reinterpret_cast<std::uint32_t *>(bsp);
-            auto &bsp_size = *reinterpret_cast<std::uint32_t *>(bsp + 4);
-
+            const auto bsp_offset = *reinterpret_cast<const std::uint32_t *>(bsp);
+            const auto bsp_size = *reinterpret_cast<const std::uint32_t *>(bsp + 4);
+            if(bsp_offset > map_size || bsp_size > map_size - bsp_offset) {
+                return 0;
+            }
             auto bsp_data = std::make_unique<std::byte []>(bsp_size);
-            seek(bsp_offset);
-            read(bsp_data.get(), bsp_size);
+            current_offset = bsp_offset;
+            if(!seek() || !read(bsp_data.get(), bsp_size)) {
+                return 0;
+            }
             crc = crc32(crc, bsp_data.get(), bsp_size);
         }
 
-        // Next, CRC32 the model data
-        auto &model_vertices_offset = *reinterpret_cast<std::uint32_t *>(tag_data + 0x14);
-        auto &vertices_size = *reinterpret_cast<std::uint32_t *>(tag_data + 0x20);
-
+        if(tag_data_size < 0x24) {
+            return 0;
+        }
+        const auto model_vertices_offset = *reinterpret_cast<const std::uint32_t *>(tag_data + 0x14);
+        const auto vertices_size = *reinterpret_cast<const std::uint32_t *>(tag_data + 0x20);
+        if(model_vertices_offset > map_size || vertices_size > map_size - model_vertices_offset) {
+            return 0;
+        }
         auto model_vertices = std::make_unique<std::byte []>(vertices_size);
-        seek(model_vertices_offset);
-        read(model_vertices.get(), vertices_size);
+        current_offset = model_vertices_offset;
+        if(!seek() || !read(model_vertices.get(), vertices_size)) {
+            return 0;
+        }
         crc = crc32(crc, model_vertices.get(), vertices_size);
-
-        // Lastly, CRC32 the tag data itself
         crc = crc32(crc, tag_data, tag_data_size);
-
         return crc;
     }
 
@@ -357,8 +433,12 @@ namespace Chimera {
             }
 
             // Navigate to this
-            std::fseek(from, offset, SEEK_SET);
-            std::fread(cursor, size, 1, from);
+            if(std::fseek(from, static_cast<long>(offset), SEEK_SET) != 0) {
+                return false;
+            }
+            if(size != 0 && std::fread(cursor, size, 1, from) != 1) {
+                return false;
+            }
 
             // Set asset data
             auto &new_asset = metadata.emplace_back();
@@ -602,8 +682,16 @@ namespace Chimera {
                 for(auto &i : loaded_maps) {
                     if(i.name == "ui" && i.memory_location.has_value()) {
                         auto size = i.loaded_size;
-                        remaining_buffer_size -= size;
-                        buffer_location += size;
+                        if(size > remaining_buffer_size) {
+                            remaining_buffer_size = 0;
+                        }
+                        else {
+                            remaining_buffer_size -= size;
+                            buffer_location += size;
+                        }
+                        if(size > total_buffer_size) {
+                            remaining_buffer_size = 0;
+                        }
                         break;
                     }
                 }
@@ -856,7 +944,15 @@ namespace Chimera {
 
                 switch(result) {
                     case MapDownloader::DownloadStage::DOWNLOAD_STAGE_COMPLETE: {
-                        std::filesystem::rename(download_temp_file, chimera.get_download_map_path() / (map_name_temp + ".map"));
+                        std::error_code rename_error;
+                        std::filesystem::rename(download_temp_file, chimera.get_download_map_path() / (map_name_temp + ".map"), rename_error);
+                        if(rename_error) {
+                            std::error_code cleanup_error;
+                            std::filesystem::remove(download_temp_file, cleanup_error);
+                            show_error_box("Map error", "The downloaded map could not be moved into the maps folder.");
+                            close_server_connection_asm();
+                            break;
+                        }
 
                         add_map_to_map_list(map_name_temp.c_str());
                         resync_map_list();
@@ -1045,10 +1141,10 @@ namespace Chimera {
                 }
 
                 if((f = std::fopen(map_path.string().c_str(), "rb"))) {
-                    std::fseek(f, file_offset, SEEK_SET);
-                    std::fread(output, size, 1, f);
+                    const bool ok = std::fseek(f, static_cast<long>(file_offset), SEEK_SET) == 0 &&
+                                    (size == 0 || std::fread(output, size, 1, f) == 1);
                     std::fclose(f);
-                    return 1;
+                    return ok ? 1 : 0;
                 }
                 else {
                     charmander error[2048];
@@ -1416,7 +1512,9 @@ namespace Chimera {
             } header;
 
             #define read_at(offset, what) \
-                std::fseek(from, offset, SEEK_SET); \
+                if(std::fseek(from, static_cast<long>(offset), SEEK_SET) != 0) { \
+                    return false; \
+                } \
                 if(std::fread(&what, sizeof(what), 1, from) != 1) { \
                     return false; \
                 }
@@ -1449,8 +1547,10 @@ namespace Chimera {
                 // Read the data
                 auto &data = to_what.emplace_back(resource.size);
                 if(!skip_this) {
-                    std::fseek(from, resource.data_offset, SEEK_SET);
-                    if(std::fread(data.data(), resource.size, 1, from) != 1) {
+                    if(std::fseek(from, static_cast<long>(resource.data_offset), SEEK_SET) != 0) {
+                        return false;
+                    }
+                    if(resource.size != 0 && std::fread(data.data(), resource.size, 1, from) != 1) {
                         return false;
                     }
                 }

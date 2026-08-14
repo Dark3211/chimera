@@ -92,10 +92,12 @@ namespace Chimera {
 
     void set_tick_rate(float new_rate) noexcept {
         float *tick_ptr = *reinterpret_cast<float **>(get_chimera().get_signature("tick_rate_sig").data() + 2);
-        DWORD prota, protb;
-        VirtualProtect(tick_ptr, sizeof(tick_ptr), PAGE_READWRITE, &prota);
+        DWORD prota = 0, protb = 0;
+        if(!VirtualProtect(tick_ptr, sizeof(*tick_ptr), PAGE_READWRITE, &prota)) {
+            return;
+        }
         *tick_ptr = new_rate;
-        VirtualProtect(tick_ptr, sizeof(tick_ptr), prota, &protb);
+        VirtualProtect(tick_ptr, sizeof(*tick_ptr), prota, &protb);
     }
 
     float effective_tick_rate() noexcept {

@@ -77,16 +77,21 @@ namespace Chimera {
      * @param length  This is the length of the data.
      */
     template<typename T> inline void overwrite(void *pointer, const T *data, std::size_t length) noexcept {
-        // Instantiate our new_protection and old_protection variables.
-        DWORD new_protection = PAGE_EXECUTE_READWRITE, old_protection;
+        if(pointer == nullptr || data == nullptr || length == 0) {
+            return;
+        }
 
-        // Apply read/write/execute protection
-        VirtualProtect(pointer, length, new_protection, &old_protection);
+        DWORD new_protection = PAGE_EXECUTE_READWRITE, old_protection = 0;
 
-        // Copy
+        // Refuse to write if the target cannot be made writable. This keeps a bad/
+        // missing signature from turning into an access violation.
+        if(!VirtualProtect(pointer, length, new_protection, &old_protection)) {
+            return;
+        }
+
         std::copy(data, data + length, reinterpret_cast<T *>(pointer));
+        FlushInstructionCache(GetCurrentProcess(), pointer, length);
 
-        // Restore the older protection unless it's the same
         if(new_protection != old_protection) {
             VirtualProtect(pointer, length, old_protection, &new_protection);
         }

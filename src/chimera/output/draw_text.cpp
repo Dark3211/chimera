@@ -985,7 +985,8 @@ namespace Chimera {
                 D3DXCreateFontFN = reinterpret_cast<decltype(D3DXCreateFontFN)>(reinterpret_cast<std::uint32_t>(GetProcAddress(d3dx9_43, "D3DXCreateFontA")));
 
                 auto fonts_dir = std::filesystem::path("fonts");
-                if(std::filesystem::is_directory(fonts_dir)) {
+                std::error_code ec;
+                if(std::filesystem::is_directory(fonts_dir, ec) && !ec) {
                     try {
                         for(auto &f : std::filesystem::directory_iterator(fonts_dir)) {
                             if(!f.is_regular_file() || (f.path().extension().string() != ".otf" && f.path().extension().string() != ".ttf" && f.path().extension().string() != ".ttc")) {

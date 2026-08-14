@@ -26,17 +26,20 @@ namespace Chimera {
 
         Bookmark b;
         std::unordered_map<std::string, std::string> query_data;
-        bool timed_out;
-        Error error;
+        bool timed_out = false;
+        Error error = Error::TIMED_OUT;
         std::size_t ping = 0;
 
-        const char *get_data_for_key(const char *key) {
-            for(auto &q : this->query_data) {
+        const char *get_data_for_key(const char *key) const noexcept {
+            if(!key) {
+                return "";
+            }
+            for(const auto &q : this->query_data) {
                 if(q.first == key) {
-                    return q.second.data();
+                    return q.second.c_str();
                 }
             }
-            return nullptr;
+            return "";
         }
     };
 

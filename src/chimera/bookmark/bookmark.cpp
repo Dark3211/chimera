@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+#include <cstdio>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include "bookmark.hpp"
@@ -27,56 +28,86 @@ namespace Chimera {
     }
 
     static std::optional<Bookmark> parse_bookmark(const char *line) {
-        Bookmark b = {};
-        std::size_t line_length = std::strlen(line);
-
-        // Get the address
-        std::size_t i;
-        std::string address;
-        std::size_t address_length = 0;
-        for(i = 0; i < sizeof(b.address) - 1 && i < line_length && line[i] != '\r' && line[i] != '\n' && line[i] != ':' && line[i] != ' '; i++, address_length++);
-        if(address_length < 2) {
+        if(!line) {
             return std::nullopt;
         }
-        else if(line[0] == '[' && line[address_length - 1] == ']') {
-            address = std::string(line + 1, address_length - 1);
+
+        Bookmark b = {};
+        std::string input(line);
+        while(!input.empty() && (input.back() == '\r' || input.back() == '\n')) {
+            input.pop_back();
+        }
+        if(input.empty()) {
+            return std::nullopt;
+        }
+
+        std::size_t address_start = 0;
+        std::size_t address_end = 0;
+        if(input.front() == '[') {
+            const auto close = input.find(']');
+            if(close == std::string::npos || close <= 1) {
+                return std::nullopt;
+            }
             b.brackets = true;
+            address_start = 1;
+            address_end = close;
         }
         else {
-            address = std::string(line, address_length);
+            address_start = 0;
+            const auto colon = input.find(':');
+            const auto space = input.find(' ');
+            address_end = colon == std::string::npos || (space != std::string::npos && space < colon)
+                ? (space == std::string::npos ? input.size() : space)
+                : colon;
         }
-        std::strncpy(b.address, address.data(), sizeof(b.address) - 1);
 
-        // Now the port
-        if(line[i++] == ':') {
-            // Increment port_length until we get to the end
-            std::size_t port_length;
-            for(port_length = 0; i < line_length && line[i] != '\r' && line[i] != '\n' && line[i] != ' '; i++, port_length++);
+        if(address_end <= address_start) {
+            return std::nullopt;
+        }
+        const std::string address = input.substr(address_start, address_end - address_start);
+        if(address.size() < 2 || address.size() >= sizeof(b.address)) {
+            return std::nullopt;
+        }
+        std::snprintf(b.address, sizeof(b.address), "%s", address.c_str());
 
-            // Attempt to convert to port
-            try {
-                b.port = static_cast<std::uint16_t>(std::stoi(std::string(line + address_length + 1, port_length)));
+        std::size_t cursor = b.brackets ? address_end + 1 : address_end;
+        if(cursor < input.size() && input[cursor] == ':') {
+            cursor++;
+            const std::size_t port_begin = cursor;
+            while(cursor < input.size() && input[cursor] != ' ') {
+                if(input[cursor] < '0' || input[cursor] > '9') {
+                    return std::nullopt;
+                }
+                cursor++;
             }
-            catch(std::exception &) {
+            if(cursor == port_begin) {
+                return std::nullopt;
+            }
+            try {
+                const unsigned long port = std::stoul(input.substr(port_begin, cursor - port_begin));
+                if(port == 0 || port > 65535UL) {
+                    return std::nullopt;
+                }
+                b.port = static_cast<std::uint16_t>(port);
+            }
+            catch(const std::exception &) {
                 return std::nullopt;
             }
         }
-
-        // Default to 2302 otherwise
         else {
             b.port = 2302;
-            i--;
         }
 
-        // Lastly, the password (if present)
-        if(line[i++] == ' ') {
-            std::size_t s;
-            for(s = 0; s < sizeof(b.password) - 1 && i < line_length && line[i] != '\r' && line[i] != '\n'; i++, s++) {
-                b.password[s] = line[i];
+        while(cursor < input.size() && input[cursor] == ' ') {
+            cursor++;
+        }
+        if(cursor < input.size()) {
+            const auto password = input.substr(cursor);
+            if(password.size() >= sizeof(b.password)) {
+                return std::nullopt;
             }
-            b.password[s] = 0;
+            std::snprintf(b.password, sizeof(b.password), "%s", password.c_str());
         }
-
         return b;
     }
 
@@ -86,7 +117,7 @@ namespace Chimera {
         Bookmark x = {};
         std::snprintf(x.address, sizeof(x.address), "%i.%i.%i.%i", ip_chars[3], ip_chars[2], ip_chars[1], ip_chars[0]);
         x.port = port;
-        std::snprintf(x.password, sizeof(x.password), "%s", password);
+        std::snprintf(x.password, sizeof(x.password), "%s", password ? password : "");
 
         // See if it's already in the history. If so, remove it
         auto history = load_bookmarks_file("history.txt");
@@ -162,48 +193,58 @@ namespace Chimera {
     static std::mutex querying;
 
     QueryPacketDone query_server(const Bookmark &what) {
-        QueryPacketDone finished_packet;
+        QueryPacketDone finished_packet{};
         finished_packet.b = what;
-        struct addrinfo *address;
+        finished_packet.error = QueryPacketDone::Error::TIMED_OUT;
 
-        // Lookup it
         char port[6] = {};
         std::snprintf(port, sizeof(port), "%u", what.port);
-        int q = getaddrinfo(what.address, port, nullptr, &address);
-        if(q != 0) {
+
+        addrinfo hints = {};
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_DGRAM;
+        hints.ai_protocol = IPPROTO_UDP;
+        addrinfo *addresses = nullptr;
+        if(getaddrinfo(what.address, port, &hints, &addresses) != 0) {
             finished_packet.error = QueryPacketDone::Error::FAILED_TO_RESOLVE;
             return finished_packet;
         }
-        auto family = address->ai_family;
-        if(family != AF_INET && family != AF_INET6) {
-            freeaddrinfo(address);
-            finished_packet.error = QueryPacketDone::Error::FAILED_TO_RESOLVE;
-            return finished_packet;
-        }
 
-        // Do the thing
-        struct sockaddr_storage saddr = {};
-        std::size_t saddr_size = address->ai_addrlen;
-
-        // Free it all
-        std::memcpy(&saddr, address->ai_addr, saddr_size);
-        freeaddrinfo(address);
-
-        // Do socket things
-        SOCKET s = socket(family, SOCK_DGRAM, IPPROTO_UDP);
-        DWORD opt = 700;
-        setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char *>(&opt), sizeof(opt));
         static constexpr char PACKET_QUERY[] = "\\query";
-        q = sendto(s, PACKET_QUERY, sizeof(PACKET_QUERY) - 1, 0, reinterpret_cast<sockaddr *>(&saddr), saddr_size);
+        for(addrinfo *address = addresses; address; address = address->ai_next) {
+            if((address->ai_family != AF_INET && address->ai_family != AF_INET6) || address->ai_addrlen > sizeof(sockaddr_storage)) {
+                continue;
+            }
 
-        // Receive things
-        char data[4096] = {};
-        struct sockaddr_storage dev_null;
-        socklen_t l = saddr_size;
-        auto start = std::chrono::steady_clock::now();
-        auto data_received = recvfrom(s, data, sizeof(data) - 2, 0, reinterpret_cast<struct sockaddr *>(&dev_null), &l);
-        auto end = std::chrono::steady_clock::now();
-        if(data_received != SOCKET_ERROR) {
+            SOCKET s = socket(address->ai_family, SOCK_DGRAM, IPPROTO_UDP);
+            if(s == INVALID_SOCKET) {
+                continue;
+            }
+
+            DWORD timeout_ms = 700;
+            if(setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char *>(&timeout_ms), sizeof(timeout_ms)) == SOCKET_ERROR) {
+                closesocket(s);
+                continue;
+            }
+
+            if(sendto(s, PACKET_QUERY, sizeof(PACKET_QUERY) - 1, 0, address->ai_addr, static_cast<int>(address->ai_addrlen)) == SOCKET_ERROR) {
+                closesocket(s);
+                continue;
+            }
+
+            char data[4096] = {};
+            sockaddr_storage response_address = {};
+            int response_length = sizeof(response_address);
+            const auto start = std::chrono::steady_clock::now();
+            const int received = recvfrom(s, data, static_cast<int>(sizeof(data) - 1), 0, reinterpret_cast<sockaddr *>(&response_address), &response_length);
+            const auto end = std::chrono::steady_clock::now();
+            closesocket(s);
+
+            if(received <= 1 || received == SOCKET_ERROR) {
+                continue;
+            }
+
+            data[received] = 0;
             finished_packet.ping = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
             std::pair<std::string, std::string> kv;
             bool key = true;
@@ -216,22 +257,16 @@ namespace Chimera {
                 }
                 if(*c == '\\') {
                     if(key) {
-                        kv.first = std::string(str_start, c - str_start);
+                        kv.first.assign(str_start, c - str_start);
                     }
                     else {
-                        // Strip invalid/whitespace characters from the start. If the string is all invalid, don't strip the last character.
                         for(char *k = str_start; k + 1 < c && *k <= 0x20; k++, str_start++);
-
-                        // And here we go!
-                        kv.second = std::string(str_start, c - str_start);
-
-                        // Next, replace any unknown characters with '?'
-                        for(char &c : kv.second) {
-                            if(c < 0x20) {
-                                c = '?';
+                        kv.second.assign(str_start, c - str_start);
+                        for(char &value : kv.second) {
+                            if(static_cast<unsigned char>(value) < 0x20) {
+                                value = '?';
                             }
                         }
-
                         finished_packet.query_data.insert_or_assign(kv.first, kv.second);
                         kv = {};
                     }
@@ -242,15 +277,11 @@ namespace Chimera {
                     break;
                 }
             }
-
-            // = std::vector<char>(data, data + data_received);
             finished_packet.error = QueryPacketDone::Error::NONE;
+            break;
         }
-        else {
-            finished_packet.error = QueryPacketDone::Error::TIMED_OUT;
-        }
-        closesocket(s);
 
+        freeaddrinfo(addresses);
         return finished_packet;
     }
 
@@ -397,6 +428,7 @@ namespace Chimera {
             auto &bookmark = bookmarks[b];
             if(std::strcmp(bookmark.address, new_bookmark.address) == 0 && bookmark.port == new_bookmark.port) {
                 bookmark = new_bookmark;
+                save_bookmarks_file("bookmark.txt", bookmarks);
                 console_output(localize("chimera_bookmark_add_success"), bookmark.brackets ? "[" : "", bookmark.address, bookmark.brackets ? "]" : "", bookmark.port, b);
                 return true;
             }
@@ -463,8 +495,27 @@ namespace Chimera {
     }
 
     static void join_bookmark(const Bookmark &bookmark) {
+        char escaped_password[sizeof(bookmark.password) * 2] = {};
+        std::size_t escaped_length = 0;
+        for(char c : bookmark.password) {
+            if(!c) {
+                break;
+            }
+            if(c == '\\' || c == '"') {
+                if(escaped_length + 1 >= sizeof(escaped_password)) {
+                    return;
+                }
+                escaped_password[escaped_length++] = '\\';
+            }
+            if(escaped_length + 1 >= sizeof(escaped_password)) {
+                return;
+            }
+            escaped_password[escaped_length++] = c;
+        }
+        escaped_password[escaped_length] = 0;
+
         char connect_command[256];
-        std::snprintf(connect_command, sizeof(connect_command), "connect %s%s%s:%u \"%s\"", bookmark.brackets ? "[" : "", bookmark.address, bookmark.brackets ? "]" : "", bookmark.port, bookmark.password);
+        std::snprintf(connect_command, sizeof(connect_command), "connect \"%s%s%s:%u\" \"%s\"", bookmark.brackets ? "[" : "", bookmark.address, bookmark.brackets ? "]" : "", bookmark.port, escaped_password);
         execute_script(connect_command);
     }
 

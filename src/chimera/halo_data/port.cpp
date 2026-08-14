@@ -30,13 +30,13 @@ namespace Chimera {
         static constexpr SigByte NOP_CODE[] = {0x90, 0x90, 0x90, 0x90, 0x90, 0x90};
 
         auto client_port_setting = get_chimera().get_ini()->get_value_long("halo.client_port");
-        if(client_port_setting.has_value()) {
+        if(client_port_setting.has_value() && *client_port_setting >= 0 && *client_port_setting <= 65535) {
             get_client_port_a() = static_cast<std::uint16_t>(*client_port_setting);
             write_code_s(set_port_sig + 6, NOP_CODE);
         }
 
         auto server_port_setting = get_chimera().get_ini()->get_value_long("halo.server_port");
-        if(server_port_setting.has_value()) {
+        if(server_port_setting.has_value() && *server_port_setting >= 1 && *server_port_setting <= 65535) {
             get_server_port_a() = static_cast<std::uint16_t>(*server_port_setting);
             write_code_s(set_port_sig, NOP_CODE);
         }

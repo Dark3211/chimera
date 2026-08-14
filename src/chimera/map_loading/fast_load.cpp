@@ -31,7 +31,8 @@ extern "C" {
 namespace Chimera {
     std::filesystem::path MapEntry::get_file_path() {
         auto p1 = get_chimera().get_map_path() / (this->name + ".map");
-        if(std::filesystem::exists(p1)) {
+        std::error_code ec;
+        if(std::filesystem::exists(p1, ec) && !ec) {
             return p1;
         }
         else {
@@ -261,7 +262,8 @@ namespace Chimera {
         map.multiplayer = true;
 
         // Make sure it exists first.
-        if(!std::filesystem::exists(map.get_file_path())) {
+        std::error_code ec;
+        if(!std::filesystem::exists(map.get_file_path(), ec) || ec) {
             return nullptr;
         }
 
@@ -337,7 +339,9 @@ namespace Chimera {
                 "custom_loc"
             };
 
-            for(auto &map : std::filesystem::directory_iterator(directory)) {
+            std::error_code ec;
+            for(std::filesystem::directory_iterator iterator(directory, ec), end; iterator != end && !ec; iterator.increment(ec)) {
+                auto &map = *iterator;
                 if(map.is_regular_file()) {
                     auto &path = map.path();
 

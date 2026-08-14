@@ -594,8 +594,10 @@ namespace Chimera {
     const std::filesystem::path Chimera::get_path() noexcept {
         if(this->p_path.empty()) {
             this->p_path = std::filesystem::path(halo_path()) / "chimera";
-            std::filesystem::create_directory(this->p_path);
-            std::filesystem::create_directory(this->p_path / "tmp");
+            std::error_code ec;
+            std::filesystem::create_directories(this->p_path, ec);
+            ec.clear();
+            std::filesystem::create_directories(this->p_path / "tmp", ec);
         }
         return this->p_path;
     }
@@ -609,7 +611,8 @@ namespace Chimera {
             else {
                 this->p_download_map_path = this->get_path() / "maps";
             }
-            std::filesystem::create_directory(this->p_download_map_path);
+            std::error_code ec;
+            std::filesystem::create_directories(this->p_download_map_path, ec);
         }
         return this->p_download_map_path;
     }
@@ -623,7 +626,8 @@ namespace Chimera {
             else {
                 this->p_map_path = std::filesystem::path("maps");
             }
-            std::filesystem::create_directory(this->p_map_path);
+            std::error_code ec;
+            std::filesystem::create_directories(this->p_map_path, ec);
         }
         return this->p_map_path;
     }

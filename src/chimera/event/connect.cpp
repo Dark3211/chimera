@@ -37,7 +37,9 @@ namespace Chimera {
 
     extern "C" bool on_preconnect(std::uint32_t &ip, std::uint16_t &port, char16_t *password) {
         char password_char8[9] = {};
-        std::copy(password, password + sizeof(password_char8) - 1, password_char8);
+        if(password) {
+            std::copy(password, password + sizeof(password_char8) - 1, password_char8);
+        }
         bool allow = true;
         call_in_order_allow(preconnect_events, allow, ip, port, password_char8);
         return allow;
