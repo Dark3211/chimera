@@ -32,7 +32,7 @@ namespace Chimera {
     std::filesystem::path MapEntry::get_file_path() {
         auto p1 = get_chimera().get_map_path() / (this->name + ".map");
         std::error_code ec;
-        if(std::filesystem::exists(p1, ec) && !ec) {
+        if(std::filesystem::is_regular_file(p1, ec) && !ec) {
             return p1;
         }
         else {
@@ -42,6 +42,7 @@ namespace Chimera {
 
     static bool same_string_case_insensitive(const char *a, const char *b) {
         if(a == b) return true;
+        if(!a || !b) return false;
         auto &c_locale = std::locale::classic();
         while(std::tolower(*a, c_locale) == std::tolower(*b, c_locale)) {
             if(*a == 0) return true;
@@ -52,6 +53,9 @@ namespace Chimera {
     }
 
     std::optional<std::uint32_t> crc32_for_stock_map(const char *stock_map) noexcept {
+        if(!stock_map) {
+            return std::nullopt;
+        }
         if(std::strcmp(stock_map, "beavercreek") == 0) {
             return 0x07B3876A;
         }
@@ -114,13 +118,22 @@ namespace Chimera {
 
     extern "C" void on_get_crc32_custom_edition_loading() noexcept {
         static char *loading_map = *reinterpret_cast<char **>(get_chimera().get_signature("loading_map_sig").data() + 1);
+        if(!loading_map || !*loading_map) {
+            return;
+        }
         load_map(loading_map);
         auto *entry = get_map_entry(loading_map);
+        if(!entry || !entry->crc32.has_value()) {
+            return;
+        }
         auto &map_list = get_map_list();
+        if(!map_list.map_list) {
+            return;
+        }
         auto *indices = reinterpret_cast<MapIndexCustomEdition *>(map_list.map_list);
         for(std::size_t i=0; i<map_list.map_count; i++) {
-            if(entry->name == indices[i].file_name) {
-                indices[i].crc32 = entry->crc32.value();
+            if(indices[i].file_name && entry->name == indices[i].file_name) {
+                indices[i].crc32 = *entry->crc32;
                 break;
             }
         }
@@ -227,6 +240,9 @@ namespace Chimera {
     }
 
     MapEntry *get_map_entry(const char *map_name) {
+        if(!map_name) {
+            return nullptr;
+        }
         for(auto &map : all_maps) {
             if(same_string_case_insensitive(map_name, map.name.c_str())) {
                 return &map;
@@ -263,7 +279,7 @@ namespace Chimera {
 
         // Make sure it exists first.
         std::error_code ec;
-        if(!std::filesystem::exists(map.get_file_path(), ec) || ec) {
+        if(!std::filesystem::is_regular_file(map.get_file_path(), ec) || ec) {
             return nullptr;
         }
 
@@ -342,7 +358,8 @@ namespace Chimera {
             std::error_code ec;
             for(std::filesystem::directory_iterator iterator(directory, ec), end; iterator != end && !ec; iterator.increment(ec)) {
                 auto &map = *iterator;
-                if(map.is_regular_file()) {
+                std::error_code status_error;
+                if(map.is_regular_file(status_error) && !status_error) {
                     auto &path = map.path();
 
                     // Get extension

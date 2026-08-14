@@ -6,6 +6,11 @@
 #include <deque>
 #include <cstring>
 #include <memory>
+#include <algorithm>
+#include <array>
+#include <climits>
+#include <limits>
+#include <new>
 
 #include "map_loading.hpp"
 #include "compression.hpp"
@@ -131,23 +136,34 @@ namespace Chimera {
     }
 
     bool map_name_is_valid(const char *map) noexcept {
-        char map_test[32] = {};
-        std::strncpy(map_test, map, sizeof(map_test) - 1);
-        for(auto &i : map_test) {
-            auto t = static_cast<unsigned char>(i);
-            if(t > 127 || (t < 32 && t != 0)) {
+        if(!map) {
+            return false;
+        }
+
+        for(std::size_t i = 0; i < 32; i++) {
+            auto t = static_cast<unsigned char>(map[i]);
+            if(t == 0) {
+                return i != 0;
+            }
+            if(t > 127 || t < 32) {
                 return false;
             }
-            else if(t == 0x3A || t == 0x3C || t == 0x3E || t == 0x3F || t == 0x2A || t == 0x2F || t == 0x5C || t == 0x7C || t == 0x22) {
+            if(t == 0x3A || t == 0x3C || t == 0x3E || t == 0x3F || t == 0x2A || t == 0x2F || t == 0x5C || t == 0x7C || t == 0x22) {
                 return false;
             }
         }
-        return true;
+
+        // Halo map names are stored in a 32-byte field and must be NUL-terminated.
+        return false;
     }
 
     LoadedMap *get_loaded_map(const charmander *name) noexcept {
+        if(!map_name_is_valid(name)) {
+            return nullptr;
+        }
+
         // Make a lowercase version
-        charmander map_name_lowercase[32];
+        charmander map_name_lowercase[32] = {};
         std::strncpy(map_name_lowercase, name, sizeof(map_name_lowercase) - 1);
         auto &c_locale = std::locale::classic();
         for(auto &i : map_name_lowercase) {
@@ -205,7 +221,14 @@ namespace Chimera {
 
         std::FILE *raw_file = nullptr;
         if(maps_in_ram_region == nullptr) {
-            raw_file = std::fopen(map->path.string().c_str(), "rb");
+            std::string map_path_string;
+            try {
+                map_path_string = map->path.string();
+            }
+            catch(...) {
+                return 0;
+            }
+            raw_file = std::fopen(map_path_string.c_str(), "rb");
             if(!raw_file) {
                 return 0;
             }
@@ -221,7 +244,7 @@ namespace Chimera {
         std::FILE *f = file.get();
 
         auto seek = [&]() -> bool {
-            if(current_offset > map_size) {
+            if(current_offset > map_size || (f && current_offset > static_cast<std::size_t>(LONG_MAX))) {
                 return false;
             }
             if(f && std::fseek(f, static_cast<long>(current_offset), SEEK_SET) != 0) {
@@ -231,7 +254,7 @@ namespace Chimera {
         };
 
         auto read = [&](void *where, std::size_t size) -> bool {
-            if(size > map_size - current_offset) {
+            if(current_offset > map_size || size > map_size - current_offset) {
                 return false;
             }
             if(f) {
@@ -281,14 +304,17 @@ namespace Chimera {
                 break;
         }
 
-        if(tag_data_offset > map_size || tag_data_size > map_size - tag_data_offset) {
+        if(tag_data_size < 8 || tag_data_offset > map_size || tag_data_size > map_size - tag_data_offset) {
             return 0;
         }
 
-        auto tag_data_ptr = std::make_unique<std::byte []>(tag_data_size);
+        std::unique_ptr<std::byte []> tag_data_ptr(new(std::nothrow) std::byte[tag_data_size]);
+        if(!tag_data_ptr) {
+            return 0;
+        }
         auto *tag_data = tag_data_ptr.get();
         current_offset = tag_data_offset;
-        if(!seek() || !read(tag_data, tag_data_size) || tag_data_size < 8) {
+        if(!seek() || !read(tag_data, tag_data_size)) {
             return 0;
         }
 
@@ -303,9 +329,33 @@ namespace Chimera {
             return tag_data + offset;
         };
 
+        std::array<std::byte, 64 * 1024> crc_buffer;
+        auto crc_range = [&](std::size_t offset, std::size_t size) -> bool {
+            if(offset > map_size || size > map_size - offset) {
+                return false;
+            }
+            current_offset = offset;
+            if(!seek()) {
+                return false;
+            }
+            while(size != 0) {
+                const std::size_t chunk = std::min(size, crc_buffer.size());
+                if(!read(crc_buffer.data(), chunk)) {
+                    return false;
+                }
+                crc = crc32(crc, crc_buffer.data(), chunk);
+                size -= chunk;
+            }
+            return true;
+        };
+
         const auto tag_virtual_base = *reinterpret_cast<const std::uint32_t *>(tag_data);
         const auto scenario_index = *reinterpret_cast<const std::uint32_t *>(tag_data + 4) & 0xFFFF;
-        auto *scenario_tag = relative_tag_ptr(tag_virtual_base + scenario_index * 0x20, 0x20);
+        const auto scenario_tag_offset = scenario_index * 0x20U;
+        if(tag_virtual_base > 0xFFFFFFFFU - scenario_tag_offset) {
+            return 0;
+        }
+        auto *scenario_tag = relative_tag_ptr(tag_virtual_base + scenario_tag_offset, 0x20);
         if(!scenario_tag) {
             return 0;
         }
@@ -330,15 +380,9 @@ namespace Chimera {
             auto *bsp = structure_bsps + b * 0x20;
             const auto bsp_offset = *reinterpret_cast<const std::uint32_t *>(bsp);
             const auto bsp_size = *reinterpret_cast<const std::uint32_t *>(bsp + 4);
-            if(bsp_offset > map_size || bsp_size > map_size - bsp_offset) {
+            if(!crc_range(bsp_offset, bsp_size)) {
                 return 0;
             }
-            auto bsp_data = std::make_unique<std::byte []>(bsp_size);
-            current_offset = bsp_offset;
-            if(!seek() || !read(bsp_data.get(), bsp_size)) {
-                return 0;
-            }
-            crc = crc32(crc, bsp_data.get(), bsp_size);
         }
 
         if(tag_data_size < 0x24) {
@@ -346,15 +390,9 @@ namespace Chimera {
         }
         const auto model_vertices_offset = *reinterpret_cast<const std::uint32_t *>(tag_data + 0x14);
         const auto vertices_size = *reinterpret_cast<const std::uint32_t *>(tag_data + 0x20);
-        if(model_vertices_offset > map_size || vertices_size > map_size - model_vertices_offset) {
+        if(!crc_range(model_vertices_offset, vertices_size)) {
             return 0;
         }
-        auto model_vertices = std::make_unique<std::byte []>(vertices_size);
-        current_offset = model_vertices_offset;
-        if(!seek() || !read(model_vertices.get(), vertices_size)) {
-            return 0;
-        }
-        crc = crc32(crc, model_vertices.get(), vertices_size);
         crc = crc32(crc, tag_data, tag_data_size);
         return crc;
     }
@@ -370,7 +408,7 @@ namespace Chimera {
 
     static void preload_assets(LoadedMap &map) {
         // If we can't, don't
-        if(!map.memory_location.has_value()) {
+        if(!map.memory_location.has_value() || map.loaded_size > map.buffer_size) {
             return;
         }
 
@@ -427,13 +465,13 @@ namespace Chimera {
             }
 
             // Let's think about this. Make sure it isn't too big
-            std::byte *new_cursor = cursor + size;
-            if(new_cursor < cursor || new_cursor > end) {
+            if(!from || cursor > end || size > static_cast<std::size_t>(end - cursor)) {
                 return false;
             }
+            std::byte *new_cursor = cursor + size;
 
             // Navigate to this
-            if(std::fseek(from, static_cast<long>(offset), SEEK_SET) != 0) {
+            if(static_cast<std::uint64_t>(offset) > static_cast<std::uint64_t>(LONG_MAX) || std::fseek(from, static_cast<long>(offset), SEEK_SET) != 0) {
                 return false;
             }
             if(size != 0 && std::fread(cursor, size, 1, from) != 1) {
@@ -537,7 +575,6 @@ namespace Chimera {
         done_preloading_assets:
 
         map.loaded_size = (cursor - *map.memory_location);
-        map.buffer_size = end - cursor;
         if(bitmaps) {
             std::fclose(bitmaps);
         }
@@ -550,6 +587,11 @@ namespace Chimera {
 
     // Load the map
     LoadedMap *load_map(const charmander *map_name) {
+        if(!map_name_is_valid(map_name)) {
+            show_error_box("Map error", "Map name is invalid.");
+            std::exit(EXIT_FAILURE);
+        }
+
         // Lowercase it
         charmander map_name_lowercase[32] = {};
         std::strncpy(map_name_lowercase, map_name, sizeof(map_name_lowercase) - 1);
@@ -598,7 +640,14 @@ namespace Chimera {
         }
 
         // Add our map to the list
-        std::size_t size = std::filesystem::file_size(map_path);
+        const auto file_size_raw = std::filesystem::file_size(map_path, ec);
+        if(ec || file_size_raw > std::numeric_limits<std::size_t>::max()) {
+            charmander error_message[256];
+            std::snprintf(error_message, sizeof(error_message), "Unable to determine the size of %s.map.\n\nMake sure the map exists in your maps folder and try again.", map_name);
+            show_error_box("Map error", error_message);
+            std::exit(EXIT_FAILURE);
+        }
+        std::size_t size = static_cast<std::size_t>(file_size_raw);
         LoadedMap new_map;
         new_map.name = map_name_lowercase;
         new_map.timestamp = timestamp;
@@ -712,8 +761,7 @@ namespace Chimera {
                     new_map.decompressed_size = actual_size;
                 }
                 else {
-                    std::fseek(f, 0, SEEK_SET);
-                    if(std::fread(buffer_location, size, 1, f) != 1) {
+                    if(std::fseek(f, 0, SEEK_SET) != 0 || (size != 0 && std::fread(buffer_location, size, 1, f) != 1)) {
                         invalid("Failed to read map");
                     }
                 }
@@ -876,7 +924,8 @@ namespace Chimera {
                 std::snprintf(progress_buffer, sizeof(progress_buffer), "/ %.02f MiB", dltotal / 1024.0F / 1024.0F);
                 apply_text(std::string(progress_buffer), x + 200, y, 150, height, color, download_font, FontAlignment::ALIGN_LEFT, TextAnchor::ANCHOR_CENTER);
 
-                std::snprintf(progress_buffer, sizeof(progress_buffer), "%0.02f %%", 100.0F * dlnow / dltotal);
+                const float percent = dltotal == 0 ? 0.0F : 100.0F * dlnow / dltotal;
+                std::snprintf(progress_buffer, sizeof(progress_buffer), "%0.02f %%", percent);
                 apply_text(std::string(progress_buffer), x + 350, y, 100, height, color, download_font, FontAlignment::ALIGN_RIGHT, TextAnchor::ANCHOR_CENTER);
 
                 charmander download_speed_buffer[64];
@@ -1058,16 +1107,23 @@ namespace Chimera {
     }
 
     extern "C" int on_read_map_file_data(HANDLE file_descriptor, std::byte *output, std::size_t size, LPOVERLAPPED overlapped) {
+        if(!overlapped || (size != 0 && !output)) {
+            return 0;
+        }
         std::size_t file_offset = overlapped->Offset;
 
         // Get the name
         charmander file_path_chars[MAX_PATH + 1] = {};
+        DWORD path_length = 0;
         #ifdef CHIMERA_WINXP
-        GetFinalPathNameByHandleA_fn
+        path_length = GetFinalPathNameByHandleA_fn
         #else
-        GetFinalPathNameByHandle
+        path_length = GetFinalPathNameByHandle
         #endif
         (file_descriptor, file_path_chars, sizeof(file_path_chars) - 1, VOLUME_NAME_NONE);
+        if(path_length == 0 || path_length >= sizeof(file_path_chars)) {
+            return 0;
+        }
         auto file_path = std::filesystem::path(file_path_chars);
 
         // If it's not a .map file, forget about it
@@ -1114,8 +1170,10 @@ namespace Chimera {
 
             // Copy it in?
             for(auto &md : metadata) {
-                if(md.origin == origin && file_offset == md.offset && size <= md.size) {
-                    std::memcpy(output, md.data, size);
+                if(md.origin == origin && file_offset == md.offset && size <= md.size && (size == 0 || md.data)) {
+                    if(size != 0) {
+                        std::memcpy(output, md.data, size);
+                    }
                     return 1;
                 }
             }
@@ -1141,7 +1199,9 @@ namespace Chimera {
                 }
 
                 if((f = std::fopen(map_path.string().c_str(), "rb"))) {
-                    const bool ok = std::fseek(f, static_cast<long>(file_offset), SEEK_SET) == 0 &&
+                    const bool offset_valid = file_offset <= static_cast<std::size_t>(LONG_MAX);
+                    const bool ok = offset_valid &&
+                                    std::fseek(f, static_cast<long>(file_offset), SEEK_SET) == 0 &&
                                     (size == 0 || std::fread(output, size, 1, f) == 1);
                     std::fclose(f);
                     return ok ? 1 : 0;
@@ -1186,7 +1246,12 @@ namespace Chimera {
             // Load the map if it's not loaded
             auto *map = load_map(file_name_cstr);
             if(map && map->memory_location.has_value()) {
-                std::memcpy(output, *map->memory_location + file_offset, size);
+                if(file_offset > map->decompressed_size || size > map->decompressed_size - file_offset) {
+                    return 0;
+                }
+                if(size != 0) {
+                    std::memcpy(output, *map->memory_location + file_offset, size);
+                }
                 return 1;
             }
         }
@@ -1463,7 +1528,9 @@ namespace Chimera {
         }
 
         // Preload it all
-        preload_assets(*get_loaded_map(get_map_name()));
+        if(auto *loaded_map = get_loaded_map(get_map_name())) {
+            preload_assets(*loaded_map);
+        }
     }
 
     static bool set_up_custom_edition_map_support() {
@@ -1688,9 +1755,21 @@ namespace Chimera {
 
         // Read MiB
         auto read_mib = [](const charmander *what, std::size_t default_value) -> std::size_t {
-            return get_chimera().get_ini()->get_value_size(what).value_or(default_value) * 1024 * 1024;
+            constexpr std::size_t MIB = 1024 * 1024;
+            const auto value = get_chimera().get_ini()->get_value_size(what).value_or(default_value);
+            if(value > std::numeric_limits<std::size_t>::max() / MIB) {
+                show_error_box("Map error", "Map memory setting is too large.");
+                std::exit(EXIT_FAILURE);
+            }
+            return static_cast<std::size_t>(value) * MIB;
         };
-        max_temp_files = read_mib("memory.max_tmp_files", 3);
+
+        const auto max_temp_files_value = get_chimera().get_ini()->get_value_size("memory.max_tmp_files").value_or(3);
+        if(max_temp_files_value > std::numeric_limits<std::size_t>::max()) {
+            show_error_box("Map error", "memory.max_tmp_files is too large.");
+            std::exit(EXIT_FAILURE);
+        }
+        max_temp_files = static_cast<std::size_t>(max_temp_files_value);
 
         if(do_maps_in_ram && current_exe_is_laa_patched()) {
             total_buffer_size = read_mib("memory.map_size", 1024);

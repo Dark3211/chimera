@@ -6,12 +6,14 @@
 #include <cstring>
 #include <zstd.h>
 #include <memory>
+#include <algorithm>
+#include <limits>
 
 #include "../halo_data/map.hpp"
 #include "compression.hpp"
 
 namespace Chimera {
-    template<typename T> static bool decompress_header(const std::byte *header_input, std::byte *header_output) {
+    template<typename T> static bool decompress_header(const std::byte *header_input, std::byte *header_output, std::size_t &decompressed_size) {
         // Check to see if we can't even fit the header
         auto header_copy = *reinterpret_cast<const T *>(header_input);
         if(!header_copy.is_valid()) {
@@ -46,6 +48,7 @@ namespace Chimera {
         if(invader_compression && header_copy.file_size < sizeof(header_copy)) {
             throw std::exception();
         }
+        decompressed_size = static_cast<std::size_t>(header_copy.file_size);
 
         // Set the file size to either the original decompressed size or 0 (if needed) and the engine to the new thing
         header_copy.file_size = stores_uncompressed_size ? header_copy.file_size : 0;
@@ -89,13 +92,22 @@ namespace Chimera {
          * @param path path to the map file
          */
         void decompress_map_file(const char *input, void *user_data) {
+            if(!input || !*input || !write_callback) {
+                throw std::exception();
+            }
+
             std::FILE *input_file = std::fopen(input, "rb");
             if(!input_file) {
                 throw std::exception();
             }
 
             try {
-                const std::size_t total_size = std::filesystem::file_size(input);
+                std::error_code size_error;
+                const auto total_size_raw = std::filesystem::file_size(input, size_error);
+                if(size_error || total_size_raw > std::numeric_limits<std::size_t>::max()) {
+                    throw std::exception();
+                }
+                const std::size_t total_size = static_cast<std::size_t>(total_size_raw);
                 if(total_size < HEADER_SIZE) {
                     throw std::exception();
                 }
@@ -106,15 +118,27 @@ namespace Chimera {
                 }
 
                 std::byte header_output[HEADER_SIZE];
-                if(!decompress_header<MapHeader>(reinterpret_cast<std::byte *>(&header_input), header_output)) {
-                    if(!decompress_header<MapHeaderDemo>(reinterpret_cast<std::byte *>(&header_input), header_output)) {
+                std::size_t expected_output_size = 0;
+                if(!decompress_header<MapHeader>(reinterpret_cast<std::byte *>(&header_input), header_output, expected_output_size)) {
+                    if(!decompress_header<MapHeaderDemo>(reinterpret_cast<std::byte *>(&header_input), header_output, expected_output_size)) {
                         throw std::exception();
                     }
                 }
-
-                if(!write_callback(header_output, sizeof(header_output), user_data)) {
+                if(expected_output_size < HEADER_SIZE) {
                     throw std::exception();
                 }
+
+                std::size_t total_output_written = 0;
+                auto write_output = [&](const std::byte *data, std::size_t size) {
+                    if(total_output_written > expected_output_size || size > expected_output_size - total_output_written) {
+                        throw std::exception();
+                    }
+                    if(size != 0 && !write_callback(data, size, user_data)) {
+                        throw std::exception();
+                    }
+                    total_output_written += size;
+                };
+                write_output(header_output, sizeof(header_output));
 
                 ZSTD_DStream *raw_stream = ZSTD_createDStream();
                 if(!raw_stream) {
@@ -155,8 +179,8 @@ namespace Chimera {
                     }
                     input_pos = input_buffer.pos;
 
-                    if(output_buffer.pos != 0 && !write_callback(reinterpret_cast<const std::byte *>(output_buffer.dst), output_buffer.pos, user_data)) {
-                                                throw std::exception();
+                    if(output_buffer.pos != 0) {
+                        write_output(reinterpret_cast<const std::byte *>(output_buffer.dst), output_buffer.pos);
                     }
 
                     if(q == 0) {
@@ -171,7 +195,7 @@ namespace Chimera {
                     }
                 }
 
-                                if(total_read != total_size || !stream_finished) {
+                if(total_read != total_size || !stream_finished || total_output_written != expected_output_size) {
                     throw std::exception();
                 }
             }
@@ -185,6 +209,10 @@ namespace Chimera {
     };
 
     std::size_t decompress_map_file(const char *input, const char *output) {
+        if(!input || !*input || !output || !*output) {
+            throw std::exception();
+        }
+
         struct OutputWriter {
             std::FILE *output_file;
             std::size_t output_position = 0;
@@ -207,7 +235,7 @@ namespace Chimera {
         try {
             decomp.decompress_map_file(input, &output_writer);
         }
-        catch(const std::exception &) {
+        catch(...) {
             std::fclose(output_writer.output_file);
             throw;
         }
@@ -217,6 +245,10 @@ namespace Chimera {
     }
 
     std::size_t decompress_map_file(const char *input, std::byte *output, std::size_t output_size) {
+        if(!input || !*input || !output) {
+            throw std::exception();
+        }
+
         struct OutputWriter {
             std::byte *output;
             std::size_t output_size;
@@ -226,10 +258,10 @@ namespace Chimera {
         LowMemoryDecompression decomp;
         decomp.write_callback = [](const std::byte *decompressed_data, std::size_t size, void *user_data) -> bool {
             OutputWriter &output_writer = *reinterpret_cast<OutputWriter *>(user_data);
-            std::size_t new_position = output_writer.output_position + size;
-            if(new_position > output_writer.output_size) {
+            if(output_writer.output_position > output_writer.output_size || size > output_writer.output_size - output_writer.output_position) {
                 return false;
             }
+            const std::size_t new_position = output_writer.output_position + size;
             std::copy(decompressed_data, decompressed_data + size, output_writer.output + output_writer.output_position);
             output_writer.output_position = new_position;
             return true;

@@ -5,16 +5,19 @@
 #include <cstring>
 #include <string>
 #include <limits>
+#include <new>
 
 #include "signature.hpp"
 #include "hook.hpp"
 
 namespace Chimera {
     void Hook::rollback() noexcept {
-        if(this->original_bytes.size() == 0) {
+        if(this->original_bytes.empty()) {
             return;
         }
-        overwrite(this->address, this->original_bytes.data(), this->original_bytes.size());
+        if(this->address) {
+            overwrite(this->address, this->original_bytes.data(), this->original_bytes.size());
+        }
         this->original_bytes.clear();
     }
 
@@ -131,12 +134,17 @@ namespace Chimera {
     }
 
     // Get the bytes to the instruction(s) at the given address. I'll modify this as more types of instructions are needed.
-    void get_instructions(const std::byte *at_start, std::vector<std::byte> &bytes, std::vector<std::uintptr_t> &offsets, std::size_t minimum_size = 1) {
+    static bool get_instructions(const std::byte *at_start, std::vector<std::byte> &bytes, std::vector<std::uintptr_t> &offsets, std::size_t minimum_size = 1) {
+        bytes.clear();
         offsets.clear();
+        if(!at_start) {
+            return false;
+        }
         const auto *at = at_start;
 
         // Keep adding instructions until we have what we need.
         while(bytes.size() < minimum_size) {
+            const auto *instruction_start = at;
             switch(*reinterpret_cast<const std::uint8_t *>(at)) {
                 // add eax, <val>
                 case 0x05:
@@ -179,7 +187,7 @@ namespace Chimera {
                         break;
                     }
                     else {
-                        std::terminate();
+                        return false;
                     }
                 }
 
@@ -199,7 +207,7 @@ namespace Chimera {
                         at += 6;
                         break;
                     }
-                    std::terminate();
+                    return false;
                 }
 
                 // oxr <value>
@@ -211,7 +219,7 @@ namespace Chimera {
                         at += 2;
                         break;
                     }
-                    std::terminate();
+                    return false;
                 }
 
                 // cmp ecx, something
@@ -223,7 +231,7 @@ namespace Chimera {
                         at += 2;
                         break;
                     }
-                    std::terminate();
+                    return false;
                 }
 
                 // cmp eax, <value>
@@ -310,7 +318,7 @@ namespace Chimera {
                         }
                         break;
                     }
-                    std::terminate();
+                    return false;
                 }
 
                 // push 0x00000000-0xFFFFFFFF
@@ -330,7 +338,7 @@ namespace Chimera {
                         at += 6;
                         break;
                     }
-                    std::terminate();
+                    return false;
                 }
 
                 // push 0x00-0xFF
@@ -371,7 +379,7 @@ namespace Chimera {
                         at += 6;
                         break;
                     }
-                    std::terminate();
+                    return false;
                 }
 
                 // add/or/adc/sbb/and/sub/xor/cmp <something> 0x00-0x7F
@@ -384,7 +392,7 @@ namespace Chimera {
                         at += 3;
                     }
                     else {
-                        std::terminate();
+                        return false;
                     }
                     break;
                 }
@@ -401,7 +409,7 @@ namespace Chimera {
                         break;
                     }
                     else {
-                        std::terminate();
+                        return false;
                     }
                 }
 
@@ -451,7 +459,7 @@ namespace Chimera {
                         break;
                     }
 
-                    std::terminate();
+                    return false;
                 }
 
                 // mov bl, [eax+esi]
@@ -471,7 +479,7 @@ namespace Chimera {
                         break;
                     }
 
-                    std::terminate();
+                    return false;
                 }
 
                 // moving stuff
@@ -502,7 +510,7 @@ namespace Chimera {
                         at += 6;
                         break;
                     }
-                    std::terminate();
+                    return false;
                 }
 
                 // lea
@@ -522,7 +530,7 @@ namespace Chimera {
                         break;
                     }
 
-                    std::terminate();
+                    return false;
                 }
 
                 // shl
@@ -542,7 +550,7 @@ namespace Chimera {
                         break;
                     }
 
-                    std::terminate();
+                    return false;
                 }
 
                 // nop
@@ -600,7 +608,7 @@ namespace Chimera {
                         at += 7;
                         break;
                     }
-                    std::terminate();
+                    return false;
                 }
 
                 // fmul
@@ -624,7 +632,7 @@ namespace Chimera {
                         at += 6;
                         break;
                     }
-                    std::terminate();
+                    return false;
                 }
 
                 // fld / fst
@@ -654,7 +662,7 @@ namespace Chimera {
                         at += 7;
                         break;
                     }
-                    std::terminate();
+                    return false;
                 }
 
 
@@ -675,7 +683,7 @@ namespace Chimera {
                         at += 10;
                         break;
                     }
-                    std::terminate();
+                    return false;
                 }
 
                 // call dword ptr[x]
@@ -702,7 +710,7 @@ namespace Chimera {
                         at += 6;
                     }
                     else {
-                        std::terminate();
+                        return false;
                     }
                     break;
                 }
@@ -710,23 +718,37 @@ namespace Chimera {
                 // Terminate. We don't know what to do.
                 default:
                     std::cout << "Cannot figure out what's at " << std::to_string(reinterpret_cast<std::uintptr_t>(at)) << std::endl;
-                    std::terminate();
+                    return false;
+            }
+            if(at == instruction_start) {
+                return false;
             }
         }
+        return true;
     }
 
     void write_jmp_call(void *jmp_at, Hook &hook, const void *call_before, const void *call_after, bool pushad_pushfd) {
+        if(!jmp_at) {
+            return;
+        }
+
         // Rollback the hook if not already done so
         hook.rollback();
 
-        // Write the address for the hook.
-        hook.address = reinterpret_cast<std::byte *>(jmp_at);
-
-        // Get the instructions
+        // Get the instructions. Unsupported instructions now fail this hook
+        // cleanly instead of terminating the entire Halo process.
         std::vector<std::uintptr_t> offsets;
         std::vector<std::byte> bytes;
         std::byte *jmp_at_byte = reinterpret_cast<std::byte *>(jmp_at);
-        get_instructions(jmp_at_byte, bytes, offsets, 5);
+        try {
+            if(!get_instructions(jmp_at_byte, bytes, offsets, 5)) {
+                return;
+            }
+        }
+        catch(...) {
+            return;
+        }
+        hook.address = jmp_at_byte;
 
         // Calculate how much data we'll need. (size of bytes plus 9 bytes per call [5 for the call and 4 for pushad/popad and pushfd/popfd])
         std::size_t added_pushad_bytes = pushad_pushfd ? 4 : 0;
@@ -734,17 +756,42 @@ namespace Chimera {
         std::size_t size = relocated_original_size + (call_before ? 5 + added_pushad_bytes : 0) + (call_after ? 5 + added_pushad_bytes : 0) + 5;
 
         // Back up the original bytes
-        hook.original_bytes.insert(hook.original_bytes.end(), jmp_at_byte, jmp_at_byte + bytes.size());
+        try {
+            hook.original_bytes.insert(hook.original_bytes.end(), jmp_at_byte, jmp_at_byte + bytes.size());
+        }
+        catch(...) {
+            hook.address = nullptr;
+            return;
+        }
 
-        // Now make the hook
-        hook.hook = std::make_unique<std::byte []>(size);
+        // Now make the hook. Avoid throwing std::bad_alloc through callers that
+        // install hooks from noexcept initialization paths.
+        hook.hook.reset(new(std::nothrow) std::byte[size]);
+        if(!hook.hook) {
+            hook.original_bytes.clear();
+            hook.address = nullptr;
+            return;
+        }
         auto *hook_data = hook.hook.get();
-        DWORD old_protection;
+        DWORD old_protection = 0;
 
         // Give it PAGE_EXECUTE_READWRITE so the generated trampoline can execute safely.
         if(!VirtualProtect(hook_data, size, PAGE_EXECUTE_READWRITE, &old_protection)) {
             hook.hook.reset();
             hook.original_bytes.clear();
+            hook.address = nullptr;
+            return;
+        }
+
+        std::vector<std::byte> relocated;
+        try {
+            relocated = relocate_instructions(jmp_at_byte, bytes, offsets,
+                                              hook_data + (call_before ? 5 + added_pushad_bytes : 0));
+        }
+        catch(...) {
+            hook.hook.reset();
+            hook.original_bytes.clear();
+            hook.address = nullptr;
             return;
         }
 
@@ -753,6 +800,7 @@ namespace Chimera {
         if(!VirtualProtect(jmp_at_byte, bytes.size(), new_protection, &old_protection)) {
             hook.hook.reset();
             hook.original_bytes.clear();
+            hook.address = nullptr;
             return;
         }
         *reinterpret_cast<std::uint8_t *>(jmp_at_byte) = 0xE9;
@@ -790,8 +838,7 @@ namespace Chimera {
             hook_data += 5 + added_pushad_bytes;
         }
 
-        // Copy and relocate the original instructions.
-        auto relocated = relocate_instructions(jmp_at_byte, bytes, offsets, hook_data);
+        // Copy the already-relocated original instructions.
         std::copy(relocated.begin(), relocated.end(), hook_data);
         hook_data += relocated.size();
 
@@ -808,33 +855,65 @@ namespace Chimera {
     }
 
     void write_function_override(void *jmp_at, Hook &hook, const void *new_function, const void **original_function) {
+        if(!jmp_at || !new_function || !original_function) {
+            return;
+        }
+
         // Rollback the hook if not already done so
         hook.rollback();
 
-        // Write the address for the hook.
-        hook.address = reinterpret_cast<std::byte *>(jmp_at);
-
-        // Get the instructions
+        // Get the instructions. Unsupported instructions fail safely.
         std::vector<std::uintptr_t> offsets;
         std::vector<std::byte> bytes;
         std::byte *jmp_at_byte = reinterpret_cast<std::byte *>(jmp_at);
-        get_instructions(jmp_at_byte, bytes, offsets, 5);
+        try {
+            if(!get_instructions(jmp_at_byte, bytes, offsets, 5)) {
+                return;
+            }
+        }
+        catch(...) {
+            return;
+        }
+        hook.address = jmp_at_byte;
 
         // Calculate how much data we'll need. Short relative branches may expand in the trampoline.
         std::size_t size = 5 + relocated_size(bytes, offsets) + 5;
 
         // Back up the original bytes
-        hook.original_bytes.insert(hook.original_bytes.end(), jmp_at_byte, jmp_at_byte + bytes.size());
+        try {
+            hook.original_bytes.insert(hook.original_bytes.end(), jmp_at_byte, jmp_at_byte + bytes.size());
+        }
+        catch(...) {
+            hook.address = nullptr;
+            return;
+        }
 
-        // Now make the hook
-        hook.hook = std::make_unique<std::byte []>(size);
+        // Now make the hook.
+        hook.hook.reset(new(std::nothrow) std::byte[size]);
+        if(!hook.hook) {
+            hook.original_bytes.clear();
+            hook.address = nullptr;
+            return;
+        }
         auto *hook_data = hook.hook.get();
-        DWORD old_protection;
+        DWORD old_protection = 0;
 
         // Give it PAGE_EXECUTE_READWRITE so the generated trampoline can execute safely.
         if(!VirtualProtect(hook_data, size, PAGE_EXECUTE_READWRITE, &old_protection)) {
             hook.hook.reset();
             hook.original_bytes.clear();
+            hook.address = nullptr;
+            return;
+        }
+
+        std::vector<std::byte> relocated;
+        try {
+            relocated = relocate_instructions(jmp_at_byte, bytes, offsets, hook_data + 5);
+        }
+        catch(...) {
+            hook.hook.reset();
+            hook.original_bytes.clear();
+            hook.address = nullptr;
             return;
         }
 
@@ -843,6 +922,7 @@ namespace Chimera {
         if(!VirtualProtect(jmp_at_byte, bytes.size(), new_protection, &old_protection)) {
             hook.hook.reset();
             hook.original_bytes.clear();
+            hook.address = nullptr;
             return;
         }
         *reinterpret_cast<std::uint8_t *>(jmp_at_byte) = 0xE9;
@@ -858,8 +938,7 @@ namespace Chimera {
         *reinterpret_cast<std::uintptr_t *>(hook_data + 1) = reinterpret_cast<const std::byte *>(new_function) - (hook_data + 5);
         hook_data += 5;
 
-        // Copy and relocate the original instructions.
-        auto relocated = relocate_instructions(jmp_at_byte, bytes, offsets, hook_data);
+        // Copy the already-relocated original instructions.
         std::copy(relocated.begin(), relocated.end(), hook_data);
         *original_function = hook_data;
 

@@ -124,7 +124,7 @@ private:
     std::vector<std::byte> buffer;
 
     /** Amount of the buffer used */
-    std::size_t buffer_used;
+    std::size_t buffer_used = 0;
 
     /** Clock to use */
     using Clock = std::chrono::steady_clock;

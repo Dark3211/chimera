@@ -51,7 +51,7 @@ namespace Chimera {
 
         // Get the scenario tag (not always the first tag) and make sure it's actually a scenario tag
         auto *scenario_tag = get_tag(tag_data_header.scenario_tag.index.index);
-        if(scenario_tag->primary_class != TagClassInt::TAG_CLASS_SCENARIO) {
+        if(!scenario_tag || scenario_tag->primary_class != TagClassInt::TAG_CLASS_SCENARIO) {
             return true;
         }
 
@@ -62,6 +62,9 @@ namespace Chimera {
 
         for(std::size_t t = 0; t < tag_count; t++) {
             auto *tag = get_tag(t);
+            if(!tag) {
+                return true;
+            }
 
             auto *tag_path = tag->path;
             auto tag_class = tag->primary_class;

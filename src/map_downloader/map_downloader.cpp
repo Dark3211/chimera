@@ -9,6 +9,9 @@
 #include <filesystem>
 #include <regex>
 #include <stdexcept>
+#include <limits>
+#include <algorithm>
+#include <cstdint>
 
 #include "map_downloader.hpp"
 
@@ -160,7 +163,12 @@ void MapDownloader::dispatch_thread_function(MapDownloader *downloader) {
                 write_ok = std::fwrite(downloader->buffer.data(), downloader->buffer_used, 1, downloader->output_file_handle) == 1;
             }
             if(write_ok) {
-                downloader->written_size += downloader->buffer_used;
+                if(downloader->buffer_used > std::numeric_limits<std::size_t>::max() - downloader->written_size) {
+                    write_ok = false;
+                }
+                else {
+                    downloader->written_size += downloader->buffer_used;
+                }
             }
             downloader->buffer_used = 0;
             downloader->buffer.clear();
@@ -212,7 +220,7 @@ std::size_t MapDownloader::get_download_speed() noexcept {
     std::lock_guard lock(this->mutex);
     // If we haven't started, return 0
     if(this->downloaded_size == 0) {
-        return 0.0;
+        return 0;
     }
 
     auto now = Clock::now();
@@ -221,7 +229,7 @@ std::size_t MapDownloader::get_download_speed() noexcept {
 
     // Don't divide by zero
     if(ms <= 0) {
-        return 0.0;
+        return 0;
     }
 
     return (this->downloaded_size) / ms;
@@ -231,66 +239,100 @@ std::size_t MapDownloader::get_download_speed() noexcept {
 class MapDownloader::MapDownloaderCallback {
 public:
     // When we've received data, put it in here
-    static size_t write_callback(const std::byte *ptr, std::size_t, std::size_t nmemb, MapDownloader *userdata) {
-        userdata->mutex.lock();
-
-        // If we're canceling, stop
-        if(userdata->status == MapDownloader::DOWNLOAD_STAGE_CANCELING) {
-            userdata->mutex.unlock();
+    static size_t write_callback(const std::byte *ptr, std::size_t size, std::size_t nmemb, MapDownloader *userdata) {
+        if(!userdata || (!ptr && size != 0 && nmemb != 0) || (size != 0 && nmemb > std::numeric_limits<std::size_t>::max() / size)) {
+            return 0;
+        }
+        const std::size_t bytes = size * nmemb;
+        if(bytes == 0) {
             return 0;
         }
 
-        // Check if this is a bad download
-        std::byte header_data[0x800];
-        if(userdata->written_size == 0 && userdata->buffer_used < sizeof(header_data) && nmemb + userdata->buffer_used >= sizeof(header_data)) {
+        std::lock_guard lock(userdata->mutex);
+
+        // If we're canceling, stop cURL immediately.
+        if(userdata->status == MapDownloader::DOWNLOAD_STAGE_CANCELING) {
+            return 0;
+        }
+        if(!userdata->output_file_handle || userdata->buffer_used > userdata->buffer.size()) {
+            userdata->status = MapDownloader::DOWNLOAD_STAGE_FAILED;
+            return 0;
+        }
+
+        // Check if this is a bad download once we have enough bytes for a map header.
+        std::byte header_data[0x800] = {};
+        if(userdata->written_size == 0 && userdata->buffer_used < sizeof(header_data) && bytes >= sizeof(header_data) - userdata->buffer_used) {
             std::memcpy(header_data, userdata->buffer.data(), userdata->buffer_used);
             std::memcpy(header_data + userdata->buffer_used, ptr, sizeof(header_data) - userdata->buffer_used);
+
+            const auto read_u32 = [](const std::byte *at) noexcept {
+                std::uint32_t value = 0;
+                std::memcpy(&value, at, sizeof(value));
+                return value;
+            };
+
             bool bad_header = true;
-            if(*reinterpret_cast<std::uint32_t *>(header_data) == 0x68656164 && *reinterpret_cast<std::uint32_t *>(header_data + 0x7FC) == 0x666F6F74) {
+            if(read_u32(header_data) == 0x68656164 && read_u32(header_data + 0x7FC) == 0x666F6F74) {
                 bad_header = false;
             }
-            else if(*reinterpret_cast<std::uint32_t *>(header_data + 0x2C0) == 0x45686564 && *reinterpret_cast<std::uint32_t *>(header_data + 0x5F0) == 0x47666F74) {
+            else if(read_u32(header_data + 0x2C0) == 0x45686564 && read_u32(header_data + 0x5F0) == 0x47666F74) {
                 bad_header = false;
             }
             if(bad_header) {
                 userdata->status = MapDownloader::DOWNLOAD_STAGE_FAILED;
-                userdata->mutex.unlock();
                 return 0;
             }
-
         }
 
         userdata->status = MapDownloader::DOWNLOAD_STAGE_DOWNLOADING;
 
-        if(userdata->buffer_used > userdata->buffer.size() || nmemb > userdata->buffer.size() - userdata->buffer_used) {
+        if(bytes > userdata->buffer.size() - userdata->buffer_used) {
             if(userdata->buffer_used != 0 && std::fwrite(userdata->buffer.data(), userdata->buffer_used, 1, userdata->output_file_handle) != 1) {
                 userdata->status = MapDownloader::DOWNLOAD_STAGE_FAILED;
-                userdata->mutex.unlock();
                 return 0;
             }
-            if(nmemb != 0 && std::fwrite(ptr, nmemb, 1, userdata->output_file_handle) != 1) {
+            if(bytes != 0 && std::fwrite(ptr, bytes, 1, userdata->output_file_handle) != 1) {
                 userdata->status = MapDownloader::DOWNLOAD_STAGE_FAILED;
-                userdata->mutex.unlock();
                 return 0;
             }
-            userdata->written_size += userdata->buffer_used + nmemb;
+            if(userdata->buffer_used > std::numeric_limits<std::size_t>::max() - bytes) {
+                userdata->status = MapDownloader::DOWNLOAD_STAGE_FAILED;
+                return 0;
+            }
+            const auto bytes_to_commit = userdata->buffer_used + bytes;
+            if(userdata->written_size > std::numeric_limits<std::size_t>::max() - bytes_to_commit) {
+                userdata->status = MapDownloader::DOWNLOAD_STAGE_FAILED;
+                return 0;
+            }
+            userdata->written_size += bytes_to_commit;
             userdata->buffer_used = 0;
         }
         else {
-            std::copy(ptr, ptr + nmemb, userdata->buffer.data() + userdata->buffer_used);
-            userdata->buffer_used += nmemb;
+            std::copy(ptr, ptr + bytes, userdata->buffer.data() + userdata->buffer_used);
+            userdata->buffer_used += bytes;
         }
 
-        userdata->mutex.unlock();
-        return nmemb;
+        return bytes;
     }
 
     // When progress has been made, record it here
     static int progress_callback(MapDownloader *clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t, curl_off_t) {
-        clientp->mutex.lock();
-        clientp->downloaded_size = dlnow;
-        clientp->total_size = dltotal;
-        clientp->mutex.unlock();
+        if(!clientp) {
+            return 1;
+        }
+
+        std::lock_guard lock(clientp->mutex);
+        if(clientp->status == MapDownloader::DOWNLOAD_STAGE_CANCELING) {
+            return 1;
+        }
+        if(dlnow < 0 || dltotal < 0 ||
+           static_cast<std::uintmax_t>(dlnow) > std::numeric_limits<std::size_t>::max() ||
+           static_cast<std::uintmax_t>(dltotal) > std::numeric_limits<std::size_t>::max()) {
+            clientp->status = MapDownloader::DOWNLOAD_STAGE_FAILED;
+            return 1;
+        }
+        clientp->downloaded_size = static_cast<std::size_t>(dlnow);
+        clientp->total_size = static_cast<std::size_t>(dltotal);
         return 0;
     }
 };
@@ -300,13 +342,19 @@ const std::string &MapDownloader::get_map() const noexcept {
 }
 
 void MapDownloader::cancel() noexcept {
+    bool cancel_requested = false;
     {
         std::lock_guard lock(this->mutex);
         if(this->status == DOWNLOAD_STAGE_CANCELED) {
             return;
         }
+        if(this->status == DOWNLOAD_STAGE_NOT_STARTED) {
+            this->status = DOWNLOAD_STAGE_CANCELED;
+            return;
+        }
         if(!this->is_finished_no_mutex()) {
             this->status = DownloadStage::DOWNLOAD_STAGE_CANCELING;
+            cancel_requested = true;
         }
     }
 
@@ -314,7 +362,7 @@ void MapDownloader::cancel() noexcept {
         this->dispatch_thread.join();
     }
 
-    {
+    if(cancel_requested) {
         std::lock_guard lock(this->mutex);
         this->status = DOWNLOAD_STAGE_CANCELED;
     }
@@ -348,10 +396,11 @@ void MapDownloader::download(const char *map, const char *output_file, const cha
         setopt(CURLOPT_XFERINFOFUNCTION, MapDownloaderCallback::progress_callback) &&
         setopt(CURLOPT_WRITEFUNCTION, MapDownloaderCallback::write_callback) &&
         setopt(CURLOPT_WRITEDATA, this) &&
-        setopt(CURLOPT_PROGRESSDATA, this) &&
+        setopt(CURLOPT_XFERINFODATA, this) &&
         setopt(CURLOPT_NOPROGRESS, 0L) &&
         setopt(CURLOPT_FAILONERROR, 1L) &&
         setopt(CURLOPT_FOLLOWLOCATION, 1L) &&
+        setopt(CURLOPT_MAXREDIRS, 10L) &&
         setopt(CURLOPT_CONNECTTIMEOUT, 10L) &&
         setopt(CURLOPT_TIMEOUT, 90L) &&
         setopt(CURLOPT_USERAGENT, "Chimera MapDownloader/1.0");
@@ -381,24 +430,18 @@ void MapDownloader::download(const char *map, const char *output_file, const cha
 }
 
 MapDownloader::DownloadStage MapDownloader::get_status() noexcept {
-    this->mutex.lock();
-    auto return_value = this->status;
-    this->mutex.unlock();
-    return return_value;
+    std::lock_guard lock(this->mutex);
+    return this->status;
 }
 
 std::size_t MapDownloader::get_downloaded_size() noexcept {
-    this->mutex.lock();
-    std::size_t return_value = this->downloaded_size;
-    this->mutex.unlock();
-    return return_value;
+    std::lock_guard lock(this->mutex);
+    return this->downloaded_size;
 }
 
 std::size_t MapDownloader::get_total_size() noexcept {
-    this->mutex.lock();
-    std::size_t return_value = this->total_size;
-    this->mutex.unlock();
-    return return_value;
+    std::lock_guard lock(this->mutex);
+    return this->total_size;
 }
 
 bool MapDownloader::is_finished_no_mutex() const noexcept {

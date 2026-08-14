@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 #include <cstdio>
+#include <chrono>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include "bookmark.hpp"
@@ -13,10 +14,12 @@
 #include "../event/connect.hpp"
 #include "../output/output.hpp"
 #include "../halo_data/script.hpp"
+#include "../halo_data/multiplayer.hpp"
 #include "../halo_data/resolution.hpp"
 #include "../localization/localization.hpp"
 #include <mutex>
 #include <thread>
+#include <atomic>
 
 namespace Chimera {
     #define MAX_HISTORY_SIZE 20
@@ -189,8 +192,8 @@ namespace Chimera {
         f.close();
     }
     static std::vector<QueryPacketDone> finished_packets;
-
-    static std::mutex querying;
+    static std::mutex finished_packets_mutex;
+    static std::atomic_bool query_in_progress { false };
 
     QueryPacketDone query_server(const Bookmark &what) {
         QueryPacketDone finished_packet{};
@@ -286,20 +289,42 @@ namespace Chimera {
     }
 
     static void query_list(const std::vector<Bookmark> &bookmarks) {
-        finished_packets.clear();
-
-        for(auto &b : bookmarks) {
-            finished_packets.push_back(query_server(b));
+        std::vector<QueryPacketDone> results;
+        try {
+            results.reserve(bookmarks.size());
+            for(const auto &b : bookmarks) {
+                try {
+                    results.push_back(query_server(b));
+                }
+                catch(...) {
+                    QueryPacketDone failed {};
+                    failed.b = b;
+                    failed.error = QueryPacketDone::Error::TIMED_OUT;
+                    results.push_back(std::move(failed));
+                }
+            }
+        }
+        catch(...) {
+            results.clear();
         }
 
-        querying.unlock();
+        {
+            std::lock_guard lock(finished_packets_mutex);
+            finished_packets = std::move(results);
+        }
+        query_in_progress.store(false, std::memory_order_release);
     }
 
     static void show_list() {
-        if(!querying.try_lock()) {
+        if(query_in_progress.load(std::memory_order_acquire)) {
             return;
         }
-        querying.unlock();
+
+        std::vector<QueryPacketDone> packets;
+        {
+            std::lock_guard lock(finished_packets_mutex);
+            packets.swap(finished_packets);
+        }
 
         // Show the results
         auto &resolution = get_resolution();
@@ -309,7 +334,7 @@ namespace Chimera {
         }
         std::size_t q = 0;
 
-        for(auto &p : finished_packets) {
+        for(auto &p : packets) {
             q++;
             switch(p.error) {
                 case QueryPacketDone::Error::NONE: {
@@ -371,24 +396,40 @@ namespace Chimera {
     }
 
     bool history_list_command(int, const char **) {
-        if(!querying.try_lock()) {
+        bool expected = false;
+        if(!query_in_progress.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
             console_error(localize("chimera_bookmark_list_command_busy"));
             return false;
         }
         console_output(localize("chimera_history_list_command_querying"));
         add_preframe_event(show_list);
-        std::thread(query_list, load_bookmarks_file("history.txt")).detach();
+        try {
+            std::thread(query_list, load_bookmarks_file("history.txt")).detach();
+        }
+        catch(...) {
+            query_in_progress.store(false, std::memory_order_release);
+            remove_preframe_event(show_list);
+            return false;
+        }
         return true;
     }
 
     bool bookmark_list_command(int, const char **) {
-        if(!querying.try_lock()) {
+        bool expected = false;
+        if(!query_in_progress.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
             console_error(localize("chimera_bookmark_list_command_busy"));
             return false;
         }
         console_output(localize("chimera_bookmark_list_command_querying"));
         add_preframe_event(show_list);
-        std::thread(query_list, load_bookmarks_file("bookmark.txt")).detach();
+        try {
+            std::thread(query_list, load_bookmarks_file("bookmark.txt")).detach();
+        }
+        catch(...) {
+            query_in_progress.store(false, std::memory_order_release);
+            remove_preframe_event(show_list);
+            return false;
+        }
         return true;
     }
 
@@ -519,6 +560,202 @@ namespace Chimera {
         execute_script(connect_command);
     }
 
+    enum class BookmarkConnectionState {
+        IDLE,
+        CONNECTING,
+        WAITING_TO_DISCONNECT,
+        DISCONNECTING
+    };
+
+    using BookmarkClock = std::chrono::steady_clock;
+
+    static BookmarkConnectionState bookmark_connection_state = BookmarkConnectionState::IDLE;
+    static std::optional<Bookmark> current_bookmark_connection;
+    static std::optional<Bookmark> pending_bookmark_connection;
+    static std::optional<BookmarkClock::time_point> connected_since;
+    static std::optional<BookmarkClock::time_point> disconnected_since;
+    static BookmarkClock::time_point bookmark_state_changed;
+
+    static constexpr auto BOOKMARK_CONNECTED_SETTLE_TIME = std::chrono::milliseconds(2000);
+    static constexpr auto BOOKMARK_DISCONNECTED_SETTLE_TIME = std::chrono::milliseconds(1500);
+    static constexpr auto BOOKMARK_CONNECT_TIMEOUT = std::chrono::seconds(15);
+    static constexpr auto BOOKMARK_DISCONNECT_TIMEOUT = std::chrono::seconds(15);
+
+    static void process_bookmark_connection_state();
+
+    static bool same_bookmark(const Bookmark &a, const Bookmark &b) noexcept {
+        return a.port == b.port
+            && a.brackets == b.brackets
+            && std::strcmp(a.address, b.address) == 0
+            && std::strcmp(a.password, b.password) == 0;
+    }
+
+    static void reset_bookmark_connection_state() noexcept {
+        bookmark_connection_state = BookmarkConnectionState::IDLE;
+        current_bookmark_connection.reset();
+        pending_bookmark_connection.reset();
+        connected_since.reset();
+        disconnected_since.reset();
+        remove_preframe_event(process_bookmark_connection_state);
+    }
+
+    static void begin_bookmark_connection(const Bookmark &bookmark) {
+        current_bookmark_connection = bookmark;
+        bookmark_connection_state = BookmarkConnectionState::CONNECTING;
+        bookmark_state_changed = BookmarkClock::now();
+        connected_since.reset();
+        disconnected_since.reset();
+        join_bookmark(bookmark);
+    }
+
+    static void begin_bookmark_disconnect_wait() {
+        bookmark_connection_state = BookmarkConnectionState::WAITING_TO_DISCONNECT;
+        bookmark_state_changed = BookmarkClock::now();
+        connected_since.reset();
+        disconnected_since.reset();
+    }
+
+    static void process_bookmark_connection_state() {
+        const auto now = BookmarkClock::now();
+        const auto type = server_type();
+
+        switch(bookmark_connection_state) {
+            case BookmarkConnectionState::IDLE:
+                remove_preframe_event(process_bookmark_connection_state);
+                return;
+
+            case BookmarkConnectionState::CONNECTING:
+                if(type != ServerType::SERVER_NONE) {
+                    if(!connected_since.has_value()) {
+                        connected_since = now;
+                        return;
+                    }
+
+                    if(now - *connected_since < BOOKMARK_CONNECTED_SETTLE_TIME) {
+                        return;
+                    }
+
+                    if(pending_bookmark_connection.has_value()) {
+                        if(current_bookmark_connection.has_value()
+                        && same_bookmark(*current_bookmark_connection, *pending_bookmark_connection)) {
+                            pending_bookmark_connection.reset();
+                            reset_bookmark_connection_state();
+                            return;
+                        }
+
+                        execute_script("disconnect");
+                        bookmark_connection_state = BookmarkConnectionState::DISCONNECTING;
+                        bookmark_state_changed = now;
+                        connected_since.reset();
+                        disconnected_since.reset();
+                        return;
+                    }
+
+                    reset_bookmark_connection_state();
+                    return;
+                }
+
+                connected_since.reset();
+
+                // Never launch a second connection automatically after a timeout.
+                // If Halo is still reporting SERVER_NONE, abort the queued request
+                // and require the user to try again. This favors a safe failure over
+                // re-entering Halo's networking state machine.
+                if(now - bookmark_state_changed >= BOOKMARK_CONNECT_TIMEOUT) {
+                    reset_bookmark_connection_state();
+                }
+                return;
+
+            case BookmarkConnectionState::WAITING_TO_DISCONNECT:
+                if(type == ServerType::SERVER_NONE) {
+                    bookmark_connection_state = BookmarkConnectionState::DISCONNECTING;
+                    bookmark_state_changed = now;
+                    disconnected_since = now;
+                    return;
+                }
+
+                // Wait for the current server state to be stable before issuing the
+                // game's normal disconnect command. This avoids disconnecting on the
+                // same frame in which Halo has just completed a connection.
+                if(now - bookmark_state_changed < BOOKMARK_CONNECTED_SETTLE_TIME) {
+                    return;
+                }
+
+                execute_script("disconnect");
+                bookmark_connection_state = BookmarkConnectionState::DISCONNECTING;
+                bookmark_state_changed = now;
+                disconnected_since.reset();
+                return;
+
+            case BookmarkConnectionState::DISCONNECTING:
+                if(type != ServerType::SERVER_NONE) {
+                    disconnected_since.reset();
+
+                    // Do not force another connect if Halo did not finish its normal
+                    // disconnect sequence. Drop the pending switch instead.
+                    if(now - bookmark_state_changed >= BOOKMARK_DISCONNECT_TIMEOUT) {
+                        reset_bookmark_connection_state();
+                    }
+                    return;
+                }
+
+                if(!disconnected_since.has_value()) {
+                    disconnected_since = now;
+                    return;
+                }
+
+                if(now - *disconnected_since < BOOKMARK_DISCONNECTED_SETTLE_TIME) {
+                    return;
+                }
+
+                if(!pending_bookmark_connection.has_value()) {
+                    reset_bookmark_connection_state();
+                    return;
+                }
+
+                {
+                    const Bookmark next = *pending_bookmark_connection;
+                    pending_bookmark_connection.reset();
+                    begin_bookmark_connection(next);
+                }
+                return;
+        }
+    }
+
+    static void request_bookmark_connection(const Bookmark &bookmark) {
+        switch(bookmark_connection_state) {
+            case BookmarkConnectionState::IDLE:
+                add_preframe_event(process_bookmark_connection_state, EVENT_PRIORITY_AFTER);
+
+                if(server_type() == ServerType::SERVER_NONE) {
+                    begin_bookmark_connection(bookmark);
+                }
+                else {
+                    pending_bookmark_connection = bookmark;
+                    begin_bookmark_disconnect_wait();
+                }
+                return;
+
+            case BookmarkConnectionState::CONNECTING:
+                // Repeated requests for the same bookmark while Halo is negotiating
+                // are ignored. A different request is queued; it is not passed to
+                // Halo until the current connection has settled and disconnected.
+                if(current_bookmark_connection.has_value()
+                && same_bookmark(*current_bookmark_connection, bookmark)) {
+                    return;
+                }
+                pending_bookmark_connection = bookmark;
+                return;
+
+            case BookmarkConnectionState::WAITING_TO_DISCONNECT:
+            case BookmarkConnectionState::DISCONNECTING:
+                // The newest requested server wins while a switch is in progress.
+                pending_bookmark_connection = bookmark;
+                return;
+        }
+    }
+
+
     bool bookmark_connect_command(int, const char **argv) {
         auto bookmarks = load_bookmarks_file("bookmark.txt");
         std::size_t index;
@@ -533,7 +770,7 @@ namespace Chimera {
             console_error(localize("chimera_bookmark_error_invalid"));
             return false;
         }
-        join_bookmark(bookmarks[index - 1]);
+        request_bookmark_connection(bookmarks[index - 1]);
         return true;
     }
 
@@ -551,7 +788,7 @@ namespace Chimera {
             console_error(localize("chimera_bookmark_error_invalid"));
             return false;
         }
-        join_bookmark(history[index - 1]);
+        request_bookmark_connection(history[index - 1]);
         return true;
     }
 }

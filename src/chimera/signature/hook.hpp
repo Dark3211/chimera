@@ -20,7 +20,7 @@ namespace Chimera {
         std::vector<std::byte> original_bytes;
 
         /** This is the address to the first modified byte in Halo's code. */
-        std::byte *address;
+        std::byte *address = nullptr;
 
         /** This is the code being jumped to. */
         std::unique_ptr<std::byte []> hook;

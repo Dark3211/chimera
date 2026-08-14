@@ -34,12 +34,12 @@ namespace Chimera {
             if(!key) {
                 return "";
             }
-            for(const auto &q : this->query_data) {
-                if(q.first == key) {
-                    return q.second.c_str();
-                }
-            }
-            return "";
+            const auto found = this->query_data.find(key);
+            return found == this->query_data.end() ? "" : found->second.c_str();
+        }
+
+        bool has_data_for_key(const char *key) const noexcept {
+            return key && this->query_data.find(key) != this->query_data.end();
         }
     };
 

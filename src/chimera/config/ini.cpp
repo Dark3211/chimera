@@ -17,9 +17,12 @@ namespace Chimera {
     static std::locale locale;
 
     const char *Ini::get_value(const char *key) const noexcept {
+        if(!key) {
+            return nullptr;
+        }
         for(auto &i : this->p_values) {
             if(i.first == key) {
-                return i.second.data();
+                return i.second.c_str();
             }
         }
         return nullptr;
@@ -90,10 +93,13 @@ namespace Chimera {
     }
 
     void Ini::set_value(const char *key, const char *value) noexcept {
+        if(!key || !value) {
+            return;
+        }
         for(auto &i : this->p_values) {
             if(i.first == key) {
                 i.second = value;
-                break;
+                return;
             }
         }
         this->p_values.emplace_back(key, value);
@@ -103,13 +109,16 @@ namespace Chimera {
         for(auto &i : this->p_values) {
             if(i.first == key_value.first) {
                 i.second = std::move(key_value.second);
-                break;
+                return;
             }
         }
-        this->p_values.emplace_back(key_value);
+        this->p_values.emplace_back(std::move(key_value));
     }
 
     void Ini::delete_value(const char *key) noexcept {
+        if(!key) {
+            return;
+        }
         for(auto &i : this->p_values) {
             if(i.first == key) {
                 this->p_values.erase(this->p_values.begin() + (&i - this->p_values.data()));
@@ -144,15 +153,24 @@ namespace Chimera {
             return { true, false }; // "ansi" is UTF-8 so do nothing
         }
 
-        // Covert UTF-8 to wide
-        std::wstring wstr(wcount, 0);
-        MultiByteToWideChar(CP_UTF8, 0, str.c_str(), str.length(), wstr.data(), wcount);
+        // Convert UTF-8 to wide.
+        std::wstring wstr(static_cast<std::size_t>(wcount), 0);
+        if(MultiByteToWideChar(CP_UTF8, 0, str.c_str(), static_cast<int>(str.length()), wstr.data(), wcount) != wcount) {
+            throw std::runtime_error("could not convert UTF-8 to UTF-16");
+        }
 
-        // Convert wide to the system code page
-        auto count = WideCharToMultiByte(CP_ACP, 0, wstr.c_str(), wstr.length(), nullptr, 0, nullptr, nullptr);
-        std::string tmp(count, 0);
-        BOOL defaulted;
-        WideCharToMultiByte(CP_ACP, 0, wstr.c_str(), -1, tmp.data(), count, nullptr, &defaulted);
+        // Convert wide to the system code page. Use the exact input length for
+        // both calls; using -1 here would require space for an extra terminator.
+        auto count = WideCharToMultiByte(CP_ACP, 0, wstr.data(), static_cast<int>(wstr.length()), nullptr, 0, nullptr, nullptr);
+        if(count <= 0) {
+            throw std::runtime_error("could not determine ANSI conversion size");
+        }
+        std::string tmp(static_cast<std::size_t>(count), 0);
+        BOOL defaulted = FALSE;
+        auto converted = WideCharToMultiByte(CP_ACP, 0, wstr.data(), static_cast<int>(wstr.length()), tmp.data(), count, nullptr, &defaulted);
+        if(converted != count) {
+            throw std::runtime_error("could not convert UTF-8 to ANSI");
+        }
         str.swap(tmp);
 
         return { true, defaulted };
