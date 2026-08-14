@@ -20,15 +20,18 @@ namespace Chimera {
 
     extern "C" void send_rcon_message_asm(std::uint32_t player, const char *message) noexcept;
     void send_rcon_message(int player, const char *message) {
+        if(!message) {
+            return;
+        }
         send_rcon_message_asm(static_cast<std::uint32_t>(player), message);
     }
 
     extern "C" void console_output_asm(const ConsoleColor &color, const char *message);
     void console_output_raw(const ConsoleColor &color, const char *message) noexcept {
-        if(!output_enabled) {
+        if(!output_enabled || !message) {
             return;
         }
-        char message_copy[256];
+        char message_copy[256] = {};
         if(output_prefix) {
             std::snprintf(message_copy, sizeof(message_copy), "%s: %s", output_prefix, message);
         }
@@ -40,14 +43,17 @@ namespace Chimera {
 
     extern "C" void hud_output_asm(const wchar_t *message);
     void hud_output_raw(const wchar_t *message) noexcept {
-        if(!output_enabled) {
+        if(!output_enabled || !message) {
             return;
         }
         hud_output_asm(message);
     }
     void hud_output_raw(const char *message) noexcept {
+        if(!message) {
+            return;
+        }
         wchar_t x[256] = {};
-        for(std::size_t i = 0; i < sizeof(x) / sizeof(*x) - 1 && *message; i++) {
+        for(std::size_t i = 0; i < sizeof(x) / sizeof(*x) - 1 && message[i]; i++) {
             x[i] = message[i];
         }
         hud_output_asm(x);
@@ -58,6 +64,9 @@ namespace Chimera {
 
     extern "C" void before_rcon_message() noexcept;
     extern "C" bool on_rcon_message(const char *message) noexcept {
+        if(!message) {
+            return false;
+        }
         if (!call_rcon_message_events(message)) {
             return false;
         }

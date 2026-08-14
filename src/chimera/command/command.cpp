@@ -44,6 +44,9 @@ namespace Chimera {
     std::vector<std::string> split_arguments(const char *command) noexcept {
         // This is the vector to return.
         std::vector<std::string> arguments;
+        if(!command) {
+            return arguments;
+        }
 
         // This value will be true if we are inside quotes, during which the word will not separate into arguments.
         bool in_quotes = false;

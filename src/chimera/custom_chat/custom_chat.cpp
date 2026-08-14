@@ -879,13 +879,27 @@ namespace Chimera {
     }
 
     extern "C" void welcome_message(PlayerID player_a) {
+        if(player_a.is_null() || player_a.index.index >= 16) {
+            return;
+        }
+
         // Get server information
         auto *server_info = ServerInfoPlayerList::get_server_info_player_list();
+        if(!server_info) {
+            return;
+        }
 
         // Get the player name
         auto get_player_name = [&server_info](PlayerID id, ColorARGB *color_to_use) -> std::string {
             auto *player = server_info->get_player(id);
-            return std::string("^") + color_id_for_player(player - server_info->players, color_to_use) + u16_to_u8(player->name).c_str() + "^;";
+            if(!player) {
+                return {};
+            }
+            const auto player_index = static_cast<std::size_t>(player - server_info->players);
+            if(player_index >= 16) {
+                return {};
+            }
+            return std::string("^") + color_id_for_player(player_index, color_to_use) + u16_to_u8(player->name).c_str() + "^;";
         };
 
         // Show a single message
@@ -906,14 +920,16 @@ namespace Chimera {
         // Copy the name if we need to
         if(!player_in_server[player_a.index.index]) {
             auto *player_table_player = PlayerTable::get_player_table().get_player(player_a);
+            if(!player_table_player) {
+                return;
+            }
             single_message(player_a, 74);
             player_in_server[player_a.index.index] = true;
 
             auto *u8_name_hold = player_name[player_a.index.index];
             auto u8_player_name = u16_to_u8(player_table_player->name);
-            std::strcpy(u8_name_hold, u8_player_name.c_str());
-            char *t;
-            for(t = player_name[player_a.index.index]; *t; t++);
+            std::snprintf(u8_name_hold, sizeof(player_name[0]) - 2, "%s", u8_player_name.c_str());
+            auto *t = u8_name_hold + std::strlen(u8_name_hold);
             t[0] = '^';
             t[1] = ';';
             t[2] = 0;

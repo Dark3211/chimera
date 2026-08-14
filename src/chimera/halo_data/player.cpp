@@ -22,7 +22,7 @@ namespace Chimera {
         if(player_id.is_null()) {
             return nullptr;
         }
-        if(player_id.index.index >= this->current_size) {
+        if(!this->first_element || player_id.index.index >= this->current_size) {
             return nullptr;
         }
         auto &player = this->first_element[player_id.index.index];

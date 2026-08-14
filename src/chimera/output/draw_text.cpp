@@ -62,7 +62,7 @@ namespace Chimera {
             case GenericFont::FONT_TICKER:
                 return ticker_font_override;
             default:
-                std::terminate();
+                return nullptr;
         }
     }
 
@@ -137,6 +137,9 @@ namespace Chimera {
     }
 
     GenericFont generic_font_from_string(const char *str) noexcept {
+        if(!str) {
+            return GenericFont::FONT_CONSOLE;
+        }
         if(std::strcmp(str, "console") == 0) {
             return GenericFont::FONT_CONSOLE;
         }

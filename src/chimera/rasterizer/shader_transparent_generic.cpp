@@ -360,7 +360,7 @@ namespace Chimera {
 
         // Release pixel shaders.
         for(std::uint16_t i = 0; i < MAX_GENERIC_INSTANCE_COUNT; i++) {
-            if(generic_instance_cache[i].shader && (generic_instance_cache[i].shader != chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_WHITE_1_1] || generic_instance_cache[i].shader != chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_WHITE])) {
+            if(generic_instance_cache[i].shader && generic_instance_cache[i].shader != chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_WHITE_1_1] && generic_instance_cache[i].shader != chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_WHITE]) {
                 IDirect3DPixelShader9_Release(generic_instance_cache[i].shader);
             }
             if(generic_instance_cache[i].shader_fogged && generic_instance_cache[i].shader_fogged != chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_WHITE_1_1]) {
@@ -413,6 +413,7 @@ namespace Chimera {
         // Do we already have a shader for these defines?
         for(std::uint16_t i = 0; i < generic_instance_index && i < MAX_GENERIC_INSTANCE_COUNT; i++) {
             if(strncmp(generic_instance_cache[i].instance_hash, hash, 32) == 0) {
+                GlobalFree(hash);
                 return i;
             }
         }
@@ -654,7 +655,12 @@ namespace Chimera {
             TransparentGeometryGroup group_layer;
             memcpy(&group_layer, group, sizeof(TransparentGeometryGroup));
             group_layer.sorted_index = -1;
-            group_layer.shader = get_tag(shader_transparent_generic_get_layer(shader_data, layer_index)->tag_id)->data;
+            auto *layer = shader_transparent_generic_get_layer(shader_data, layer_index);
+            auto *layer_tag = layer ? get_tag(layer->tag_id) : nullptr;
+            if(!layer_tag || !layer_tag->data) {
+                continue;
+            }
+            group_layer.shader = layer_tag->data;
 
             rasterizer_transparent_geometry_group_draw(&group_layer, is_dirty);
         }
@@ -677,17 +683,20 @@ namespace Chimera {
         // Numeric bitmap indexing
         if(TEST_FLAG(shader_data->generic.flags, SHADER_TRANSPARENT_GENERIC_FLAGS_NUMERIC_BIT) && group->animation && shader_data->generic.maps.count > 0) {
             ShaderTransparentGenericMap *map = shader_transparent_generic_get_map(shader_data, 0);
+            auto *bitmap_tag = map ? get_tag(map->map.tag_id) : nullptr;
+            auto *bitmap = bitmap_tag && bitmap_tag->data ? reinterpret_cast<Bitmap *>(bitmap_tag->data) : nullptr;
+            const short base = bitmap ? bitmap->bitmap_data.count : 0;
+            if(base > 0) {
+                short numeric_counter_source_index = (base == 8) ? 3 : 0;
 
-            short base = reinterpret_cast<Bitmap *>(get_tag(map->map.tag_id)->data)->bitmap_data.count;
-            short numeric_counter_source_index = (base == 8) ? 3 : 0;
+                short numeric_counter_limit = shader_data->generic.numeric_counter_limit;
+                short numeric_counter = PIN(fast_ftol_floor(0.5f + group->animation->values[numeric_counter_source_index] * static_cast<float>(numeric_counter_limit)), 0, numeric_counter_limit);
+                for(short i = 0; i < group->shader_permutation_index; i++) {
+                    numeric_counter /= base;
+                }
 
-            short numeric_counter_limit = shader_data->generic.numeric_counter_limit;
-            short numeric_counter = PIN(fast_ftol_floor(0.5f + group->animation->values[numeric_counter_source_index] * static_cast<float>(numeric_counter_limit)), 0, numeric_counter_limit);
-            for(short i = 0; i < group->shader_permutation_index; i++) {
-                numeric_counter /= base;
+                bitmap_index = numeric_counter % base;
             }
-
-            bitmap_index = numeric_counter % base;
         }
 
         // Maps

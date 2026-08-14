@@ -46,7 +46,7 @@ namespace Chimera {
     template<typename T, typename ... Args> static inline void call_in_order(std::vector<Event<T>> events, Args&& ... args) {
         auto call_events = [&](const std::vector<Event<T>> &events, EventPriority priority) {
             for(const auto &event : events) {
-                if(event.priority == priority) {
+                if(event.priority == priority && event.function) {
                     event.function(std::forward<Args>(args) ...);
                 }
             }
@@ -69,7 +69,7 @@ namespace Chimera {
                 if(!allow) {
                     break;
                 }
-                if(event.priority == priority) {
+                if(event.priority == priority && event.function) {
                     allow = event.function(std::forward<Args>(args) ...);
                 }
             }

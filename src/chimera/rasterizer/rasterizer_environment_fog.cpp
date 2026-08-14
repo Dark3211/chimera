@@ -29,7 +29,17 @@ namespace Chimera {
         RASTERIZER_MAXIMUM_NEARBY_MODEL_GEOMETRY_GROUPS = 128
     };
 
-   #define LAYER_WRAP(layer) (static_cast<short>(static_cast<unsigned short>(layer) % screen_fog->layer_count))
+    static std::int16_t wrap_fog_layer(std::int32_t layer, std::int16_t layer_count) noexcept {
+        if(layer_count <= 0) {
+            return 0;
+        }
+        const std::int32_t count = layer_count;
+        std::int32_t wrapped = layer % count;
+        if(wrapped < 0) {
+            wrapped += count;
+        }
+        return static_cast<std::int16_t>(wrapped);
+    }
 
     struct FogScreenWindData {
         VectorIJ wind_direction;
@@ -72,8 +82,12 @@ namespace Chimera {
     };
 
     bool rasterizer_environment_fog_screen_initialize() noexcept {
-        local_queued_model_geometry_groups = reinterpret_cast<TransparentGeometryGroup *>(GlobalAlloc(0, sizeof(TransparentGeometryGroup) * RASTERIZER_MAXIMUM_NEARBY_MODEL_GEOMETRY_GROUPS));
-        memset(local_queued_model_geometry_groups, 0, sizeof(sizeof(TransparentGeometryGroup) * RASTERIZER_MAXIMUM_NEARBY_MODEL_GEOMETRY_GROUPS));
+        constexpr std::size_t allocation_size = sizeof(TransparentGeometryGroup) * RASTERIZER_MAXIMUM_NEARBY_MODEL_GEOMETRY_GROUPS;
+        local_queued_model_geometry_groups = reinterpret_cast<TransparentGeometryGroup *>(GlobalAlloc(GMEM_FIXED | GMEM_ZEROINIT, allocation_size));
+        if(!local_queued_model_geometry_groups) {
+            local_queued_model_geometry_group_count = 0;
+            return false;
+        }
         local_queued_model_geometry_group_count = 0;
 
         return true;
@@ -86,7 +100,9 @@ namespace Chimera {
     void rasterizer_environment_fog_screen_dispose() noexcept {
         if(local_queued_model_geometry_groups) {
             GlobalFree(local_queued_model_geometry_groups);
-        }        
+            local_queued_model_geometry_groups = nullptr;
+        }
+        local_queued_model_geometry_group_count = 0;
     }
 
     static bool rasterizer_environment_fog_screen_is_active() noexcept {
@@ -99,7 +115,7 @@ namespace Chimera {
 
         std::int16_t window_index = global_window_parameters->window_index;
 
-        if(window_index < 0 || window_index > MAXIMUM_WINDOWS) {
+        if(window_index < 0 || window_index >= MAXIMUM_WINDOWS) {
             return false;
         }
 
@@ -111,6 +127,7 @@ namespace Chimera {
                 global_window_parameters->fog.screen->layer_count > 0 &&
                 !global_window_parameters->fog.screen->map.tag_id.is_null() && 
                 global_window_parameters->fog.screen->far_distance != 0.0f &&
+                std::fabs(global_window_parameters->fog.screen->far_distance - global_window_parameters->fog.screen->near_distance) > 0.01f &&
                 global_window_parameters->fog.screen->far_density != 0.0f)
             {
                 if(!TEST_FLAG(global_window_parameters->fog.runtime_flags, RENDER_FOG_RUNTIME_SCREEN_USE_SKY_INTERPOLATOR_BIT) || global_window_parameters->fog.screen_external_intensity > 0.0f) {
@@ -219,6 +236,9 @@ namespace Chimera {
             short clamped_layer_count = PIN(screen_fog->layer_count, 1, static_cast<short>(MAXIMUM_NUMBER_OF_FOG_LAYERS));
 
             if(pass == 0) {
+                local_fog_environment_geometry_flag = false;
+                local_fog_model_geometry_flag = false;
+
                 Matrix4x3 transform;
 
                 static Matrix4x3 previous_cameras[MAXIMUM_WINDOWS];
@@ -261,6 +281,9 @@ namespace Chimera {
 
                 std::int16_t viewport_width = global_window_parameters->camera.viewport_bounds.right - global_window_parameters->camera.viewport_bounds.left;
                 std::int16_t viewport_height = global_window_parameters->camera.viewport_bounds.bottom - global_window_parameters->camera.viewport_bounds.top;
+                if(viewport_width <= 0 || viewport_height <= 0) {
+                    return;
+                }
                 float viewport_aspect = static_cast<float>(viewport_height) / static_cast<float>(viewport_width);
                 float world_to_texture = 0.5f * screen_fog->map_scale / (viewport_aspect * std::tan(global_window_parameters->camera.vertical_field_of_view / 2.0) * screen_fog->far_distance);
 
@@ -277,24 +300,27 @@ namespace Chimera {
                     std::int16_t layer_offset = static_cast<std::int16_t>(fast_ftol_floor(layer_data->base_z));
 
                     if(layer_offset > 0) {
-                        layer_data->offsets[LAYER_WRAP(layer_data->base_index - 1)].x = real_local_random();
-                        layer_data->offsets[LAYER_WRAP(layer_data->base_index - 1)].y = real_local_random();
+                        layer_data->offsets[wrap_fog_layer(layer_data->base_index - 1, clamped_layer_count)].x = real_local_random();
+                        layer_data->offsets[wrap_fog_layer(layer_data->base_index - 1, clamped_layer_count)].y = real_local_random();
                     }
                     else if(layer_offset < 0) {
                         layer_data->offsets[layer_data->base_index].x = real_local_random();
                         layer_data->offsets[layer_data->base_index].y = real_local_random();
                     }
 
-                    layer_data->base_index = LAYER_WRAP(layer_data->base_index - layer_offset);
+                    layer_data->base_index = wrap_fog_layer(layer_data->base_index - layer_offset, clamped_layer_count);
                     layer_data->base_z -= static_cast<float>(layer_offset);
                 }
 
                 float animation_times[MAXIMUM_NUMBER_OF_FOG_LAYERS];
+                Bitmap *bitmap = get_bitmap_tag(screen_fog->map.tag_id);
+                if(!bitmap || bitmap->bitmap_data.count <= 0) {
+                    return;
+                }
 
                 // Animation
                 for(std::int16_t index = 0; index < clamped_layer_count; index++) {
                     const float animation_phases[] = { 0.0f, 0.7135f, 0.3422f, 0.5798f };
-                    Bitmap *bitmap = get_bitmap_tag(screen_fog->map.tag_id);
 
                     if(screen_fog->animation_period > 0.0f) {
                         float t = static_cast<float>(global_frame_parameters->elapsed_time_sec / static_cast<double>(screen_fog->animation_period) + static_cast<double>(animation_phases[index] * static_cast<float>(bitmap->bitmap_data.count)));
@@ -313,7 +339,7 @@ namespace Chimera {
                 VectorIJKL vsh_constants_texanim[8];
 
                 for(std::int16_t index = 0; index < clamped_layer_count; index++) {
-                    std::int16_t index_2 = LAYER_WRAP(layer_data->base_index + index);
+                    std::int16_t index_2 = wrap_fog_layer(layer_data->base_index + index, clamped_layer_count);
 
                     float layer_distance = layer_to_layer_distance * (layer_data->base_z + static_cast<float>(index)) + screen_fog->near_distance;
                     float layer_pos = inverse_gradient * (layer_distance - screen_fog->near_distance);
@@ -440,7 +466,7 @@ namespace Chimera {
                 IDirect3DDevice9_SetPixelShaderConstantF(*global_d3d9_device, 0, ps_constant, 1);
                 IDirect3DDevice9_SetPixelShader(*global_d3d9_device, chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_FOG]);
 
-                if(local_fog_model_geometry_flag) {
+                if(local_fog_model_geometry_flag && local_queued_model_geometry_groups) {
                     for(std::int16_t group_index = 0; group_index < local_queued_model_geometry_group_count; group_index++) {
                         TransparentGeometryGroup *group = &local_queued_model_geometry_groups[group_index];
 
@@ -526,6 +552,7 @@ namespace Chimera {
         if(rasterizer_environment_fog_screen_is_active()) {
             FogScreen *screen_fog = global_window_parameters->fog.screen;
             FogScreenData *layer_data = &local_fog_screen_data[global_window_parameters->window_index];
+            const std::int16_t clamped_layer_count = PIN(screen_fog->layer_count, 1, static_cast<short>(MAXIMUM_NUMBER_OF_FOG_LAYERS));
 
             bool multipass_flag  = local_fog_environment_geometry_flag || local_fog_model_geometry_flag;
 
@@ -537,8 +564,8 @@ namespace Chimera {
             float *planar_color = &ps_constants[16];
 
             for(short i = 0; i < MAXIMUM_NUMBER_OF_FOG_LAYERS; i++) {
-                short index_2 = LAYER_WRAP(layer_data->base_index + i);
-                bool use_fog_map = i < screen_fog->layer_count;
+                short index_2 = wrap_fog_layer(layer_data->base_index + i, clamped_layer_count);
+                bool use_fog_map = i < clamped_layer_count;
 
                 rasterizer_set_texture_direct(i, use_fog_map ? local_fog_layer_animation_frames[index_2] : 0, use_fog_map ? screen_fog->map.tag_id : (*global_rasterizer_data)->default_2d.tag_id);
                 rasterizer_set_sampler_state(i, D3DSAMP_ADDRESSU, D3DTADDRESS_WRAP);
@@ -608,6 +635,9 @@ namespace Chimera {
 
     bool rasterizer_environment_fog_screen_model_begin(const RasterizerModelBeginParams *params) noexcept {
         bool active = false;
+        if(!params) {
+            return false;
+        }
 
         if(rasterizer_debug_options->draw_environment_fog_screen && rasterizer_debug_options->drawing_mode == 0) {
             if(rasterizer_environment_fog_screen_is_active()) {
@@ -631,6 +661,9 @@ namespace Chimera {
     }
 
     extern "C" void rasterizer_environment_fog_screen_model_submit(_shader *shader, short shader_permutation_index, TriangleBuffer *triangle_buffer, long dynamic_triangle_buffer_index, long triangle_count, VertexBuffer *vertex_buffer, long dynamic_vertex_buffer_index) noexcept {
+        if(!local_queued_model_geometry_groups || !local_params) {
+            return;
+        }
         if(rasterizer_debug_options->draw_environment_fog_screen && rasterizer_debug_options->drawing_mode == 0) {
             if(local_queued_model_geometry_group_count < RASTERIZER_MAXIMUM_NEARBY_MODEL_GEOMETRY_GROUPS) {
                 TransparentGeometryGroup *group = &local_queued_model_geometry_groups[local_queued_model_geometry_group_count++];

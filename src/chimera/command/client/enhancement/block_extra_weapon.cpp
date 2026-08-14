@@ -168,7 +168,14 @@ namespace Chimera {
         }
 
         blocked_ids.emplace_back(weapon->definition_index.index.index);
-        console_output(localize("chimera_block_extra_weapon_blocked"), map_is_protected() ? localize("chimera_tag_map_is_protected") : get_tag(weapon->definition_index)->path);
+        const char *weapon_path = localize("chimera_tag_map_is_protected");
+        if(!map_is_protected()) {
+            auto *weapon_tag = get_tag(weapon->definition_index);
+            if(weapon_tag && weapon_tag->path) {
+                weapon_path = weapon_tag->path;
+            }
+        }
+        console_output(localize("chimera_block_extra_weapon_blocked"), weapon_path);
         set_up_hook();
 
         return true;

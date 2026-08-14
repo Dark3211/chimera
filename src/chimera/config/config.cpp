@@ -12,6 +12,9 @@
 
 namespace Chimera {
     const std::vector<std::string> *Config::get_settings_for_command(const char *command) const {
+        if(!command) {
+            return nullptr;
+        }
         for(auto &c : this->p_settings) {
             if(std::strcmp(c.first.data(), command) == 0) {
                 return &c.second;
@@ -21,6 +24,9 @@ namespace Chimera {
     }
 
     void Config::set_settings_for_command(const char *command, const std::vector<std::string> &settings) {
+        if(!command) {
+            return;
+        }
         for(auto &c : this->p_settings) {
             if(std::strcmp(c.first.data(), command) == 0) {
                 if(c.second == settings) {
