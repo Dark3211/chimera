@@ -105,7 +105,19 @@ namespace Chimera {
         }
         else {
             const auto &resolution = get_resolution();
-            float aspect_ratio = resolution.height == 0 ? (4.0f / 3.0f) : static_cast<float>(resolution.width) / static_cast<float>(resolution.height);
+            static std::uint16_t cached_resolution_width = 0;
+            static std::uint16_t cached_resolution_height = 0;
+            static float cached_aspect_ratio = 4.0f / 3.0f;
+            static bool cached_aspect_ratio_valid = false;
+
+            if(!cached_aspect_ratio_valid || cached_resolution_width != resolution.width || cached_resolution_height != resolution.height) {
+                cached_aspect_ratio = resolution.height == 0 ? (4.0f / 3.0f) : static_cast<float>(resolution.width) / static_cast<float>(resolution.height);
+                cached_resolution_width = resolution.width;
+                cached_resolution_height = resolution.height;
+                cached_aspect_ratio_valid = true;
+            }
+
+            const float aspect_ratio = cached_aspect_ratio;
             switch(get_widescreen_fix()) {
                 case WIDESCREEN_CENTER_HUD: {
                     viewport_width = aspect_ratio >= (4.f / 3.f) ? HUD_BASE_HEIGHT * (4.f / 3.f) : HUD_BASE_HEIGHT * aspect_ratio;
@@ -217,7 +229,7 @@ namespace Chimera {
             point_temp_result_y = ((absolute_placement->anchor & 2) ? -1 : 1) * placement->offset.y * highres_scale * scale + ((absolute_placement->anchor & 2) ? (viewport_height - (global_fix_flags.old_widescreen_fix ? 0.0f : padding_y)) : padding_y);
         }
         else {
-            point_temp_result_x = placement->offset.x * highres_scale * scale + (viewport_width / 2.0f);
+            point_temp_result_x = placement->offset.x * highres_scale * scale + half_viewport_width;
             point_temp_result_y = placement->offset.y * highres_scale * scale + (viewport_height / 2.0f);
         }
     }

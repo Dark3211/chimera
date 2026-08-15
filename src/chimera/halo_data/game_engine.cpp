@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-#include <optional>
+#include <exception>
 #include "../signature/signature.hpp"
 #include "../chimera.hpp"
 
@@ -8,19 +8,21 @@
 
 namespace Chimera {
     GameEngine game_engine() noexcept {
-        static auto *game_engine = *reinterpret_cast<const char **>(get_chimera().get_signature("game_engine_sig").data() + 4);
-        static std::optional<GameEngine> game_engine_used;
-        if(!game_engine_used.has_value()) {
-            if(std::strcmp(game_engine, "halom") == 0) {
-                game_engine_used = GameEngine::GAME_ENGINE_CUSTOM_EDITION;
+        static const GameEngine game_engine_used = []() noexcept -> GameEngine {
+            const auto *game_engine_name = *reinterpret_cast<const char **>(get_chimera().get_signature("game_engine_sig").data() + 4);
+            if(std::strcmp(game_engine_name, "halom") == 0) {
+                return GameEngine::GAME_ENGINE_CUSTOM_EDITION;
             }
-            else if(std::strcmp(game_engine, "halor") == 0) {
-                game_engine_used = GameEngine::GAME_ENGINE_RETAIL;
+            if(std::strcmp(game_engine_name, "halor") == 0) {
+                return GameEngine::GAME_ENGINE_RETAIL;
             }
-            else if(std::strcmp(game_engine, "halod") == 0) {
-                game_engine_used = GameEngine::GAME_ENGINE_DEMO;
+            if(std::strcmp(game_engine_name, "halod") == 0) {
+                return GameEngine::GAME_ENGINE_DEMO;
             }
-        }
-        return game_engine_used.value();
+
+            // Match the previous noexcept + optional::value() failure semantics for an unknown engine.
+            std::terminate();
+        }();
+        return game_engine_used;
     }
 }
