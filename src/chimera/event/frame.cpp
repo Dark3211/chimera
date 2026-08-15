@@ -10,6 +10,7 @@ namespace Chimera {
     static void enable_frame_hook();
 
     static std::vector<Event<EventFunction>> preframe_events;
+    static std::size_t preframe_events_version = 0;
     static ReusableEventDispatcher<EventFunction> preframe_dispatcher;
 
     void add_preframe_event(const EventFunction function, EventPriority priority) {
@@ -21,18 +22,21 @@ namespace Chimera {
 
         // Add the event
         preframe_events.emplace_back(Event<EventFunction> { function, priority });
+        preframe_events_version++;
     }
 
     void remove_preframe_event(const EventFunction function) {
         for(std::size_t i = 0; i < preframe_events.size(); i++) {
             if(preframe_events[i].function == function) {
                 preframe_events.erase(preframe_events.begin() + i);
+                preframe_events_version++;
                 return;
             }
         }
     }
 
     static std::vector<Event<EventFunction>> frame_events;
+    static std::size_t frame_events_version = 0;
     static ReusableEventDispatcher<EventFunction> frame_dispatcher;
 
     void add_frame_event(const EventFunction function, EventPriority priority) {
@@ -44,23 +48,25 @@ namespace Chimera {
 
         // Add the event
         frame_events.emplace_back(Event<EventFunction> { function, priority });
+        frame_events_version++;
     }
 
     void remove_frame_event(const EventFunction function) {
         for(std::size_t i = 0; i < frame_events.size(); i++) {
             if(frame_events[i].function == function) {
                 frame_events.erase(frame_events.begin() + i);
+                frame_events_version++;
                 return;
             }
         }
     }
 
     static void on_preframe() {
-        preframe_dispatcher.dispatch(preframe_events);
+        preframe_dispatcher.dispatch_versioned(preframe_events, preframe_events_version);
     }
 
     static void on_frame() {
-        frame_dispatcher.dispatch(frame_events);
+        frame_dispatcher.dispatch_versioned(frame_events, frame_events_version);
     }
 
     /**

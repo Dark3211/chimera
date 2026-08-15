@@ -3,6 +3,7 @@
 #ifndef CHIMERA_EVENT_HPP
 #define CHIMERA_EVENT_HPP
 
+#include <cstddef>
 #include <utility>
 #include <vector>
 
@@ -69,10 +70,11 @@ namespace Chimera {
      * Reusable snapshot dispatcher for hot event paths.
      *
      * The source event list is still snapshotted before callbacks run, preserving the
-     * existing add/remove-during-callback behavior. The snapshot vector retains its
-     * capacity between dispatches so steady-state frame/tick paths avoid repeated heap
-     * allocations. Recursive dispatch falls back to the normal copy-based path so the
-     * active snapshot cannot be overwritten.
+     * existing add/remove-during-callback behavior. Versioned dispatch can retain that
+     * snapshot unchanged until the source list is actually modified, eliminating both
+     * allocations and element copies in steady-state frame/tick paths.
+     * Recursive dispatch falls back to the normal copy-based path so the active snapshot
+     * cannot be overwritten.
      */
     template<typename T> class ReusableEventDispatcher {
     public:
@@ -83,6 +85,26 @@ namespace Chimera {
             }
 
             this->p_snapshot.assign(events.begin(), events.end());
+            this->dispatch_snapshot(std::forward<Args>(args) ...);
+        }
+
+        template<typename ... Args> void dispatch_versioned(const std::vector<Event<T>> &events, std::size_t version, Args&& ... args) {
+            if(this->p_dispatching) {
+                call_in_order(events, std::forward<Args>(args) ...);
+                return;
+            }
+
+            if(!this->p_snapshot_version_valid || this->p_snapshot_version != version) {
+                this->p_snapshot.assign(events.begin(), events.end());
+                this->p_snapshot_version = version;
+                this->p_snapshot_version_valid = true;
+            }
+
+            this->dispatch_snapshot(std::forward<Args>(args) ...);
+        }
+
+    private:
+        template<typename ... Args> void dispatch_snapshot(Args&& ... args) {
             this->p_dispatching = true;
             struct DispatchGuard {
                 bool &dispatching;
@@ -94,8 +116,9 @@ namespace Chimera {
             call_in_order_snapshot(this->p_snapshot, std::forward<Args>(args) ...);
         }
 
-    private:
         std::vector<Event<T>> p_snapshot;
+        std::size_t p_snapshot_version = 0;
+        bool p_snapshot_version_valid = false;
         bool p_dispatching = false;
     };
 

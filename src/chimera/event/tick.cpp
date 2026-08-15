@@ -14,6 +14,7 @@ namespace Chimera {
     static LARGE_INTEGER current_tick_time;
 
     static std::vector<Event<EventFunction>> pretick_events;
+    static std::size_t pretick_events_version = 0;
     static ReusableEventDispatcher<EventFunction> pretick_dispatcher;
 
     void add_pretick_event(const EventFunction function, EventPriority priority) {
@@ -25,18 +26,21 @@ namespace Chimera {
 
         // Add the event
         pretick_events.emplace_back(Event<EventFunction> { function, priority });
+        pretick_events_version++;
     }
 
     void remove_pretick_event(const EventFunction function) {
         for(std::size_t i = 0; i < pretick_events.size(); i++) {
             if(pretick_events[i].function == function) {
                 pretick_events.erase(pretick_events.begin() + i);
+                pretick_events_version++;
                 return;
             }
         }
     }
 
     static std::vector<Event<EventFunction>> tick_events;
+    static std::size_t tick_events_version = 0;
     static ReusableEventDispatcher<EventFunction> tick_dispatcher;
 
     void add_tick_event(const EventFunction function, EventPriority priority) {
@@ -48,24 +52,26 @@ namespace Chimera {
 
         // Add the event
         tick_events.emplace_back(Event<EventFunction> { function, priority });
+        tick_events_version++;
     }
 
     void remove_tick_event(const EventFunction function) {
         for(std::size_t i = 0; i < tick_events.size(); i++) {
             if(tick_events[i].function == function) {
                 tick_events.erase(tick_events.begin() + i);
+                tick_events_version++;
                 return;
             }
         }
     }
 
     static void on_pretick() {
-        pretick_dispatcher.dispatch(pretick_events);
+        pretick_dispatcher.dispatch_versioned(pretick_events, pretick_events_version);
     }
 
     static void on_tick() {
         QueryPerformanceCounter(&current_tick_time);
-        tick_dispatcher.dispatch(tick_events);
+        tick_dispatcher.dispatch_versioned(tick_events, tick_events_version);
     }
 
     /**

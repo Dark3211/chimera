@@ -9,6 +9,7 @@ namespace Chimera {
     static void enable_camera_hook();
 
     static std::vector<Event<EventFunction>> precamera_events;
+    static std::size_t precamera_events_version = 0;
     static ReusableEventDispatcher<EventFunction> precamera_dispatcher;
 
     void add_precamera_event(const EventFunction function, EventPriority priority) {
@@ -20,18 +21,21 @@ namespace Chimera {
 
         // Add the event
         precamera_events.emplace_back(Event<EventFunction> { function, priority });
+        precamera_events_version++;
     }
 
     void remove_precamera_event(const EventFunction function) {
         for(std::size_t i = 0; i < precamera_events.size(); i++) {
             if(precamera_events[i].function == function) {
                 precamera_events.erase(precamera_events.begin() + i);
+                precamera_events_version++;
                 return;
             }
         }
     }
 
     static std::vector<Event<EventFunction>> camera_events;
+    static std::size_t camera_events_version = 0;
     static ReusableEventDispatcher<EventFunction> camera_dispatcher;
 
     void add_camera_event(const EventFunction function, EventPriority priority) {
@@ -43,23 +47,25 @@ namespace Chimera {
 
         // Add the event
         camera_events.emplace_back(Event<EventFunction> { function, priority });
+        camera_events_version++;
     }
 
     void remove_camera_event(const EventFunction function) {
         for(std::size_t i = 0; i < camera_events.size(); i++) {
             if(camera_events[i].function == function) {
                 camera_events.erase(camera_events.begin() + i);
+                camera_events_version++;
                 return;
             }
         }
     }
 
     static void on_precamera() {
-        precamera_dispatcher.dispatch(precamera_events);
+        precamera_dispatcher.dispatch_versioned(precamera_events, precamera_events_version);
     }
 
     static void on_camera() {
-        camera_dispatcher.dispatch(camera_events);
+        camera_dispatcher.dispatch_versioned(camera_events, camera_events_version);
     }
 
     /**

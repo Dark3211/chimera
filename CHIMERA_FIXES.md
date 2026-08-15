@@ -133,8 +133,9 @@ Actualizado: 2026-08-14
 
 ## Optimización general actual
 
-- Los dispatchers de `preframe`, `frame`, `pretick`, `tick`, `precamera`, `camera` y `D3D9 EndScene` reutilizan un snapshot interno de eventos en vez de crear/destruir una asignación de `std::vector` en cada dispatch estable.
+- Los dispatchers de `preframe`, `frame`, `pretick`, `tick`, `precamera`, `camera` y `D3D9 EndScene` mantienen un contador de versión y solo reconstruyen su snapshot cuando la lista de callbacks cambia.
+- En funcionamiento estable, esas rutas reutilizan el snapshot sin nuevas asignaciones de heap ni copias de elementos del `std::vector` en cada frame/tick.
 - Se conserva el orden exacto por prioridad y FIFO dentro de cada prioridad.
-- Se conserva la capacidad de agregar/eliminar eventos desde un callback porque cada dispatch sigue ejecutando un snapshot independiente de la lista fuente.
+- Se conserva la capacidad de agregar/eliminar eventos desde un callback: el dispatch activo continúa sobre su snapshot y el siguiente dispatch recoge la nueva versión.
 - La reentrada del mismo dispatcher usa el camino de copia original para no sobrescribir el snapshot que ya está activo.
 - El fix del first-person model cachea la dirección de su signature durante el setup y evita repetir el lookup por nombre en cada pretick; el puntero dinámico de datos FP sigue leyéndose en cada tick.

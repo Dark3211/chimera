@@ -7,6 +7,7 @@
 
 namespace Chimera {
     static std::vector<Event<EndSceneEventFunction>> end_scene_events;
+    static std::size_t end_scene_events_version = 0;
     static ReusableEventDispatcher<EndSceneEventFunction> end_scene_dispatcher;
 
     static void enable_d3d9_end_scene_hook();
@@ -24,19 +25,21 @@ namespace Chimera {
 
         // Add the event
         end_scene_events.emplace_back(Event<EndSceneEventFunction> { function, priority });
+        end_scene_events_version++;
     }
 
     void remove_d3d9_end_scene_event(const EndSceneEventFunction function) {
         for(std::size_t i = 0; i < end_scene_events.size(); i++) {
             if(end_scene_events[i].function == function) {
                 end_scene_events.erase(end_scene_events.begin() + i);
+                end_scene_events_version++;
                 return;
             }
         }
     }
 
     extern "C" void do_d3d9_end_scene_event(LPDIRECT3DDEVICE9 device) {
-        end_scene_dispatcher.dispatch(end_scene_events, device);
+        end_scene_dispatcher.dispatch_versioned(end_scene_events, end_scene_events_version, device);
     }
 
     static void enable_d3d9_end_scene_hook() {
