@@ -63,7 +63,7 @@ namespace Chimera {
         interpolate_fn(*new_value, *f2_value, f2_up, f2_down, f2_current, f2_direction);
     }
 
-    static void normalize_fn(float &up, float &down, float &current, int &direction) {
+    static void normalize_fn(float &up, float &down, float &current, int &direction, float effective_rate) {
         switch(direction) {
             case 1:
                 current = up;
@@ -74,14 +74,15 @@ namespace Chimera {
         }
 
         // Set our range
-        float increment = 1.0F / (fade_time * effective_tick_rate());
+        float increment = 1.0F / (fade_time * effective_rate);
         down = std::max(current - increment, 0.0F);
         up = std::min(current + increment, 1.0F);
     }
 
     static void on_tick() {
-        normalize_fn(scoreboard_up, scoreboard_down, scoreboard_current, scoreboard_direction);
-        normalize_fn(f2_up, f2_down, f2_current, f2_direction);
+        const float effective_rate = effective_tick_rate();
+        normalize_fn(scoreboard_up, scoreboard_down, scoreboard_current, scoreboard_direction, effective_rate);
+        normalize_fn(f2_up, f2_down, f2_current, f2_direction, effective_rate);
     }
 
     void set_up_scoreboard_fade_fix() noexcept {

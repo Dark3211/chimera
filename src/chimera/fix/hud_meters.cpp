@@ -37,7 +37,7 @@ namespace Chimera {
         pixel32_to_real_argb_color(meter->flash_color, &flash_color);
         pixel32_to_real_argb_color(meter->tint_color, &tint_color);
 
-        float psh_constants[6 * 4] = {0};
+        float psh_constants[6 * 4];
         psh_constants[0] = gradient_min_color.red;
         psh_constants[1] = gradient_min_color.green;
         psh_constants[2] = gradient_min_color.blue;
