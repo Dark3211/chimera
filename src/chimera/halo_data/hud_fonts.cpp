@@ -306,8 +306,8 @@ namespace Chimera {
 
         auto &chimera = get_chimera();
 
-        add_map_preload_event(clear_hud_globals_cache);
-        add_map_load_event(refresh_hud_globals_cache);
+        add_map_load_event(clear_hud_globals_cache, EVENT_PRIORITY_BEFORE);
+        add_map_load_event(refresh_hud_globals_cache, EVENT_PRIORITY_AFTER);
         refresh_hud_globals_cache();
         add_preframe_event(on_frame);
 
