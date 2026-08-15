@@ -12,7 +12,6 @@
 #include "../command/command.hpp"
 #include "../signature/hook.hpp"
 #include "../signature/signature.hpp"
-#include "../event/command.hpp"
 #include "../event/game_loop.hpp"
 #include "../event/map_load.hpp"
 #include "../output/output.hpp"
@@ -50,8 +49,8 @@ namespace Chimera {
     namespace {
         constexpr std::uintptr_t TAG_DATA_SAFE_REGION_SIZE = 0x1700000;
 
-        // Deliberately strong test values so A/B comparisons are unmistakable.
-        // If the rendering path responds as expected, these can be tuned down later.
+        // Validated high-quality profile. Only positive, existing material values are
+        // scaled, so maps retain their original material intent when the option is on.
         constexpr float MATERIAL_SPECULAR_SCALE = 1.50F;
         constexpr float MATERIAL_REFLECTION_PERPENDICULAR_SCALE = 1.25F;
         constexpr float MATERIAL_REFLECTION_PARALLEL_SCALE = 1.35F;
@@ -199,52 +198,47 @@ namespace Chimera {
                 apply_material_quality();
             }
         }
+    }
 
-        bool material_quality_console_command(const char *command) noexcept {
-            auto arguments = split_arguments(command);
-            if(arguments.empty() || arguments[0] != "chimera_material_quality") {
-                return true;
-            }
+    bool material_quality_command(int argc, const char **argv) {
+        std::size_t restored_materials = 0;
+        bool restored = false;
 
-            if(arguments.size() > 2) {
-                console_error("chimera_material_quality: expected zero or one argument (true/false)");
+        if(argc == 1) {
+            if(!argv || !argv[0]) {
                 return false;
             }
 
-            std::size_t restored_materials = 0;
-            bool restored = false;
+            const auto *value = argv[0];
+            if(std::strcmp(value, "true") != 0 && std::strcmp(value, "false") != 0 &&
+               std::strcmp(value, "1") != 0 && std::strcmp(value, "0") != 0) {
+                console_error("chimera_material_quality: expected true, false, 1, or 0");
+                return false;
+            }
 
-            if(arguments.size() == 2) {
-                const auto &value = arguments[1];
-                if(value != "true" && value != "false" && value != "1" && value != "0") {
-                    console_error("chimera_material_quality: expected true, false, 1, or 0");
-                    return false;
+            const bool new_enabled = STR_TO_BOOL(value);
+            if(new_enabled != material_quality_enabled) {
+                if(new_enabled) {
+                    material_quality_enabled = true;
+                    apply_material_quality();
                 }
-
-                const bool new_enabled = value == "true" || value == "1";
-                if(new_enabled != material_quality_enabled) {
-                    if(new_enabled) {
-                        material_quality_enabled = true;
-                        apply_material_quality();
-                    }
-                    else {
-                        restored_materials = material_quality_snapshot_count;
-                        restore_material_quality();
-                        material_quality_enabled = false;
-                        restored = true;
-                    }
+                else {
+                    restored_materials = material_quality_snapshot_count;
+                    restore_material_quality();
+                    material_quality_enabled = false;
+                    restored = true;
                 }
             }
-
-            console_output("chimera_material_quality: %s", BOOL_TO_STR(material_quality_enabled));
-            if(material_quality_enabled) {
-                print_material_quality_diagnostics();
-            }
-            else if(restored) {
-                console_output("Environment materials restored: %zu", restored_materials);
-            }
-            return false;
         }
+
+        console_output("chimera_material_quality: %s", BOOL_TO_STR(material_quality_enabled));
+        if(material_quality_enabled) {
+            print_material_quality_diagnostics();
+        }
+        else if(restored) {
+            console_output("Environment materials restored: %zu", restored_materials);
+        }
+        return true;
     }
 
     void meme_the_speular_light_draw() noexcept {
@@ -317,9 +311,8 @@ namespace Chimera {
     }
 
     void set_up_shader_environment_fix() noexcept {
-        // Experimental material-quality toggle. It only changes positive, existing
-        // shader_environment specular/reflection values and restores them exactly.
-        add_command_event(material_quality_console_command, EVENT_PRIORITY_BEFORE);
+        // Keep the material snapshots synchronized with the active map. The command
+        // itself is registered in Chimera's normal command table so it can autosave.
         add_map_load_event(clear_material_quality_snapshots, EVENT_PRIORITY_BEFORE);
         add_map_load_event(refresh_material_quality_after_map_load, EVENT_PRIORITY_AFTER);
 
