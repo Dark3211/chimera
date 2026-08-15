@@ -5,6 +5,17 @@
 
 namespace Chimera {
     /**
+     * Register the temporary particle interpolation diagnostic command.
+     */
+    void set_up_particle_interpolation_diagnostic() noexcept;
+
+    /**
+     * Apply a pending diagnostic state change after the current frame has restored
+     * any temporarily interpolated particle positions.
+     */
+    void apply_particle_interpolation_state_change() noexcept;
+
+    /**
      * Interpolate particles.
      */
     void interpolate_particle() noexcept;
