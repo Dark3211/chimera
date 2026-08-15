@@ -281,15 +281,6 @@ namespace Chimera {
             }
         }
 
-        void print_material_quality_diagnostics() noexcept {
-            console_output("Environment shaders scanned: %zu", material_quality_environment_scanned);
-            console_output("Materials modified: %zu", material_quality_materials_modified);
-            console_output("Specular materials modified: %zu", material_quality_specular_modified);
-            console_output("Reflection materials modified: %zu", material_quality_reflection_modified);
-            console_output("Model shaders scanned: %zu", material_quality_models_scanned);
-            console_output("Reflective model materials modified: %zu", material_quality_models_modified);
-        }
-
         void refresh_material_quality_after_map_load() noexcept {
             if(material_quality_enabled) {
                 apply_material_quality();
@@ -298,10 +289,6 @@ namespace Chimera {
     }
 
     bool material_quality_command(int argc, const char **argv) {
-        std::size_t restored_environment_materials = 0;
-        std::size_t restored_model_materials = 0;
-        bool restored = false;
-
         if(argc == 1) {
             if(!argv || !argv[0]) {
                 return false;
@@ -321,23 +308,13 @@ namespace Chimera {
                     apply_material_quality();
                 }
                 else {
-                    restored_environment_materials = material_quality_snapshot_count;
-                    restored_model_materials = model_material_quality_snapshot_count;
                     restore_material_quality();
                     material_quality_enabled = false;
-                    restored = true;
                 }
             }
         }
 
         console_output("chimera_material_quality: %s", BOOL_TO_STR(material_quality_enabled));
-        if(material_quality_enabled) {
-            print_material_quality_diagnostics();
-        }
-        else if(restored) {
-            console_output("Environment materials restored: %zu", restored_environment_materials);
-            console_output("Model materials restored: %zu", restored_model_materials);
-        }
         return true;
     }
 
