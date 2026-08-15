@@ -1,11 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-#include <cctype>
 #include <cstring>
 
 #include "../../halo_data/particle.hpp"
-#include "../../event/command.hpp"
-#include "../../output/output.hpp"
 
 #include "particle.hpp"
 
@@ -25,105 +22,7 @@ namespace Chimera {
     // If true, a tick has passed and it's time to re-copy the particle data.
     static bool tick_passed = false;
 
-    // Temporary diagnostic state. Particle interpolation remains enabled by default.
-    static bool particle_interpolation_enabled = true;
-    static bool particle_interpolation_requested_enabled = true;
-    static bool particle_interpolation_transition_pending = false;
-    static bool particle_interpolation_command_registered = false;
-
-    static bool particle_interpolation_console_command(const char *command) noexcept {
-        if(!command) {
-            return true;
-        }
-
-        static constexpr char command_name[] = "chimera_debug_particle_interpolation";
-        static constexpr std::size_t command_name_length = sizeof(command_name) - 1;
-
-        if(std::strncmp(command, command_name, command_name_length) != 0) {
-            return true;
-        }
-
-        const char *argument = command + command_name_length;
-        if(*argument != '\0' && !std::isspace(static_cast<unsigned char>(*argument))) {
-            return true;
-        }
-
-        while(std::isspace(static_cast<unsigned char>(*argument))) {
-            argument++;
-        }
-
-        if(*argument == '\0') {
-            const bool displayed_state = particle_interpolation_transition_pending
-                ? particle_interpolation_requested_enabled
-                : particle_interpolation_enabled;
-            console_output("chimera_debug_particle_interpolation: %s", displayed_state ? "true" : "false");
-            return false;
-        }
-
-        const char *argument_end = argument;
-        while(*argument_end != '\0' && !std::isspace(static_cast<unsigned char>(*argument_end))) {
-            argument_end++;
-        }
-
-        const std::size_t argument_length = static_cast<std::size_t>(argument_end - argument);
-        while(std::isspace(static_cast<unsigned char>(*argument_end))) {
-            argument_end++;
-        }
-
-        if(*argument_end != '\0') {
-            console_error("chimera_debug_particle_interpolation: expected true or false");
-            return false;
-        }
-
-        bool new_enabled;
-        if((argument_length == 4 && std::strncmp(argument, "true", 4) == 0) ||
-           (argument_length == 1 && argument[0] == '1')) {
-            new_enabled = true;
-        }
-        else if((argument_length == 5 && std::strncmp(argument, "false", 5) == 0) ||
-                (argument_length == 1 && argument[0] == '0')) {
-            new_enabled = false;
-        }
-        else {
-            console_error("chimera_debug_particle_interpolation: expected true or false");
-            return false;
-        }
-
-        particle_interpolation_requested_enabled = new_enabled;
-        particle_interpolation_transition_pending = new_enabled != particle_interpolation_enabled;
-
-        console_output("chimera_debug_particle_interpolation: %s", new_enabled ? "true" : "false");
-        return false;
-    }
-
-    void set_up_particle_interpolation_diagnostic() noexcept {
-        if(!particle_interpolation_command_registered) {
-            add_command_event(particle_interpolation_console_command, EVENT_PRIORITY_BEFORE);
-            particle_interpolation_command_registered = true;
-        }
-    }
-
-    void apply_particle_interpolation_state_change() noexcept {
-        if(!particle_interpolation_transition_pending) {
-            return;
-        }
-
-        particle_interpolation_transition_pending = false;
-        if(particle_interpolation_requested_enabled == particle_interpolation_enabled) {
-            return;
-        }
-
-        // This is called after interpolate_particle_after(), so no frame can be left
-        // with temporary interpolated positions when the diagnostic mode changes.
-        particle_interpolation_enabled = particle_interpolation_requested_enabled;
-        interpolate_particle_clear();
-    }
-
     void interpolate_particle() noexcept {
-        if(!particle_interpolation_enabled) {
-            return;
-        }
-
         auto &particle_table = ParticleTable::get_particle_table();
         if(tick_passed) {
             // Swap buffers.
@@ -175,10 +74,6 @@ namespace Chimera {
     }
 
     void interpolate_particle_after() noexcept {
-        if(!particle_interpolation_enabled) {
-            return;
-        }
-
         auto &particle_table = ParticleTable::get_particle_table();
         for(std::size_t i = 0; i < particle_table.current_size && i < PARTICLE_BUFFER_SIZE; i++) {
             auto *particle = particle_table.get_element(i);
@@ -204,8 +99,6 @@ namespace Chimera {
     }
 
     void interpolate_particle_on_tick() noexcept {
-        if(particle_interpolation_enabled) {
-            tick_passed = true;
-        }
+        tick_passed = true;
     }
 }

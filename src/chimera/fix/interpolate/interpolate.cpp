@@ -77,7 +77,6 @@ namespace Chimera {
         interpolate_antenna_after();
         interpolate_object_after();
         interpolate_particle_after();
-        apply_particle_interpolation_state_change();
     }
 
     void clear_buffers() noexcept {
@@ -93,8 +92,6 @@ namespace Chimera {
         static auto *fp_interp_ptr = get_chimera().get_signature("fp_interp_sig").data();
         static Hook fp_interp_hook;
         first_person_camera_tick_rate = *reinterpret_cast<float **>(get_chimera().get_signature("fp_cam_tick_rate_sig").data() + 2);
-
-        set_up_particle_interpolation_diagnostic();
 
         add_tick_event(on_tick);
         add_preframe_event(on_preframe);
