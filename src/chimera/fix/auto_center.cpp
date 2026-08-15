@@ -7,9 +7,11 @@
 #include "../event/tick.hpp"
 
 namespace Chimera {
+    static Signature *auto_center_signature = nullptr;
+
     // Apply the mod, disabling auto centering.
     static void apply_mod() noexcept {
-        overwrite(get_chimera().get_signature("auto_center_sig").data(), static_cast<std::uint16_t>(0x9090));
+        overwrite(auto_center_signature->data(), static_cast<std::uint16_t>(0x9090));
     }
 
     // This is the number of frames that occurred this tick.
@@ -25,12 +27,16 @@ namespace Chimera {
 
     // Re-enable auto centering, ensuring that the camera movement only occurs only occurs once per tick. Set frame counter to 0.
     static void auto_center_tick() noexcept {
-        get_chimera().get_signature("auto_center_sig").rollback();
+        auto_center_signature->rollback();
         frames = 0;
         add_frame_event(auto_center_frame);
     }
 
     void set_up_auto_center_fix(bool disabled) noexcept {
+        if(!auto_center_signature) {
+            auto_center_signature = &get_chimera().get_signature("auto_center_sig");
+        }
+
         if(disabled) {
             apply_mod();
             remove_pretick_event(auto_center_tick);
