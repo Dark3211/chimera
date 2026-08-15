@@ -37,6 +37,9 @@ namespace Chimera {
     bool interpolation_enabled = false;
 
     static bool interpolation_command_registered = false;
+    static bool interpolation_transition_registered = false;
+    static bool interpolation_requested_enabled = true;
+    static bool interpolation_transition_pending = false;
 
     static bool interpolation_console_command(const char *command) noexcept {
         if(!command) {
@@ -62,7 +65,8 @@ namespace Chimera {
         }
 
         if(*argument == '\0') {
-            console_output("chimera_interpolate: %s", BOOL_TO_STR(interpolation_enabled));
+            const bool displayed_state = interpolation_transition_pending ? interpolation_requested_enabled : interpolation_enabled;
+            console_output("chimera_interpolate: %s", BOOL_TO_STR(displayed_state));
             return false;
         }
 
@@ -95,16 +99,10 @@ namespace Chimera {
             return false;
         }
 
-        if(new_enabled != interpolation_enabled) {
-            if(new_enabled) {
-                set_up_interpolation();
-            }
-            else {
-                disable_interpolation();
-            }
-        }
+        interpolation_requested_enabled = new_enabled;
+        interpolation_transition_pending = new_enabled != interpolation_enabled;
 
-        console_output("chimera_interpolate: %s", BOOL_TO_STR(interpolation_enabled));
+        console_output("chimera_interpolate: %s", BOOL_TO_STR(new_enabled));
         return false;
     }
 
@@ -161,6 +159,28 @@ namespace Chimera {
         interpolate_fp_clear();
     }
 
+    static void apply_interpolation_state_change() noexcept {
+        if(!interpolation_transition_pending) {
+            return;
+        }
+
+        const bool requested_enabled = interpolation_requested_enabled;
+        interpolation_transition_pending = false;
+
+        if(requested_enabled == interpolation_enabled) {
+            return;
+        }
+
+        // Run this from an AFTER frame event so the normal interpolation rollback for
+        // the current frame has already completed before any hooks/events are removed.
+        if(requested_enabled) {
+            set_up_interpolation();
+        }
+        else {
+            disable_interpolation();
+        }
+    }
+
     void set_up_interpolation() noexcept {
         static auto *fp_interp_ptr = get_chimera().get_signature("fp_interp_sig").data();
         static Hook fp_interp_hook;
@@ -169,6 +189,13 @@ namespace Chimera {
         if(!interpolation_command_registered) {
             add_command_event(interpolation_console_command, EVENT_PRIORITY_BEFORE);
             interpolation_command_registered = true;
+        }
+
+        // Keep this event registered even when interpolation itself is disabled. That
+        // lets the diagnostic command re-enable interpolation at a safe frame boundary.
+        if(!interpolation_transition_registered) {
+            add_frame_event(apply_interpolation_state_change, EVENT_PRIORITY_AFTER);
+            interpolation_transition_registered = true;
         }
 
         add_tick_event(on_tick);
@@ -184,6 +211,7 @@ namespace Chimera {
         //Clear interpolation buffers on major game state changes to prevent funny things from happening
         add_revert_event(clear_buffers);
         interpolation_enabled = true;
+        interpolation_requested_enabled = true;
     }
 
     void disable_interpolation() noexcept {
@@ -195,6 +223,8 @@ namespace Chimera {
         remove_precamera_event(interpolate_camera_before);
         remove_camera_event(interpolate_camera_after);
         remove_revert_event(clear_buffers);
+        clear_buffers();
         interpolation_enabled = false;
+        interpolation_requested_enabled = false;
     }
 }
