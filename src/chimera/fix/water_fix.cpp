@@ -4,6 +4,7 @@
 #include <cmath>
 
 #include "water_fix.hpp"
+#include "af.hpp"
 #include "../chimera.hpp"
 #include "../signature/hook.hpp"
 #include "../signature/signature.hpp"
@@ -30,6 +31,7 @@ namespace Chimera {
     static D3DCAPS9 *d3d9_device_caps = nullptr;
     static std::byte *global_render_targets = nullptr;
     static std::byte *bump_vertices = nullptr;
+    static constexpr float high_quality_water_lod_bias = 0.25f;
 
     extern "C" void set_water_shader_const(std::byte *shader, std::uint32_t start_register) noexcept {
         // Apply mip map lod bias to ripple maps. Bullshit the value specified in the tag to look like 480p ripples.
@@ -47,6 +49,12 @@ namespace Chimera {
                 cached_resolution_valid = true;
             }
             float adjusted_lod_bias = cached_resolution_lod_bias - (*reinterpret_cast<float *>(shader + 0xE0));
+
+            // AF is already the user's high-quality texture toggle. Keep water ripples
+            // slightly sharper with it enabled without changing the tag's base bias.
+            if(af_is_enabled && *af_is_enabled) {
+                adjusted_lod_bias -= high_quality_water_lod_bias;
+            }
 
             // Bump map is on sampler 0.
             DWORD *mip_lod_bias = reinterpret_cast<DWORD *>(&adjusted_lod_bias);
