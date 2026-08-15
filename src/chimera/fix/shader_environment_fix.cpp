@@ -1,16 +1,27 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+#include <array>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+
 #include "shader_environment_fix.hpp"
 #include "map_hacks/map_hacks.hpp"
 #include "../chimera.hpp"
+#include "../command/command.hpp"
 #include "../signature/hook.hpp"
 #include "../signature/signature.hpp"
+#include "../event/command.hpp"
 #include "../event/game_loop.hpp"
+#include "../event/map_load.hpp"
+#include "../output/output.hpp"
 #include "../rasterizer/rasterizer.hpp"
 #include "../halo_data/shader_defs.hpp"
 #include "../halo_data/game_engine.hpp"
 #include "../halo_data/game_functions.hpp"
 #include "../halo_data/game_variables.hpp"
+#include "../halo_data/tag.hpp"
 
 
 namespace Chimera {
@@ -34,6 +45,158 @@ namespace Chimera {
 
         void environment_reflection_set_constants_retail_asm() noexcept;
         void environment_reflection_set_constants_custom_asm() noexcept;
+    }
+
+    namespace {
+        constexpr std::uintptr_t TAG_DATA_SAFE_REGION_SIZE = 0x1700000;
+        constexpr float MATERIAL_SPECULAR_SCALE = 1.15F;
+        constexpr float MATERIAL_REFLECTION_PERPENDICULAR_SCALE = 1.06F;
+        constexpr float MATERIAL_REFLECTION_PARALLEL_SCALE = 1.10F;
+        constexpr std::size_t MAX_MATERIAL_QUALITY_SNAPSHOTS = 4096;
+
+        struct MaterialQualitySnapshot {
+            TagID id;
+            float specular_brightness;
+            float reflection_view_perpendicular_brightness;
+            float reflection_view_parallel_brightness;
+        };
+
+        std::array<MaterialQualitySnapshot, MAX_MATERIAL_QUALITY_SNAPSHOTS> material_quality_snapshots {};
+        std::size_t material_quality_snapshot_count = 0;
+        bool material_quality_enabled = false;
+
+        bool valid_shader_environment_tag(const Tag *tag) noexcept {
+            if(!tag || tag->primary_class != TagClassInt::TAG_CLASS_SHADER_ENVIRONMENT || !tag->data) {
+                return false;
+            }
+
+            const auto base = reinterpret_cast<std::uintptr_t>(get_tag_data_address());
+            if(base > std::numeric_limits<std::uintptr_t>::max() - TAG_DATA_SAFE_REGION_SIZE) {
+                return false;
+            }
+
+            const auto end = base + TAG_DATA_SAFE_REGION_SIZE;
+            const auto data = reinterpret_cast<std::uintptr_t>(tag->data);
+            return data >= base && data <= end - sizeof(ShaderEnvironment);
+        }
+
+        float scale_material_value(float value, float scale) noexcept {
+            if(!std::isfinite(value) || value <= 0.0F || value > std::numeric_limits<float>::max() / scale) {
+                return value;
+            }
+            return value * scale;
+        }
+
+        void clear_material_quality_snapshots() noexcept {
+            // Map-load BEFORE event: the old tag pointers are about to become invalid.
+            material_quality_snapshot_count = 0;
+        }
+
+        void restore_material_quality() noexcept {
+            for(std::size_t i = 0; i < material_quality_snapshot_count; i++) {
+                auto &snapshot = material_quality_snapshots[i];
+                auto *tag = get_tag(snapshot.id);
+                if(!valid_shader_environment_tag(tag)) {
+                    continue;
+                }
+
+                auto *shader = reinterpret_cast<ShaderEnvironment *>(tag->data);
+                shader->environment.specular.brightness = snapshot.specular_brightness;
+                shader->environment.reflection.view_perpendicular_brightness = snapshot.reflection_view_perpendicular_brightness;
+                shader->environment.reflection.view_parallel_brightness = snapshot.reflection_view_parallel_brightness;
+            }
+            material_quality_snapshot_count = 0;
+        }
+
+        void apply_material_quality() noexcept {
+            if(material_quality_snapshot_count != 0) {
+                return;
+            }
+
+            auto tag_count = static_cast<std::size_t>(get_tag_data_header().tag_count);
+            const auto maximum_safe_tag_count = TAG_DATA_SAFE_REGION_SIZE / sizeof(Tag);
+            if(tag_count > maximum_safe_tag_count) {
+                return;
+            }
+
+            for(std::size_t i = 0; i < tag_count; i++) {
+                auto *tag = get_tag(i);
+                if(!valid_shader_environment_tag(tag)) {
+                    continue;
+                }
+
+                auto *shader = reinterpret_cast<ShaderEnvironment *>(tag->data);
+                const auto old_specular = shader->environment.specular.brightness;
+                const auto old_reflection_perpendicular = shader->environment.reflection.view_perpendicular_brightness;
+                const auto old_reflection_parallel = shader->environment.reflection.view_parallel_brightness;
+
+                const auto new_specular = scale_material_value(old_specular, MATERIAL_SPECULAR_SCALE);
+                const auto new_reflection_perpendicular = scale_material_value(old_reflection_perpendicular, MATERIAL_REFLECTION_PERPENDICULAR_SCALE);
+                const auto new_reflection_parallel = scale_material_value(old_reflection_parallel, MATERIAL_REFLECTION_PARALLEL_SCALE);
+
+                if(new_specular == old_specular &&
+                   new_reflection_perpendicular == old_reflection_perpendicular &&
+                   new_reflection_parallel == old_reflection_parallel) {
+                    continue;
+                }
+
+                if(material_quality_snapshot_count >= material_quality_snapshots.size()) {
+                    break;
+                }
+
+                material_quality_snapshots[material_quality_snapshot_count++] = MaterialQualitySnapshot {
+                    tag->id,
+                    old_specular,
+                    old_reflection_perpendicular,
+                    old_reflection_parallel
+                };
+
+                shader->environment.specular.brightness = new_specular;
+                shader->environment.reflection.view_perpendicular_brightness = new_reflection_perpendicular;
+                shader->environment.reflection.view_parallel_brightness = new_reflection_parallel;
+            }
+        }
+
+        void refresh_material_quality_after_map_load() noexcept {
+            if(material_quality_enabled) {
+                apply_material_quality();
+            }
+        }
+
+        bool material_quality_console_command(const char *command) noexcept {
+            auto arguments = split_arguments(command);
+            if(arguments.empty() || arguments[0] != "chimera_material_quality") {
+                return true;
+            }
+
+            if(arguments.size() > 2) {
+                console_error("chimera_material_quality: expected zero or one argument (true/false)");
+                return false;
+            }
+
+            if(arguments.size() == 2) {
+                const auto &value = arguments[1];
+                if(value != "true" && value != "false" && value != "1" && value != "0") {
+                    console_error("chimera_material_quality: expected true, false, 1, or 0");
+                    return false;
+                }
+
+                const bool new_enabled = value == "true" || value == "1";
+                if(new_enabled != material_quality_enabled) {
+                    if(new_enabled) {
+                        material_quality_enabled = true;
+                        apply_material_quality();
+                    }
+                    else {
+                        restore_material_quality();
+                        material_quality_enabled = false;
+                    }
+                }
+            }
+
+            console_output("chimera_material_quality: %s", BOOL_TO_STR(material_quality_enabled));
+            return false;
+        }
     }
 
     void meme_the_speular_light_draw() noexcept {
@@ -106,6 +269,12 @@ namespace Chimera {
     }
 
     void set_up_shader_environment_fix() noexcept {
+        // Experimental material-quality toggle. It only changes positive, existing
+        // shader_environment specular/reflection values and restores them exactly.
+        add_command_event(material_quality_console_command, EVENT_PRIORITY_BEFORE);
+        add_map_load_event(clear_material_quality_snapshots, EVENT_PRIORITY_BEFORE);
+        add_map_load_event(refresh_material_quality_after_map_load, EVENT_PRIORITY_AFTER);
+
         // Fix specular_light texture/sampler mismatch
         add_game_start_event(meme_the_speular_light_draw);
 
