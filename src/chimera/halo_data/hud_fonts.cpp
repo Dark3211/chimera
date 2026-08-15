@@ -12,6 +12,7 @@
 #include "../halo_data/resolution.hpp"
 #include "../fix/widescreen_fix.hpp"
 #include "../event/frame.hpp"
+#include "../event/map_load.hpp"
 #include "../chimera.hpp"
 
 #include "hud_fonts.hpp"
@@ -105,24 +106,34 @@ namespace Chimera {
         std::byte *skip_icon_hud_test_draw = nullptr;
     }
 
-    static const HUDGlobals *hud_globals_data() noexcept {
+    static const HUDGlobals *cached_hud_globals = nullptr;
+
+    static void clear_hud_globals_cache() noexcept {
+        cached_hud_globals = nullptr;
+    }
+
+    static void refresh_hud_globals_cache() noexcept {
+        cached_hud_globals = nullptr;
+
         auto *tag = get_tag("globals\\globals", TagClassInt::TAG_CLASS_GLOBALS);
         if(!tag || !tag->data) {
-            return nullptr;
+            return;
         }
-        auto *tag_data = tag->data;
-        auto *interface_bitmaps = *reinterpret_cast<const std::byte **>(tag_data + 0x140 + 4);
+
+        auto *interface_bitmaps = *reinterpret_cast<const std::byte **>(tag->data + 0x140 + 4);
         if(!interface_bitmaps) {
-            return nullptr;
+            return;
         }
+
         auto &hud_globals = *reinterpret_cast<const TagID *>(interface_bitmaps + 0x60 + 0xC);
         auto *hud_globals_tag = get_tag(hud_globals);
-        return hud_globals_tag && hud_globals_tag->data ? reinterpret_cast<HUDGlobals *>(hud_globals_tag->data) : nullptr;
+        if(hud_globals_tag && hud_globals_tag->data) {
+            cached_hud_globals = reinterpret_cast<const HUDGlobals *>(hud_globals_tag->data);
+        }
     }
 
     static std::uint32_t hud_line_size() noexcept {
-        auto *hud_globals = hud_globals_data();
-        return hud_globals ? hud_globals->messaging.spacing * font_pixel_height(GenericFont::FONT_LARGE) : 0;
+        return cached_hud_globals ? cached_hud_globals->messaging.spacing * font_pixel_height(GenericFont::FONT_LARGE) : 0;
     }
 
     static void on_frame() noexcept {
@@ -295,6 +306,9 @@ namespace Chimera {
 
         auto &chimera = get_chimera();
 
+        add_map_preload_event(clear_hud_globals_cache);
+        add_map_load_event(refresh_hud_globals_cache);
+        refresh_hud_globals_cache();
         add_preframe_event(on_frame);
 
         static SigByte nop_fn[5] = { 0x90, 0x90, 0x90, 0x90, 0x90 };
