@@ -37,7 +37,16 @@ namespace Chimera {
         if(d3d9_device_caps->PixelShaderVersion >= 0xffff0101 && start_register == 1) {
 
             // Probably not "correct" but as close as I'm willing to try and make it.
-            float adjusted_lod_bias = log2f(get_resolution().height / 480.f) - (*reinterpret_cast<float *>(shader + 0xE0));
+            const auto resolution_height = get_resolution().height;
+            static std::uint16_t cached_resolution_height = 0;
+            static float cached_resolution_lod_bias = 0.0f;
+            static bool cached_resolution_valid = false;
+            if(!cached_resolution_valid || cached_resolution_height != resolution_height) {
+                cached_resolution_lod_bias = log2f(static_cast<float>(resolution_height) / 480.0f);
+                cached_resolution_height = resolution_height;
+                cached_resolution_valid = true;
+            }
+            float adjusted_lod_bias = cached_resolution_lod_bias - (*reinterpret_cast<float *>(shader + 0xE0));
 
             // Bump map is on sampler 0.
             DWORD *mip_lod_bias = reinterpret_cast<DWORD *>(&adjusted_lod_bias);
