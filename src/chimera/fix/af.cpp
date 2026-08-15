@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+#include <bit>
 #include <d3d9.h>
 
 #include "af.hpp"
@@ -20,6 +21,8 @@ namespace Chimera {
     std::uint32_t global_max_anisotropy = 16;
     bool af_trial = false;
 
+    static constexpr float high_quality_mip_lod_bias = -0.25f;
+
     static bool af_supported() noexcept {
         return (d3d9_device_caps->RasterCaps & D3DPRASTERCAPS_ANISOTROPY) != 0 && 1 < d3d9_device_caps->MaxAnisotropy;
     }
@@ -37,6 +40,11 @@ namespace Chimera {
         // original AF paths do not consistently request trilinear mip sampling for
         // every material path, which can leave visible mip bands at oblique angles.
         IDirect3DDevice9_SetSamplerState(*global_d3d9_device, sampler, D3DSAMP_MIPFILTER, D3DTEXF_LINEAR);
+
+        // Use a small negative LOD bias to retain a little more texture detail at
+        // distance. Keeping this conservative lets AF absorb most of the additional
+        // aliasing risk while avoiding the over-sharpened look of aggressive biases.
+        IDirect3DDevice9_SetSamplerState(*global_d3d9_device, sampler, D3DSAMP_MIPMAPLODBIAS, std::bit_cast<DWORD>(high_quality_mip_lod_bias));
     }
 
     void set_sampler_states_for_models() noexcept {
