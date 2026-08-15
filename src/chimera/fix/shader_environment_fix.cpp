@@ -314,7 +314,7 @@ namespace Chimera {
             }
         }
 
-        console_output("chimera_material_quality: %s", BOOL_TO_STR(material_quality_enabled));
+        console_output(BOOL_TO_STR(material_quality_enabled));
         return true;
     }
 
