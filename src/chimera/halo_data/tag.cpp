@@ -5,7 +5,6 @@
 #include "../chimera.hpp"
 #include "game_engine.hpp"
 #include "../signature/signature.hpp"
-#include <optional>
 #include <limits>
 #include <cstdint>
 
@@ -136,18 +135,10 @@ namespace Chimera {
     }
 
     std::byte *get_tag_data_address() noexcept {
-        static std::optional<std::byte *> address;
-        if(!address.has_value()) {
-            switch(game_engine()) {
-                case GameEngine::GAME_ENGINE_DEMO:
-                    address = reinterpret_cast<std::byte *>(0x4BF10000);
-                    break;
-                default:
-                    address = reinterpret_cast<std::byte *>(0x40440000);
-                    break;
-            }
-        }
-        return address.value();
+        static auto *address = game_engine() == GameEngine::GAME_ENGINE_DEMO
+            ? reinterpret_cast<std::byte *>(0x4BF10000)
+            : reinterpret_cast<std::byte *>(0x40440000);
+        return address;
     }
 
     std::byte *get_tag_block_data(TagBlock *block, std::uint32_t index, std::uint32_t size) noexcept {

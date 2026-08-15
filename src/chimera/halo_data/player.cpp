@@ -56,10 +56,7 @@ namespace Chimera {
     }
 
     PlayerTable &PlayerTable::get_player_table() noexcept {
-        static PlayerTable *table = nullptr;
-        if(!table) {
-            table = *reinterpret_cast<PlayerTable **>(*reinterpret_cast<std::byte **>(get_chimera().get_signature("player_table_sig").data() + 1));
-        }
+        static auto *table = *reinterpret_cast<PlayerTable **>(*reinterpret_cast<std::byte **>(get_chimera().get_signature("player_table_sig").data() + 1));
         return *table;
     }
 }
