@@ -110,7 +110,10 @@ namespace Chimera {
 
             const auto end = base + TAG_DATA_SAFE_REGION_SIZE;
             const auto data = reinterpret_cast<std::uintptr_t>(tag->data);
-            return data >= base && data_size <= end - data;
+            if(data < base || data > end) {
+                return false;
+            }
+            return data_size <= end - data;
         }
 
         bool valid_shader_environment_tag(const Tag *tag) noexcept {
