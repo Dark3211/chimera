@@ -7,7 +7,25 @@
 #include "../../../halo_data/map.hpp"
 #include "../../../output/output.hpp"
 
+#include <cerrno>
+#include <cstdlib>
+#include <limits>
+
 namespace Chimera {
+    static bool parse_player_number(const char *text, int &index) noexcept {
+        if(!text || !*text) {
+            return false;
+        }
+        errno = 0;
+        char *end = nullptr;
+        unsigned long value = std::strtoul(text, &end, 10);
+        if(errno == ERANGE || end == text || !end || *end != '\0' || value == 0 || value > static_cast<unsigned long>(std::numeric_limits<int>::max())) {
+            return false;
+        }
+        index = static_cast<int>(value - 1);
+        return true;
+    }
+
     static void print_object_info(ObjectID object_id, const char *name, int depth);
     #define OUTPUT_WITH_COLOR(...) console_output(body_color, __VA_ARGS__)
 
@@ -17,10 +35,7 @@ namespace Chimera {
         Player *player;
         if(argc) {
             int index;
-            try {
-                index = std::stoul(*argv) - 1;
-            }
-            catch(std::exception &) {
+            if(!parse_player_number(*argv, index)) {
                 console_error(localize("chimera_error_takes_player_number"));
                 return false;
             }
@@ -78,7 +93,8 @@ namespace Chimera {
         OUTPUT_WITH_COLOR("    %s Object ID: %08X (Address: 0x%08X)", name, object_id.whole_id, reinterpret_cast<std::uintptr_t>(object));
         auto *tag = get_tag(object->definition_index);
         if(tag) {
-            OUTPUT_WITH_COLOR("    %s Object Tag ID: %08X (Path: %s)", name, object->definition_index, map_is_protected() ? localize("chimera_tag_map_is_protected") : tag->path);
+            const char *tag_path = map_is_protected() ? localize("chimera_tag_map_is_protected") : tag->path;
+            OUTPUT_WITH_COLOR("    %s Object Tag ID: %08X (Path: %s)", name ? name : "Object", object->definition_index, tag_path ? tag_path : "<unknown>");
         }
         if(object->object.maximum_shield_vitality) {
             OUTPUT_WITH_COLOR("    %s Object Shield: %.02f%% (%.02f / %.02f hitpoints)", name, object->object.shield_vitality * 100.0F, object->object.maximum_shield_vitality * object->object.shield_vitality, object->object.maximum_shield_vitality);

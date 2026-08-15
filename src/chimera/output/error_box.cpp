@@ -8,6 +8,8 @@
 namespace Chimera {
     void show_error_box(const char *header, const char *text, const std::optional<bool> &force, const std::optional<bool> &is_client) noexcept {
         auto &chimario = get_chimera();
+        header = header ? header : "Error";
+        text = text ? text : "";
         std::fprintf(stderr, "\n\nError [%s]\n\n----------------\n\n%s\n\n----------------\n\n", header, text);
         if (
             is_client.value_or(chimario.feature_present("client")) &&

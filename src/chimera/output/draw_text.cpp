@@ -527,10 +527,16 @@ namespace Chimera {
             TEXTMETRIC tm;
             override_font->GetTextMetrics(&tm);
             auto res = get_resolution();
+            if(res.height == 0) {
+                return 0;
+            }
             return static_cast<int>((tm.tmAscent + tm.tmDescent) * 480 + 240) / res.height;
         }
 
         auto *tag = get_tag(font_tag);
+        if(!tag || !tag->data) {
+            return 0;
+        }
         std::int16_t height = 0;
         if(tag->primary_class == TAG_CLASS_VECTOR_FONT) {
             VectorFont *tag_data = reinterpret_cast<VectorFont *>(tag->data);
@@ -552,9 +558,16 @@ namespace Chimera {
     }
 
     template<typename T> std::int16_t text_pixel_length_t(const T *text, const std::variant<TagID, GenericFont> &font) {
+        if(!text) {
+            return 0;
+        }
+
         // Find the font
         TagID font_tag = get_generic_font_if_generic(font);
         auto *tag = get_tag(font_tag);
+        if(!tag || !tag->data) {
+            return 0;
+        }
         LPD3DXFONT override_font = get_override_font(font);
 
         // Do the buffer thing
@@ -603,6 +616,9 @@ namespace Chimera {
             }
 
             auto res = get_resolution();
+            if(res.height == 0) {
+                return 0;
+            }
             return static_cast<int>((rect.right - rect.left - added_width) * 480 + 240) / res.height;
         }
 
@@ -962,20 +978,31 @@ namespace Chimera {
         HRESULT (FAR WINAPI * D3DXCreateFontFN)(LPDIRECT3DDEVICE9, INT, UINT, UINT, UINT, BOOL, DWORD, DWORD, DWORD, DWORD, LPCTSTR, LPD3DXFONT) = 0;
 
         __stdcall HRESULT D3DXCreateFontA(LPDIRECT3DDEVICE9 a, INT b, UINT c, UINT d, UINT e, BOOL f, DWORD g, DWORD h, DWORD i, DWORD j, LPCTSTR k, LPD3DXFONT l) {
-            return D3DXCreateFontFN(a,b,c,d,e,f,g,h,i,j,k,l);
+            return D3DXCreateFontFN ? D3DXCreateFontFN(a,b,c,d,e,f,g,h,i,j,k,l) : E_FAIL;
         }
     }
 
     void setup_text_hook() noexcept {
         static Hook hook;
         auto *text_hook_addr = get_chimera().get_signature("text_hook_sig").data();
-        write_jmp_call(reinterpret_cast<void *>(text_hook_addr), hook, reinterpret_cast<const void *>(on_text));
-        add_frame_event(+[] { text_list.clear(); }); // unary+ on lamba with no captures decays to a function pointer
         draw_text_8_bit = get_chimera().get_signature("draw_8_bit_text_sig").data();
         draw_text_16_bit = get_chimera().get_signature("draw_16_bit_text_sig").data();
-        font_data = *reinterpret_cast<FontData **>(get_chimera().get_signature("text_font_data_sig").data() + 13);
+        auto *font_data_signature = get_chimera().get_signature("text_font_data_sig").data();
+        if(!text_hook_addr || !draw_text_8_bit || !draw_text_16_bit || !font_data_signature) {
+            return;
+        }
+        font_data = *reinterpret_cast<FontData **>(font_data_signature + 13);
+        if(!font_data) {
+            return;
+        }
+
+        write_jmp_call(reinterpret_cast<void *>(text_hook_addr), hook, reinterpret_cast<const void *>(on_text));
+        add_frame_event(+[] { text_list.clear(); }); // unary+ on lamba with no captures decays to a function pointer
 
         auto *chimera_ini = get_chimera().get_ini();
+        if(!chimera_ini) {
+            return;
+        }
         if(chimera_ini->get_value_bool("font_override.enabled").value_or(false)) {
             // First load d3dx9_43.dll
             auto *d3dx9_43 = GetModuleHandle("d3dx9_43.dll");
@@ -986,6 +1013,10 @@ namespace Chimera {
             // Okay, did we do that? Let's set this value and initialize things.
             if(d3dx9_43) {
                 D3DXCreateFontFN = reinterpret_cast<decltype(D3DXCreateFontFN)>(reinterpret_cast<std::uint32_t>(GetProcAddress(d3dx9_43, "D3DXCreateFontA")));
+                if(!D3DXCreateFontFN) {
+                    show_error_box("Font error", "d3dx9_43.dll does not export D3DXCreateFontA. Font overrides will remain disabled.");
+                    return;
+                }
 
                 auto fonts_dir = std::filesystem::path("fonts");
                 std::error_code ec;
@@ -1006,13 +1037,11 @@ namespace Chimera {
                                 char error_message[256 + MAX_PATH];
                                 std::snprintf(error_message, sizeof(error_message), "Failed to load %s.\nMake sure this is a valid font.", f.path().string().c_str());
                                 show_error_box("Font error", error_message);
-                                std::exit(EXIT_FAILURE);
                             }
                         }
                     }
-                    catch(std::exception &e) {
-                        show_error_box("Font error", "Failed to iterate through font directory.");
-                        std::exit(EXIT_FAILURE);
+                    catch(const std::exception &) {
+                        show_error_box("Font error", "Failed to iterate through font directory. Font overrides will continue with any fonts that were already available.");
                     }
                 }
 

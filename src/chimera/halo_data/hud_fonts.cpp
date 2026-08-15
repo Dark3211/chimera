@@ -107,15 +107,22 @@ namespace Chimera {
 
     static const HUDGlobals *hud_globals_data() noexcept {
         auto *tag = get_tag("globals\\globals", TagClassInt::TAG_CLASS_GLOBALS);
+        if(!tag || !tag->data) {
+            return nullptr;
+        }
         auto *tag_data = tag->data;
         auto *interface_bitmaps = *reinterpret_cast<const std::byte **>(tag_data + 0x140 + 4);
+        if(!interface_bitmaps) {
+            return nullptr;
+        }
         auto &hud_globals = *reinterpret_cast<const TagID *>(interface_bitmaps + 0x60 + 0xC);
         auto *hud_globals_tag = get_tag(hud_globals);
-        return reinterpret_cast<HUDGlobals *>(hud_globals_tag->data);
+        return hud_globals_tag && hud_globals_tag->data ? reinterpret_cast<HUDGlobals *>(hud_globals_tag->data) : nullptr;
     }
 
     static std::uint32_t hud_line_size() noexcept {
-        return hud_globals_data()->messaging.spacing * font_pixel_height(GenericFont::FONT_LARGE);
+        auto *hud_globals = hud_globals_data();
+        return hud_globals ? hud_globals->messaging.spacing * font_pixel_height(GenericFont::FONT_LARGE) : 0;
     }
 
     static void on_frame() noexcept {
@@ -124,9 +131,12 @@ namespace Chimera {
 
     // This is just to get help textboxes rendering semi correctly.
     extern "C" void is_textbox_with_icons(std::int16_t *element) noexcept {
+        if(!element) {
+            return;
+        }
         if(!hud_text_draw_is_textbox) {
             auto res = get_resolution();
-            int add = widescreen_fix_enabled() ? (static_cast<std::int16_t>((static_cast<double>(res.width) / res.height) * 480.000f - 640.000f) / 2.0f) : 0;
+            int add = widescreen_fix_enabled() && res.height != 0 ? (static_cast<std::int16_t>((static_cast<double>(res.width) / res.height) * 480.000f - 640.000f) / 2.0f) : 0;
 
             element[1] += add;
             element[3] += add;
@@ -139,6 +149,9 @@ namespace Chimera {
     }
 
     extern "C" void on_pickup_hud_text(const wchar_t *string, std::uint32_t xy) noexcept {
+        if(!string) {
+            return;
+        }
         auto &fd = get_current_font_data();
 
         auto x = xy >> 16;
@@ -148,6 +161,9 @@ namespace Chimera {
     }
 
     extern "C" void on_hold_hud_text(const wchar_t *string, std::uint32_t *xy_to, std::uint32_t xy) noexcept {
+        if(!string || !xy_to) {
+            return;
+        }
         auto &fd = get_current_font_data();
 
         auto x = xy >> 16;
@@ -185,6 +201,9 @@ namespace Chimera {
     }
 
     extern "C" void on_weapon_pick_up_hud_text(const wchar_t *string, std::uint32_t xy) noexcept {
+        if(!string) {
+            return;
+        }
         auto &fd = get_current_font_data();
 
         auto x = (xy >> 16);
@@ -193,13 +212,16 @@ namespace Chimera {
     }
 
     extern "C" void on_names_above_heads_hud_text(const wchar_t *string, std::uint32_t *xy, std::uint32_t stare) noexcept {
+        if(!string || !xy) {
+            return;
+        }
         auto &fd = get_current_font_data();
 
         auto res = get_resolution();
         auto x0 = xy[0] >> 16;
         auto x1 = xy[1] >> 16;
         auto avg = (x0 + x1) / 2;
-        double scale = widescreen_fix_enabled() ? ((static_cast<float>(res.width) / static_cast<float>(res.height) * 480) / 640.0) : 1.0;
+        double scale = widescreen_fix_enabled() && res.height != 0 ? ((static_cast<float>(res.width) / static_cast<float>(res.height) * 480) / 640.0) : 1.0;
         auto x_middle = avg * scale;
 
         auto y = *xy & 0xFFFF;
@@ -209,10 +231,13 @@ namespace Chimera {
     }
 
     extern "C" void on_menu_hud_text(const wchar_t *string, std::uint32_t *xy, std::uint32_t scale, std::uint32_t force) noexcept {
+        if(!string || !xy) {
+            return;
+        }
         auto &fd = get_current_font_data();
 
         auto res = get_resolution();
-        int add = widescreen_fix_enabled() ? (scale * (static_cast<std::int16_t>((static_cast<double>(res.width) / res.height) * 480.000f - 640.000f) / 2.0f)) : 0;
+        int add = widescreen_fix_enabled() && res.height != 0 ? (scale * (static_cast<std::int16_t>((static_cast<double>(res.width) / res.height) * 480.000f - 640.000f) / 2.0f)) : 0;
 
         std::variant<TagID, GenericFont> font;
 
@@ -224,7 +249,10 @@ namespace Chimera {
                 return;
             }
             auto *tag_path = tag->path;
-            if(std::strcmp(tag_path, "ui\\large_ui") == 0) {
+            if(!tag_path) {
+                font = fd.font;
+            }
+            else if(std::strcmp(tag_path, "ui\\large_ui") == 0) {
                 font = GenericFont::FONT_LARGE;
             }
             else if(std::strcmp(tag_path, "ui\\small_ui") == 0) {

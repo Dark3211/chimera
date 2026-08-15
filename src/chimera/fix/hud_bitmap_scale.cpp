@@ -89,6 +89,8 @@ namespace Chimera {
     }
 
     void update_safe_zones(std::uint32_t x, std::uint32_t y) noexcept {
+        x = x < HUD_MARGIN ? HUD_MARGIN : x;
+        y = y < HUD_MARGIN ? HUD_MARGIN : y;
         safe_zone_x = x - HUD_MARGIN;
         safe_zone_y = y - HUD_MARGIN;
         window_width = HUD_BASE_WIDTH - safe_zone_x * 2.0f;
@@ -102,7 +104,8 @@ namespace Chimera {
             update_safe_zones(HUD_MARGIN, HUD_MARGIN);
         }
         else {
-            float aspect_ratio = static_cast<float>(get_resolution().width) / static_cast<float>(get_resolution().height);
+            const auto &resolution = get_resolution();
+            float aspect_ratio = resolution.height == 0 ? (4.0f / 3.0f) : static_cast<float>(resolution.width) / static_cast<float>(resolution.height);
             switch(get_widescreen_fix()) {
                 case WIDESCREEN_CENTER_HUD: {
                     viewport_width = aspect_ratio >= (4.f / 3.f) ? HUD_BASE_HEIGHT * (4.f / 3.f) : HUD_BASE_HEIGHT * aspect_ratio;
@@ -131,6 +134,14 @@ namespace Chimera {
     }
 
     extern "C" void check_half_scale_bitmap_flag(BitmapData *bitmap, bool highres_scale) noexcept {
+        if(!bitmap) {
+            scaled_bound_w = 0;
+            scaled_bound_h = 0;
+            scaled_reg_pt_w = 0;
+            scaled_reg_pt_h = 0;
+            return;
+        }
+
         int scale = 1;
 
         // This should always be valid, but it might not be.
@@ -161,7 +172,7 @@ namespace Chimera {
 
     extern "C" void hud_static_element_use_child_anchors(std::uint16_t **anchor, WeaponHUDInterfaceStaticElement *element) noexcept {
         child_anchor = 0;
-        if(element->header.child_anchor > 0 && element->header.child_anchor < 6) {
+        if(anchor && element && element->header.child_anchor > 0 && element->header.child_anchor < 6) {
             child_anchor = element->header.child_anchor - 1;
             *anchor = &child_anchor;
         }
@@ -169,7 +180,7 @@ namespace Chimera {
 
     extern "C" void hud_meter_element_use_child_anchors(std::uint16_t **anchor, WeaponHUDInterfaceMeterElement *element) noexcept {
         child_anchor = 0;
-        if(element->header.child_anchor > 0 && element->header.child_anchor < 6) {
+        if(anchor && element && element->header.child_anchor > 0 && element->header.child_anchor < 6) {
             child_anchor = element->header.child_anchor - 1;
             *anchor = &child_anchor;
         }
@@ -177,7 +188,7 @@ namespace Chimera {
 
     extern "C" void hud_number_element_use_child_anchors(std::uint16_t **anchor, WeaponHUDInterfaceNumberElement *element) noexcept {
         child_anchor = 0;
-        if(element->header.child_anchor > 0 && element->header.child_anchor < 6) {
+        if(anchor && element && element->header.child_anchor > 0 && element->header.child_anchor < 6) {
             child_anchor = element->header.child_anchor - 1;
             *anchor = &child_anchor;
         }
@@ -185,13 +196,18 @@ namespace Chimera {
 
     extern "C" void hud_overlay_element_use_child_anchors(std::uint16_t **anchor, WeaponHUDInterfaceOverlaysElement *element) noexcept {
         child_anchor = 0;
-        if(element->header.child_anchor > 0 && element->header.child_anchor < 6) {
+        if(anchor && element && element->header.child_anchor > 0 && element->header.child_anchor < 6) {
             child_anchor = element->header.child_anchor - 1;
             *anchor = &child_anchor;
         }
     }
 
     extern "C" void hud_calculate_point_for_scaled_canvas(float scale, HUDPlacement *placement, HUDAbsolutePlacement *absolute_placement) noexcept {
+        if(!placement || !absolute_placement) {
+            point_temp_result_x = 0.0f;
+            point_temp_result_y = 0.0f;
+            return;
+        }
         float highres_scale = TEST_FLAG(placement->scaling_flags, HUD_SCALE_FLAGS_USE_HIGHRES_ANCHOR_OFFSETS) ? 0.5f : 1.0f;
         float padding_x = safe_zone_x + HUD_MARGIN;
         float padding_y = safe_zone_y + HUD_MARGIN;

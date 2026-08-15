@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 #include <optional>
+#include <algorithm>
 #include <cmath>
 
 #include "../../command.hpp"
@@ -205,15 +206,19 @@ namespace Chimera {
         }
 
         float *xyz = reinterpret_cast<float *>(get_player_data() + 0x1C);
-        float pitch = std::asin(object->unit.aiming_vector.z);
+        float pitch = std::asin(std::clamp(object->unit.aiming_vector.z, -1.0F, 1.0F));
         float cos_pitch = std::cos(pitch);
-        auto yaw = static_cast<float>(HALO_PI / 2.0 - std::asin(object->unit.aiming_vector.x / cos_pitch));
+        xyz[1] = pitch;
+        if(std::abs(cos_pitch) <= 0.000001F) {
+            return;
+        }
+
+        auto yaw_input = std::clamp(object->unit.aiming_vector.x / cos_pitch, -1.0F, 1.0F);
+        auto yaw = static_cast<float>(HALO_PI / 2.0 - std::asin(yaw_input));
         if(object->unit.aiming_vector.y < 0.0F) {
             yaw *= -1.0F;
         }
-
         xyz[0] = yaw;
-        xyz[1] = pitch;
     }
 
     bool spectate_command(int, const char **argv) {
@@ -388,7 +393,13 @@ namespace Chimera {
         }
 
         int looped = 0;
-        std::optional<std::uint8_t> team_to_ignore = team_only && is_team() ? std::optional<std::uint8_t>(player_table.get_client_player()->team) : std::nullopt;
+        std::optional<std::uint8_t> team_to_ignore = std::nullopt;
+        if(team_only && is_team()) {
+            auto *client_player = player_table.get_client_player();
+            if(client_player) {
+                team_to_ignore = client_player->team;
+            }
+        }
         while(true) {
             if(increment > 0) {
                 if(i >= UINT8_MAX) {

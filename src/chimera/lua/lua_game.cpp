@@ -122,7 +122,10 @@ namespace Chimera {
 
             // Get the width scale
             auto &resolution = get_resolution();
-            float aspect_ratio = static_cast<float>(resolution.width) / resolution.height;
+            if(resolution.height == 0) {
+                return 0;
+            }
+            float aspect_ratio = static_cast<float>(resolution.width) / static_cast<float>(resolution.height);
             float width_scale = (aspect_ratio * 480.0f) / 640.0f;
 
             // Frame bounds

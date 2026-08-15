@@ -2,6 +2,10 @@
 
 #include <windows.h>
 #include <thread>
+#include <cerrno>
+#include <cmath>
+#include <cstdlib>
+#include <algorithm>
 
 #include "../../command.hpp"
 #include "../../../signature/hook.hpp"
@@ -17,7 +21,7 @@ namespace Chimera {
     static bool limiter_enabled = false;
 
     void on_frame() noexcept {
-        if(limiter_enabled) {
+        if(limiter_enabled && pc_freq.QuadPart > 0 && frame_time_ticks > 0) {
             bool slept_this_frame = false;
             QueryPerformanceCounter(&current_frame);
             long long time_since_last_frame = current_frame.QuadPart - last_frame.QuadPart;
@@ -49,10 +53,13 @@ namespace Chimera {
         static float frame_time_target = 0;
 
         if(argument_count) {
-            float new_fps = std::strtof(arguments[0], nullptr);
+            errno = 0;
+            char *end = nullptr;
+            float new_fps = std::strtof(arguments[0], &end);
+            bool valid_fps = errno != ERANGE && end != arguments[0] && end && *end == 0 && std::isfinite(new_fps);
 
             // If user inputs an invalid framerate, assume they are turning it off.
-            if(new_fps <= 0) {
+            if(!valid_fps || new_fps <= 0.0F) {
                 enabled = false;
                 limiter_enabled = false;
             }
@@ -62,10 +69,14 @@ namespace Chimera {
                     new_fps = 300.0f;
                 }
                 enabled = true;
-                QueryPerformanceFrequency(&current_frame);
-                pc_freq.QuadPart = current_frame.QuadPart;
+                if(!QueryPerformanceFrequency(&pc_freq) || pc_freq.QuadPart <= 0) {
+                    enabled = false;
+                    limiter_enabled = false;
+                    console_error("Unable to initialize the high-resolution timer.");
+                    return false;
+                }
                 frame_time_target = 1.0f / new_fps;
-                frame_time_ticks = pc_freq.QuadPart / static_cast<long>(new_fps);
+                frame_time_ticks = std::max<long long>(1, static_cast<long long>(static_cast<double>(pc_freq.QuadPart) / new_fps));
                 QueryPerformanceCounter(&current_frame);
                 last_frame.QuadPart = 0;
 

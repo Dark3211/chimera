@@ -9,7 +9,7 @@ namespace Chimera {
     void enable_multiple_instance() noexcept {
         if(!get_chimera().feature_present("client_multiple_instances")) {
             show_error_box("Error", "Multiple instances is not supported on this client. (client is probably modified)");
-            std::exit(1);
+            return;
         }
 
         static SigByte nop5[] = { 0x90, 0x90, 0x90, 0x90, 0x90 };

@@ -650,7 +650,11 @@ namespace Chimera {
     }
 
     static void on_tick() noexcept {
-        aspect_ratio = static_cast<float>(get_resolution().width) / static_cast<float>(get_resolution().height);
+        const auto &resolution = get_resolution();
+        if(resolution.width == 0 || resolution.height == 0) {
+            return;
+        }
+        aspect_ratio = static_cast<float>(resolution.width) / static_cast<float>(resolution.height);
         widescreen_left_offset_add = static_cast<std::int16_t>((aspect_ratio * 480.000f - 640.000f) / 2.0f);
 
         // Change instructions if we need them to be changed

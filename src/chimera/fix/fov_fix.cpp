@@ -12,6 +12,10 @@ namespace Chimera {
 
     void set_fov_scale_this_frame() noexcept {
         auto resoution = get_resolution();
+        if(resoution.height == 0) {
+            fov_scale_factor = 1.0f;
+            return;
+        }
         fov_scale_factor = static_cast<float>(resoution.frame_bounds[2] - resoution.frame_bounds[0]) / static_cast<float>(resoution.height);
     }
 

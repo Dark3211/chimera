@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 #include <windows.h>
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <locale>
 #include <codecvt>
 #include <cwchar>
 #include <cctype>
+#include <cmath>
+#include <limits>
+#include <stdexcept>
 #include <regex>
 #include "../event/frame.hpp"
 #include "../event/tick.hpp"
@@ -41,6 +45,9 @@ namespace Chimera {
     static void load_chat_settings();
 
     static std::wstring u8_to_u16(const char *str) {
+        if(!str) {
+            return {};
+        }
         wchar_t strw[1024] = {};
         if(MultiByteToWideChar(CP_UTF8, 0, str, -1, strw, sizeof(strw) / sizeof(*strw)) == 0) {
             return std::wstring();
@@ -51,6 +58,9 @@ namespace Chimera {
     }
 
     static std::string u16_to_u8(const wchar_t *strw) {
+        if(!strw) {
+            return {};
+        }
         char str[1024] = {};
         if(WideCharToMultiByte(CP_UTF8, 0, strw, -1, str, sizeof(str) / sizeof(*str), nullptr, nullptr) == 0) {
             return std::string();
@@ -295,7 +305,12 @@ namespace Chimera {
                 // Anyway, make the opacity based on whether it's fading out or in
                 ColorARGB color = array[i].color;
                 if(!ignore_age && time_alive > time_up - fade_out_time) {
-                    color.alpha *= 1.0 - (time_alive - (time_up - fade_out_time)) / fade_out_time;
+                    if(fade_out_time <= 0.0F) {
+                        color.alpha = 0.0F;
+                    }
+                    else {
+                        color.alpha *= std::clamp(1.0F - (time_alive - (time_up - fade_out_time)) / fade_out_time, 0.0F, 1.0F);
+                    }
                 }
                 if(time_alive < slide_time_length) {
                     color.alpha *= slide_time_length == 0.0F ? 1.0F : time_alive / slide_time_length;
@@ -375,7 +390,7 @@ namespace Chimera {
             colorless_pre_cursor_text.append(pre_cursor_text, pos);
 
             // if the cursor is the middle of a color code definition then pop off the trailing "^" before computing the length
-            if (chat_input_cursor < chat_input_buffer.length() && pos != pre_cursor_text.length() && colorless_pre_cursor_text.back() == '^' && chat_input_buffer[chat_input_cursor+1] != '^'){
+            if(chat_input_cursor + 1 < chat_input_buffer.length() && pos != pre_cursor_text.length() && !colorless_pre_cursor_text.empty() && colorless_pre_cursor_text.back() == '^' && chat_input_buffer[chat_input_cursor + 1] != '^') {
                 colorless_pre_cursor_text.pop_back();
             }
 
@@ -685,13 +700,23 @@ namespace Chimera {
         static key_input    *input_buffer = nullptr; // array of size 0x40
         static std::int16_t *input_count = nullptr;  // population count for input_buffer
         if(!input_buffer) {
-            auto *data = *reinterpret_cast<std::uint8_t **>(get_chimera().get_signature("on_key_press_sig").data() + 10);
+            auto *signature = get_chimera().get_signature("on_key_press_sig").data();
+            if(!signature) {
+                return;
+            }
+            auto *data = *reinterpret_cast<std::uint8_t **>(signature + 10);
+            if(!data) {
+                return;
+            }
             input_buffer = reinterpret_cast<key_input*>(data + 2);
             input_count = reinterpret_cast<std::int16_t*>(data);
         }
 
         // Handle keyboard input if we have the chat input open
         if(chat_input_open) {
+            if(!input_count || *input_count < 0 || *input_count >= INPUT_BUFFER_SIZE) {
+                return;
+            }
             const auto& [modifier, character, key_code, input_unknown] = input_buffer[*input_count];
             auto num_bytes = chat_input_buffer.length();
 
@@ -878,6 +903,57 @@ namespace Chimera {
         return std::wstring(str, str_len);
     }
 
+    static void format_player_event_message(char *output, std::size_t output_size, const char *format, const char *player_name) noexcept {
+        if(!output || output_size == 0) {
+            return;
+        }
+        output[0] = 0;
+        if(!format) {
+            return;
+        }
+        if(!player_name) {
+            player_name = "";
+        }
+
+        std::size_t written = 0;
+        for(std::size_t i = 0; format[i] && written + 1 < output_size; i++) {
+            if(format[i] == '%' && format[i + 1] == 's') {
+                for(std::size_t n = 0; player_name[n] && written + 1 < output_size; n++) {
+                    output[written++] = player_name[n];
+                }
+                i++;
+            }
+            else {
+                output[written++] = format[i];
+            }
+        }
+        output[written] = 0;
+    }
+
+    static int parse_nonnegative_int(const char *value) {
+        if(!value) {
+            throw std::invalid_argument("null integer setting");
+        }
+        std::size_t parsed = 0;
+        long result = std::stol(value, &parsed, 10);
+        if(value[parsed] != 0 || result < 0 || result > std::numeric_limits<std::uint16_t>::max()) {
+            throw std::out_of_range("integer setting out of range");
+        }
+        return static_cast<int>(result);
+    }
+
+    static float parse_finite_float(const char *value) {
+        if(!value) {
+            throw std::invalid_argument("null float setting");
+        }
+        std::size_t parsed = 0;
+        float result = std::stof(value, &parsed);
+        if(value[parsed] != 0 || !std::isfinite(result)) {
+            throw std::out_of_range("float setting is not finite");
+        }
+        return result;
+    }
+
     extern "C" void welcome_message(PlayerID player_a) {
         if(player_a.is_null() || player_a.index.index >= 16) {
             return;
@@ -910,7 +986,7 @@ namespace Chimera {
             std::string player_name = get_player_name(id, &color_to_use);
 
             char message[256];
-            std::snprintf(message, sizeof(message), str.c_str(), player_name.c_str());
+            format_player_event_message(message, sizeof(message), str.c_str(), player_name.c_str());
 
             ChatMessage chat_message;
             initialize_chat_message(chat_message, message, color_to_use);
@@ -956,7 +1032,7 @@ namespace Chimera {
                 s = false;
                 ChatMessage chat_message;
                 auto s = u16_to_u8(get_string_from_string_list("ui\\multiplayer_game_text", 80).c_str());
-                std::snprintf(message, sizeof(message), s.c_str(), player_name[index]);
+                format_player_event_message(message, sizeof(message), s.c_str(), player_name[index]);
                 initialize_chat_message(chat_message, message, {1.0, 1.0, 1.0, 1.0});
                 add_message_to_array(chat_messages, chat_message);
             }
@@ -976,57 +1052,60 @@ namespace Chimera {
         #define LOAD_IF_POSSIBLE(ini_value, setting, parser) { \
             const char *setting_value = ini->get_value("custom_chat." # ini_value); \
             if(setting_value) { \
-                setting = parser(setting_value); \
+                try { \
+                    setting = parser(setting_value); \
+                } \
+                catch(...) {} \
             } \
         }
 
         #define LOAD_IF_POSSIBLE_SETTING(setting, parser) LOAD_IF_POSSIBLE(setting, setting, parser)
 
-        LOAD_IF_POSSIBLE_SETTING(server_message_x, std::stoi)
-        LOAD_IF_POSSIBLE_SETTING(server_message_y, std::stoi)
-        LOAD_IF_POSSIBLE_SETTING(server_message_w, std::stoi)
-        LOAD_IF_POSSIBLE_SETTING(server_message_h, std::stoi)
-        LOAD_IF_POSSIBLE_SETTING(server_message_h_chat_open, std::stoi)
-        LOAD_IF_POSSIBLE_SETTING(server_message_hide_on_console, std::stoi)
+        LOAD_IF_POSSIBLE_SETTING(server_message_x, parse_nonnegative_int)
+        LOAD_IF_POSSIBLE_SETTING(server_message_y, parse_nonnegative_int)
+        LOAD_IF_POSSIBLE_SETTING(server_message_w, parse_nonnegative_int)
+        LOAD_IF_POSSIBLE_SETTING(server_message_h, parse_nonnegative_int)
+        LOAD_IF_POSSIBLE_SETTING(server_message_h_chat_open, parse_nonnegative_int)
+        LOAD_IF_POSSIBLE_SETTING(server_message_hide_on_console, parse_nonnegative_int)
 
-        LOAD_IF_POSSIBLE_SETTING(chat_message_x, std::stoi)
-        LOAD_IF_POSSIBLE_SETTING(chat_message_y, std::stoi)
-        LOAD_IF_POSSIBLE_SETTING(chat_message_w, std::stoi)
-        LOAD_IF_POSSIBLE_SETTING(chat_message_h, std::stoi)
-        LOAD_IF_POSSIBLE_SETTING(chat_message_h_chat_open, std::stoi)
-        LOAD_IF_POSSIBLE_SETTING(chat_message_hide_on_console, std::stoi)
+        LOAD_IF_POSSIBLE_SETTING(chat_message_x, parse_nonnegative_int)
+        LOAD_IF_POSSIBLE_SETTING(chat_message_y, parse_nonnegative_int)
+        LOAD_IF_POSSIBLE_SETTING(chat_message_w, parse_nonnegative_int)
+        LOAD_IF_POSSIBLE_SETTING(chat_message_h, parse_nonnegative_int)
+        LOAD_IF_POSSIBLE_SETTING(chat_message_h_chat_open, parse_nonnegative_int)
+        LOAD_IF_POSSIBLE_SETTING(chat_message_hide_on_console, parse_nonnegative_int)
 
-        LOAD_IF_POSSIBLE_SETTING(chat_input_x, std::stoi)
-        LOAD_IF_POSSIBLE_SETTING(chat_input_y, std::stoi)
-        LOAD_IF_POSSIBLE_SETTING(chat_input_w, std::stoi)
+        LOAD_IF_POSSIBLE_SETTING(chat_input_x, parse_nonnegative_int)
+        LOAD_IF_POSSIBLE_SETTING(chat_input_y, parse_nonnegative_int)
+        LOAD_IF_POSSIBLE_SETTING(chat_input_w, parse_nonnegative_int)
 
-        LOAD_IF_POSSIBLE(server_line_height, server_message_line_height, std::stof)
-        LOAD_IF_POSSIBLE(chat_line_height, chat_message_line_height, std::stof)
+        LOAD_IF_POSSIBLE(server_line_height, server_message_line_height, parse_finite_float)
+        LOAD_IF_POSSIBLE(chat_line_height, chat_message_line_height, parse_finite_float)
 
-        LOAD_IF_POSSIBLE(server_message_color_a, server_message_color.alpha, std::stof)
-        LOAD_IF_POSSIBLE(server_message_color_r, server_message_color.red, std::stof)
-        LOAD_IF_POSSIBLE(server_message_color_g, server_message_color.green, std::stof)
-        LOAD_IF_POSSIBLE(server_message_color_b, server_message_color.blue, std::stof)
+        LOAD_IF_POSSIBLE(server_message_color_a, server_message_color.alpha, parse_finite_float)
+        LOAD_IF_POSSIBLE(server_message_color_r, server_message_color.red, parse_finite_float)
+        LOAD_IF_POSSIBLE(server_message_color_g, server_message_color.green, parse_finite_float)
+        LOAD_IF_POSSIBLE(server_message_color_b, server_message_color.blue, parse_finite_float)
 
-        LOAD_IF_POSSIBLE(chat_message_color_ffa_a, chat_message_color_ffa.alpha, std::stof)
-        LOAD_IF_POSSIBLE(chat_message_color_ffa_r, chat_message_color_ffa.red, std::stof)
-        LOAD_IF_POSSIBLE(chat_message_color_ffa_g, chat_message_color_ffa.green, std::stof)
-        LOAD_IF_POSSIBLE(chat_message_color_ffa_b, chat_message_color_ffa.blue, std::stof)
+        LOAD_IF_POSSIBLE(chat_message_color_ffa_a, chat_message_color_ffa.alpha, parse_finite_float)
+        LOAD_IF_POSSIBLE(chat_message_color_ffa_r, chat_message_color_ffa.red, parse_finite_float)
+        LOAD_IF_POSSIBLE(chat_message_color_ffa_g, chat_message_color_ffa.green, parse_finite_float)
+        LOAD_IF_POSSIBLE(chat_message_color_ffa_b, chat_message_color_ffa.blue, parse_finite_float)
 
-        LOAD_IF_POSSIBLE(chat_message_color_red_a, chat_message_color_red.alpha, std::stof)
-        LOAD_IF_POSSIBLE(chat_message_color_red_r, chat_message_color_red.red, std::stof)
-        LOAD_IF_POSSIBLE(chat_message_color_red_g, chat_message_color_red.green, std::stof)
-        LOAD_IF_POSSIBLE(chat_message_color_red_b, chat_message_color_red.blue, std::stof)
+        LOAD_IF_POSSIBLE(chat_message_color_red_a, chat_message_color_red.alpha, parse_finite_float)
+        LOAD_IF_POSSIBLE(chat_message_color_red_r, chat_message_color_red.red, parse_finite_float)
+        LOAD_IF_POSSIBLE(chat_message_color_red_g, chat_message_color_red.green, parse_finite_float)
+        LOAD_IF_POSSIBLE(chat_message_color_red_b, chat_message_color_red.blue, parse_finite_float)
 
-        LOAD_IF_POSSIBLE(chat_message_color_blue_a, chat_message_color_blue.alpha, std::stof)
-        LOAD_IF_POSSIBLE(chat_message_color_blue_r, chat_message_color_blue.red, std::stof)
-        LOAD_IF_POSSIBLE(chat_message_color_blue_g, chat_message_color_blue.green, std::stof)
-        LOAD_IF_POSSIBLE(chat_message_color_blue_b, chat_message_color_blue.blue, std::stof)
+        LOAD_IF_POSSIBLE(chat_message_color_blue_a, chat_message_color_blue.alpha, parse_finite_float)
+        LOAD_IF_POSSIBLE(chat_message_color_blue_r, chat_message_color_blue.red, parse_finite_float)
+        LOAD_IF_POSSIBLE(chat_message_color_blue_g, chat_message_color_blue.green, parse_finite_float)
+        LOAD_IF_POSSIBLE(chat_message_color_blue_b, chat_message_color_blue.blue, parse_finite_float)
 
-        LOAD_IF_POSSIBLE(chat_input_color_a, chat_input_color.alpha, std::stof)
-        LOAD_IF_POSSIBLE(chat_input_color_r, chat_input_color.red, std::stof)
-        LOAD_IF_POSSIBLE(chat_input_color_g, chat_input_color.green, std::stof)
-        LOAD_IF_POSSIBLE(chat_input_color_b, chat_input_color.blue, std::stof)
+        LOAD_IF_POSSIBLE(chat_input_color_a, chat_input_color.alpha, parse_finite_float)
+        LOAD_IF_POSSIBLE(chat_input_color_r, chat_input_color.red, parse_finite_float)
+        LOAD_IF_POSSIBLE(chat_input_color_g, chat_input_color.green, parse_finite_float)
+        LOAD_IF_POSSIBLE(chat_input_color_b, chat_input_color.blue, parse_finite_float)
 
         auto get_anchor = [](const char *anchor) {
             if(std::strcmp(anchor, "top_right") == 0) {
@@ -1056,16 +1135,16 @@ namespace Chimera {
         LOAD_IF_POSSIBLE_SETTING(chat_input_font, generic_font_from_string)
 
         // Load these values
-        LOAD_IF_POSSIBLE_SETTING(chat_slide_time_length, std::stof)
-        LOAD_IF_POSSIBLE_SETTING(server_slide_time_length, std::stof)
-        LOAD_IF_POSSIBLE_SETTING(chat_time_up, std::stof)
-        LOAD_IF_POSSIBLE_SETTING(server_time_up, std::stof)
-        LOAD_IF_POSSIBLE_SETTING(chat_fade_out_time, std::stof)
-        LOAD_IF_POSSIBLE_SETTING(server_fade_out_time, std::stof)
+        LOAD_IF_POSSIBLE_SETTING(chat_slide_time_length, parse_finite_float)
+        LOAD_IF_POSSIBLE_SETTING(server_slide_time_length, parse_finite_float)
+        LOAD_IF_POSSIBLE_SETTING(chat_time_up, parse_finite_float)
+        LOAD_IF_POSSIBLE_SETTING(server_time_up, parse_finite_float)
+        LOAD_IF_POSSIBLE_SETTING(chat_fade_out_time, parse_finite_float)
+        LOAD_IF_POSSIBLE_SETTING(server_fade_out_time, parse_finite_float)
 
         #define OVERRIDE_IF_POSSIBLE(setting, chat, server) { \
             std::optional<float> setting; \
-            LOAD_IF_POSSIBLE_SETTING(setting, std::stof); \
+            LOAD_IF_POSSIBLE_SETTING(setting, parse_finite_float); \
             if(setting.has_value()) { \
                 chat = *setting; \
                 server = *setting; \
@@ -1076,13 +1155,26 @@ namespace Chimera {
         OVERRIDE_IF_POSSIBLE(time_up, chat_time_up, server_time_up)
         OVERRIDE_IF_POSSIBLE(fade_out_time, chat_fade_out_time, server_fade_out_time)
 
+        chat_message_line_height = std::max(0.1F, chat_message_line_height);
+        server_message_line_height = std::max(0.1F, server_message_line_height);
+
         chat_slide_time_length = std::max(0.0F, chat_slide_time_length);
         server_slide_time_length = std::max(0.0F, server_slide_time_length);
-
         chat_time_up = std::max(0.0F, chat_time_up);
         server_time_up = std::max(0.0F, server_time_up);
-
         chat_fade_out_time = std::max(0.0F, chat_fade_out_time);
         server_fade_out_time = std::max(0.0F, server_fade_out_time);
+
+        auto clamp_color = [](ColorARGB &color) noexcept {
+            color.alpha = std::clamp(color.alpha, 0.0F, 1.0F);
+            color.red = std::clamp(color.red, 0.0F, 1.0F);
+            color.green = std::clamp(color.green, 0.0F, 1.0F);
+            color.blue = std::clamp(color.blue, 0.0F, 1.0F);
+        };
+        clamp_color(server_message_color);
+        clamp_color(chat_message_color_ffa);
+        clamp_color(chat_message_color_red);
+        clamp_color(chat_message_color_blue);
+        clamp_color(chat_input_color);
     }
 }

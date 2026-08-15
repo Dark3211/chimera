@@ -12,6 +12,8 @@
 #include "../output/error_box.hpp"
 #include <cstring>
 #include <stdexcept>
+#include <cmath>
+#include <limits>
 
 namespace Chimera {
     static std::locale locale;
@@ -30,10 +32,15 @@ namespace Chimera {
 
     std::optional<std::string> Ini::get_value_string(const char *key) const noexcept {
         const char *val = this->get_value(key);
-        if (!val){
+        if(!val) {
             return std::nullopt;
         }
-        return std::string(val);
+        try {
+            return std::string(val);
+        }
+        catch(...) {
+            return std::nullopt;
+        }
     }
 
     std::optional<bool> Ini::get_value_bool(const char *key) const noexcept {
@@ -50,13 +57,15 @@ namespace Chimera {
             return std::nullopt;
         }
         try {
-            return std::stod(v);
+            std::size_t parsed = 0;
+            auto value = std::stod(v, &parsed);
+            if(v[parsed] != '\0' || !std::isfinite(value)) {
+                return std::nullopt;
+            }
+            return value;
         }
-        catch(std::exception &) {
-            char error[512];
-            std::snprintf(error, sizeof(error), "%s (=> %s) is not a valid real number", key, v);
-            show_error_box("INI error", error);
-            std::exit(136);
+        catch(...) {
+            return std::nullopt;
         }
     }
 
@@ -66,29 +75,33 @@ namespace Chimera {
             return std::nullopt;
         }
         try {
-            return std::stol(v);
+            std::size_t parsed = 0;
+            auto value = std::stol(v, &parsed, 10);
+            if(v[parsed] != '\0') {
+                return std::nullopt;
+            }
+            return value;
         }
-        catch(std::exception &) {
-            char error[512];
-            std::snprintf(error, sizeof(error), "%s (=> %s) is not a valid integer or is out of range (%li - %li)", key, v, LONG_MIN, LONG_MAX);
-            show_error_box("INI error", error);
-            std::exit(136);
+        catch(...) {
+            return std::nullopt;
         }
     }
 
     std::optional<unsigned long long> Ini::get_value_size(const char *key) const noexcept {
         auto *v = this->get_value(key);
-        if(!v) {
+        if(!v || *v == '-') {
             return std::nullopt;
         }
         try {
-            return std::stoull(v);
+            std::size_t parsed = 0;
+            auto value = std::stoull(v, &parsed, 10);
+            if(v[parsed] != '\0') {
+                return std::nullopt;
+            }
+            return value;
         }
-        catch(std::exception &) {
-            char error[512];
-            std::snprintf(error, sizeof(error), "%s (=> %s) is not a valid integer or is out of range (0 - %llu)", key, v, ULONG_LONG_MAX);
-            show_error_box("INI error", error);
-            std::exit(136);
+        catch(...) {
+            return std::nullopt;
         }
     }
 
@@ -96,23 +109,33 @@ namespace Chimera {
         if(!key || !value) {
             return;
         }
-        for(auto &i : this->p_values) {
-            if(i.first == key) {
-                i.second = value;
-                return;
+        try {
+            for(auto &i : this->p_values) {
+                if(i.first == key) {
+                    i.second = value;
+                    return;
+                }
             }
+            this->p_values.emplace_back(key, value);
         }
-        this->p_values.emplace_back(key, value);
+        catch(...) {
+            // Keep the previous configuration intact if allocation fails.
+        }
     }
 
     void Ini::set_value(std::pair<std::string, std::string> key_value) noexcept {
-        for(auto &i : this->p_values) {
-            if(i.first == key_value.first) {
-                i.second = std::move(key_value.second);
-                return;
+        try {
+            for(auto &i : this->p_values) {
+                if(i.first == key_value.first) {
+                    i.second = std::move(key_value.second);
+                    return;
+                }
             }
+            this->p_values.emplace_back(std::move(key_value));
         }
-        this->p_values.emplace_back(std::move(key_value));
+        catch(...) {
+            // Keep the previous configuration intact if allocation fails.
+        }
     }
 
     void Ini::delete_value(const char *key) noexcept {
@@ -219,7 +242,6 @@ namespace Chimera {
             char error[1024];
             std::snprintf(error, sizeof(error), "chimera.INI error (line #%zu):\n\n%s\n\nThis line could not be parsed.\n", line_number, data);
             show_error_box("INI error", error);
-            std::exit(136);
         };
 
         // Check if we're in a group
@@ -250,11 +272,11 @@ namespace Chimera {
             auto [decoded, defaulted] = utf8_to_ansi(value);
             if(!decoded) {
                 show_error_box("INI error", (std::string() + "Failed to decode value of '" + key + "' in chimera.ini.\n\nMake sure the file is encoded using UTF-8.").data());
-                std::exit(136);
+                return false;
             }
             if(defaulted){
                 show_error_box("INI error", (std::string() + "Invalid character in the value of '" + key + "' in chimera.ini:\n\n" + value + "\n\nOnly characters your system can encode in ANSI are valid.").data());
-                std::exit(136);
+                return false;
             }
 
             return std::pair(key, value);
@@ -287,11 +309,26 @@ namespace Chimera {
 
         if(!stream.good()) {
             show_error_box("INI error", "chimera.ini could not be opened.\n\nMake sure it exists and you have permission to it.");
-            std::exit(1);
+            return;
         }
 
         while(std::getline(stream, line)) {
-            auto result = digest_line(line.data(), nullptr, group, ++no);
+            std::variant<std::pair<std::string, std::string>, bool> result;
+            try {
+                result = digest_line(line.c_str(), nullptr, group, ++no);
+            }
+            catch(const std::exception &e) {
+                char error[1024];
+                std::snprintf(error, sizeof(error), "chimera.INI error (line #%zu): %s", no, e.what());
+                show_error_box("INI error", error);
+                this->p_values.clear();
+                return;
+            }
+            catch(...) {
+                show_error_box("INI error", "chimera.ini parsing failed unexpectedly.");
+                this->p_values.clear();
+                return;
+            }
             if(result.index() == 0) {
                 this->set_value(std::move(std::get<0>(result)));
             }

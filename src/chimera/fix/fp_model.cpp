@@ -25,6 +25,7 @@ namespace Chimera {
     RenderFrustum frustum, frustum_fp;
     static float v_fov;
     static bool frustum_adjusted_for_fp_lens_flares = false;
+    static bool fp_frustum_valid = false;
 
     void can_update_fp() noexcept {
         // Don't do the thing if there is a 2nd tick this frame.
@@ -36,7 +37,12 @@ namespace Chimera {
 
     void set_per_tick_fp_model_pos() noexcept {
         if(can_update) {
-            auto fp_data = **reinterpret_cast<std::byte ***>(get_chimera().get_signature("first_person_node_base_address_sig").data() + 2);
+            auto *signature_data = get_chimera().get_signature("first_person_node_base_address_sig").data();
+            if(!signature_data) {
+                return;
+            }
+            auto **fp_data_pointer = *reinterpret_cast<std::byte ***>(signature_data + 2);
+            auto *fp_data = fp_data_pointer ? *fp_data_pointer : nullptr;
             if(fp_data) {
                 // These get updated per frame, so the difference between current and previous values ends up really small at high fps.
                 // This results in the movement calculated by the fp model update function per tick being lower than expected.
@@ -58,33 +64,43 @@ namespace Chimera {
     }
 
     void create_fp_frustum() noexcept {
+        fp_frustum_valid = false;
+
+        if(!global_window_parameters) {
+            return;
+        }
+
         // Back up default values.
         v_fov = global_window_parameters->camera.vertical_field_of_view;
         memcpy(&frustum, &global_window_parameters->frustum, sizeof(RenderFrustum));
 
         // Create new frustum scaled for fov.
         auto resoution = get_resolution();
+        if(resoution.height == 0) {
+            return;
+        }
         float fov_scale_factor = static_cast<float>(resoution.frame_bounds[2] - resoution.frame_bounds[0]) / static_cast<float>(resoution.height);
         global_window_parameters->camera.vertical_field_of_view = 2.0f * std::atan((480.0f / 640.0f) * fov_scale_factor * std::tan(DEGREES_TO_RADIANS(70.0f) * 0.5));
         render_camera_build_frustum(&global_window_parameters->camera, &global_window_parameters->frustum.frustum_bounds, &frustum_fp, true);
+        fp_frustum_valid = true;
         global_window_parameters->camera.vertical_field_of_view = v_fov;
     }
 
     void adjust_frustum_for_fp_draw() noexcept {
-        if(lock_fp_model_fov) {
+        if(lock_fp_model_fov && global_window_parameters && fp_frustum_valid) {
             // Copy our adjusted frustum into window globals.
             memcpy(&global_window_parameters->frustum, &frustum_fp, sizeof(RenderFrustum));
         }
     }
 
     void restore_frustum() noexcept {
-        if(lock_fp_model_fov) {
+        if(lock_fp_model_fov && global_window_parameters) {
             memcpy(&global_window_parameters->frustum, &frustum, sizeof(RenderFrustum));
         }
     }
 
     extern "C" void fp_model_lens_flare_adjust_frustum(std::byte *lens_flare_draw_params) noexcept {
-        if(lock_fp_model_fov) {
+        if(lock_fp_model_fov && global_window_parameters && fp_frustum_valid && lens_flare_draw_params) {
             auto *index = reinterpret_cast<std::uint8_t *>(lens_flare_draw_params + 34);
             // The last bit is the fp flag.
             if(TEST_FLAG(*index, 7)) {

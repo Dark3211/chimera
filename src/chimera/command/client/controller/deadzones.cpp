@@ -5,6 +5,7 @@
 #include "../../../signature/hook.hpp"
 #include "../../../chimera.hpp"
 #include "../../../output/output.hpp"
+#include <cmath>
 
 static constexpr std::int16_t MAX_INPUT = 0x1000;
 static std::int16_t min_input = 0x0;
@@ -33,6 +34,9 @@ extern "C" std::uint32_t handle_deadzones_cpp(std::uint32_t x) {
     }
 
     // Multiply by the max input, divide by input range
+    if(input_range <= 0) {
+        return 0;
+    }
     absolute_value = static_cast<std::int16_t>(static_cast<std::int32_t>(MAX_INPUT) * absolute_value / input_range);
     if(absolute_value >= MAX_INPUT) {
         absolute_value = MAX_INPUT;
@@ -50,6 +54,10 @@ namespace Chimera {
 
         if(argc == 1) {
             deadzone_value = std::stof(*argv);
+            if(!std::isfinite(deadzone_value)) {
+                console_error("Deadzone value must be a finite number.");
+                return false;
+            }
             if(deadzone_value <= 0.0F) {
                 deadzone_value = 0.0F;
                 if(enabled) {

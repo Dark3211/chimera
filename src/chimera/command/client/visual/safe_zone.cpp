@@ -7,16 +7,33 @@
 #include "../../../output/output.hpp"
 #include "../../../math_trig/math_trig.hpp"
 #include "../../../fix/hud_bitmap_scale.hpp"
+#include <cerrno>
+#include <cmath>
+#include <cstdlib>
 
 namespace Chimera {
+    static bool parse_safe_zone_value(const char *text, float &value) noexcept {
+        if(!text) return false;
+        errno = 0;
+        char *end = nullptr;
+        value = std::strtof(text, &end);
+        return errno != ERANGE && end != text && end && *end == 0 && std::isfinite(value);
+    }
+
     bool safe_zone_command(int argc, const char **argv) {
         static bool active = false;
 
         static float horiz = 0;
         static float vert = 0;
         if(argc == 2) {
-            horiz = PIN(fast_ftol(strtof(argv[0], nullptr)), HUD_MARGIN, XBOX_SAFE_ZONE_WIDTH);
-            vert = PIN(fast_ftol(strtof(argv[1], nullptr)), HUD_MARGIN, XBOX_SAFE_ZONE_HEIGHT);
+            float requested_horiz = 0.0F;
+            float requested_vert = 0.0F;
+            if(!parse_safe_zone_value(argv[0], requested_horiz) || !parse_safe_zone_value(argv[1], requested_vert)) {
+                console_error("Safe-zone values must be finite numbers.");
+                return false;
+            }
+            horiz = PIN(fast_ftol(requested_horiz), HUD_MARGIN, XBOX_SAFE_ZONE_WIDTH);
+            vert = PIN(fast_ftol(requested_vert), HUD_MARGIN, XBOX_SAFE_ZONE_HEIGHT);
 
             set_safe_zone_margins(horiz, vert);
             active = true;

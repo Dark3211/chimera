@@ -28,6 +28,8 @@
 
 #include "../../blake3/blake3.h"
 
+#include <cmath>
+
 namespace Chimera {
 
     extern "C" {
@@ -96,31 +98,32 @@ namespace Chimera {
     static_assert(sizeof(ShaderStageParams) == sizeof(std::int16_t) * 29);
 
     ShaderTransparentGeneric *shader_transparent_generic_get(std::byte *shader) noexcept {
-        auto *shader_test = reinterpret_cast<_shader *>(shader);
-
-        if(shader_test->type == SHADER_TYPE_TRANSPARENT_GENERIC) {
-            return reinterpret_cast<ShaderTransparentGeneric *>(shader);
+        if(!shader) {
+            return nullptr;
         }
-        show_error_box("Error", "Invalid shader type");
-        std::exit(1);
+        auto *shader_test = reinterpret_cast<_shader *>(shader);
+        return shader_test->type == SHADER_TYPE_TRANSPARENT_GENERIC ? reinterpret_cast<ShaderTransparentGeneric *>(shader) : nullptr;
     }
 
     TagReference *shader_transparent_generic_get_layer(ShaderTransparentGeneric *shader_data, std::uint16_t layer) noexcept {
-        auto *extra_layer = get_tag_block_data(&shader_data->generic.extra_layers, layer, sizeof(TagReference));
-        throw_error(extra_layer, "transparent generic invalid extra layer block data");
-        return reinterpret_cast<TagReference *>(extra_layer);
+        if(!shader_data) {
+            return nullptr;
+        }
+        return reinterpret_cast<TagReference *>(get_tag_block_data(&shader_data->generic.extra_layers, layer, sizeof(TagReference)));
     }
 
     ShaderTransparentGenericMap *shader_transparent_generic_get_map(ShaderTransparentGeneric *shader_data, std::uint16_t map_index) noexcept {
-        auto *map_data = get_tag_block_data(&shader_data->generic.maps, map_index, sizeof(ShaderTransparentGenericMap));
-        throw_error(map_data, "transparent generic invalid map block data");
-        return reinterpret_cast<ShaderTransparentGenericMap *>(map_data);
+        if(!shader_data) {
+            return nullptr;
+        }
+        return reinterpret_cast<ShaderTransparentGenericMap *>(get_tag_block_data(&shader_data->generic.maps, map_index, sizeof(ShaderTransparentGenericMap)));
     }
 
     ShaderTransparentGenericStage *shader_transparent_generic_get_stage(ShaderTransparentGeneric *shader_data, std::uint16_t stage_index) noexcept {
-        auto *stage_data = get_tag_block_data(&shader_data->generic.stages, stage_index, sizeof(ShaderTransparentGenericStage));
-        throw_error(stage_data, "transparent generic invalid stage block data");
-        return reinterpret_cast<ShaderTransparentGenericStage *>(stage_data);
+        if(!shader_data) {
+            return nullptr;
+        }
+        return reinterpret_cast<ShaderTransparentGenericStage *>(get_tag_block_data(&shader_data->generic.stages, stage_index, sizeof(ShaderTransparentGenericStage)));
     }
 
     // Stage defines generation based on ringworld https://github.com/MangoFizz/ringworld/blob/master/src/impl/rasterizer/rasterizer_shader_transparent_generic.c#L75
@@ -155,10 +158,17 @@ namespace Chimera {
         );
 
         char *macro = reinterpret_cast<char *>(GlobalAlloc(GMEM_FIXED, strlen(buffer) + 1));
+        if(!macro) {
+            return {};
+        }
         strcpy(macro, buffer);
 
         snprintf(buffer, sizeof(buffer), "S%d_CONFIGURATION", stage_index);
         char *name = reinterpret_cast<char *>(GlobalAlloc(GMEM_FIXED, strlen(buffer) + 1));
+        if(!name) {
+            GlobalFree(macro);
+            return {};
+        }
         strcpy(name, buffer);
 
         D3D_SHADER_MACRO result = {};
@@ -170,6 +180,9 @@ namespace Chimera {
 
     // Hash the defines.
     char *generate_defines_hash(D3D_SHADER_MACRO *defines) noexcept {
+        if(!defines) {
+            return nullptr;
+        }
         blake3_hasher hasher;
         blake3_hasher_init(&hasher);
 
@@ -184,13 +197,24 @@ namespace Chimera {
             }
         }
         std::uint8_t *output = reinterpret_cast<std::uint8_t *>(GlobalAlloc(GMEM_FIXED, BLAKE3_OUT_LEN));
+        if(!output) {
+            return nullptr;
+        }
         blake3_hasher_finalize(&hasher, output, BLAKE3_OUT_LEN);
 
         return reinterpret_cast<char *>(output);
     }
 
+    static void free_defines(D3D_SHADER_MACRO *defines) noexcept;
+
     static D3D_SHADER_MACRO *generate_defines(ShaderTransparentGeneric *shader_data) noexcept {
+        if(!shader_data) {
+            return nullptr;
+        }
         D3D_SHADER_MACRO *defines = reinterpret_cast<D3D_SHADER_MACRO *>(GlobalAlloc(GPTR, sizeof(D3D_SHADER_MACRO) * 10));
+        if(!defines) {
+            return nullptr;
+        }
         size_t defines_count = 0;
         ShaderStageParams params = {};
 
@@ -204,11 +228,19 @@ namespace Chimera {
             params.output_ab_alpha = SHADER_TRANSPARENT_GENERIC_STAGE_OUTPUT_SCRATCH0;
             params.is_fog_stage = false;
             defines[defines_count] = generate_stage_define(defines_count, params);
+            if(!defines[defines_count].Name || !defines[defines_count].Definition) {
+                free_defines(defines);
+                return nullptr;
+            }
             defines_count++;
         }
         else {
             for(std::uint32_t current_stage = 0; current_stage < shader_data->generic.stages.count && current_stage < 7; current_stage++) {
                 ShaderTransparentGenericStage *stage = shader_transparent_generic_get_stage(shader_data, current_stage);
+                if(!stage) {
+                    free_defines(defines);
+                    return nullptr;
+                }
 
                 params.input_a = stage->color_input_A;
                 params.input_a_mapping = stage->color_input_A_mapping;
@@ -245,6 +277,10 @@ namespace Chimera {
                 params.is_fog_stage = false;
 
                 defines[defines_count] = generate_stage_define(current_stage, params);
+                if(!defines[defines_count].Name || !defines[defines_count].Definition) {
+                    free_defines(defines);
+                    return nullptr;
+                }
                 defines_count++;
 
                 // Wipe the params for the next iteration
@@ -269,8 +305,8 @@ namespace Chimera {
                 input_alpha = SHADER_TRANSPARENT_GENERIC_STAGE_ALPHA_INPUT_VERTEX_BLUE_1_FADE_PARALLEL;
                 break;
             default:
-                show_error_box("Error", "Nice tags (invalid framebuffer fade mode)");
-                std::exit(1);
+                input_color = SHADER_TRANSPARENT_GENERIC_STAGE_COLOR_INPUT_VERTEX_ALPHA_0_FADE_NONE;
+                input_alpha = SHADER_TRANSPARENT_GENERIC_STAGE_ALPHA_INPUT_VERTEX_ALPHA_0_FADE_NONE;
                 break;
         }
         FramebufferBlendFunction framebuffer_blend_function = shader_data->generic.framebuffer_blend_function;
@@ -318,17 +354,26 @@ namespace Chimera {
                 break;
 
             default:
-                show_error_box("Error", "Nice tags (invalid framebuffer blend function)");
-                std::exit(1);
+                params.input_a_alpha = SHADER_TRANSPARENT_GENERIC_STAGE_ALPHA_INPUT_SCRATCH_ALPHA_0;
+                params.input_b_alpha = input_alpha;
+                params.output_ab_cd_mux_sum_alpha = SHADER_TRANSPARENT_GENERIC_STAGE_OUTPUT_SCRATCH0;
                 break;
         }
         params.is_fog_stage = true;
         defines[defines_count] = generate_stage_define(defines_count, params);
+        if(!defines[defines_count].Name || !defines[defines_count].Definition) {
+            free_defines(defines);
+            return nullptr;
+        }
         defines_count++;
 
         if(shader_data->generic.type != SHADER_TRANSPARENT_GENERIC_TYPE_2D_MAP) {
             const char *first_map_is_cube = "FIRST_MAP_IS_CUBE";
             char *first_map_type_macro =reinterpret_cast<char *>(GlobalAlloc(GMEM_FIXED, strlen(first_map_is_cube) + 1));
+            if(!first_map_type_macro) {
+                free_defines(defines);
+                return nullptr;
+            }
             strcpy(first_map_type_macro, first_map_is_cube);
             defines[defines_count].Name = first_map_type_macro;
             defines[defines_count].Definition = NULL;
@@ -342,6 +387,9 @@ namespace Chimera {
     }
 
     static void free_defines(D3D_SHADER_MACRO *defines) noexcept {
+        if(!defines) {
+            return;
+        }
         for(size_t i = 0; i < NUM_OF_SHADER_COMPILE_DEFINES; i++) {
             if(defines[i].Name != NULL) {
                 GlobalFree(const_cast<char *>(defines[i].Name));
@@ -408,7 +456,13 @@ namespace Chimera {
     }
 
     std::uint32_t shader_transparent_generic_create_instance(D3D_SHADER_MACRO *defines) {
+        if(!defines || !d3d9_device_caps || !global_d3d9_device || !*global_d3d9_device) {
+            return MAX_GENERIC_INSTANCE_COUNT;
+        }
         char *hash = generate_defines_hash(defines);
+        if(!hash) {
+            return MAX_GENERIC_INSTANCE_COUNT;
+        }
 
         // Do we already have a shader for these defines?
         for(std::uint16_t i = 0; i < generic_instance_index && i < MAX_GENERIC_INSTANCE_COUNT; i++) {
@@ -434,13 +488,17 @@ namespace Chimera {
                     IDirect3DDevice9_CreatePixelShader(*global_d3d9_device, reinterpret_cast<DWORD *>(compiled_shader->GetBufferPointer()), &generic_ps);
                     IDirect3DDevice9_CreatePixelShader(*global_d3d9_device, reinterpret_cast<DWORD *>(compiled_shader_fogged->GetBufferPointer()), &generic_ps_fogged);
                     IDirect3DDevice9_CreatePixelShader(*global_d3d9_device, reinterpret_cast<DWORD *>(compiled_shader_nofog->GetBufferPointer()), &generic_ps_nofog);
-
-                    compiled_shader->Release();
-                    compiled_shader_fogged->Release();
-                    compiled_shader_nofog->Release();
                 }
-                else {
-                    // If compilation failed, return the disabled shader instead of crashing.
+
+                if(compiled_shader) compiled_shader->Release();
+                if(compiled_shader_fogged) compiled_shader_fogged->Release();
+                if(compiled_shader_nofog) compiled_shader_nofog->Release();
+
+                if(!generic_ps || !generic_ps_fogged || !generic_ps_nofog) {
+                    if(generic_ps) generic_ps->Release();
+                    if(generic_ps_fogged) generic_ps_fogged->Release();
+                    if(generic_ps_nofog) generic_ps_nofog->Release();
+                    // If compilation or D3D object creation failed, use the disabled shader.
                     generic_ps = chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_WHITE_1_1];
                     generic_ps_fogged = chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_WHITE_1_1];
                     generic_ps_nofog = chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_WHITE_1_1];
@@ -479,8 +537,8 @@ namespace Chimera {
                     IDirect3DDevice9_CreatePixelShader(*global_d3d9_device, reinterpret_cast<DWORD *>(compiled_shader->GetBufferPointer()), &generic_ps);
                     compiled_shader->Release();
                 }
-                else {
-                    // If compilation failed, return the disabled shader instead of crashing.
+                if(!generic_ps) {
+                    // If compilation or D3D object creation failed, return the disabled shader instead of crashing.
                     generic_ps = chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_WHITE];
                 }
 
@@ -494,13 +552,14 @@ namespace Chimera {
 
             return generic_instance_index++;
         }
-        else {
-            show_error_box("Error", "Exceeded max generic instance count");
-            std::exit(1);
-        }
+        GlobalFree(hash);
+        return MAX_GENERIC_INSTANCE_COUNT;
     }
 
     IDirect3DPixelShader9 *shader_transparent_generic_create(ShaderTransparentGeneric *shader_data, bool on_map_load) noexcept {
+        if(!shader_data) {
+            return nullptr;
+        }
         // Check if the tag has already been used to create a generic shader. This should never happen on map load,
         // so don't waste time checking this on map load.
         if(!on_map_load) {
@@ -511,15 +570,21 @@ namespace Chimera {
             }
         }
 
-        if(generic_tag_cache_index == MAX_GENERIC_TAG_COUNT) {
-            show_error_box("Error", "Max number of generic tags per map reached");
-            std::exit(1);
+        if(generic_tag_cache_index >= MAX_GENERIC_TAG_COUNT) {
+            return chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_WHITE];
         }
 
         // If the tag has not been used, check whether a valid generic instance already exists.
         // Reference that if possible, otherwise compile a new shader.
         D3D_SHADER_MACRO *defines = generate_defines(shader_data);
+        if(!defines) {
+            return chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_WHITE];
+        }
         generic_tag_cache[generic_tag_cache_index].instance_index = shader_transparent_generic_create_instance(defines);
+        if(generic_tag_cache[generic_tag_cache_index].instance_index >= MAX_GENERIC_INSTANCE_COUNT) {
+            free_defines(defines);
+            return chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_WHITE];
+        }
         generic_tag_cache[generic_tag_cache_index].tag_address = shader_data;
         free_defines(defines);
 
@@ -530,12 +595,15 @@ namespace Chimera {
     }
 
     IDirect3DPixelShader9 *shader_transparent_generic_create_ps_2_0(ShaderTransparentGeneric *shader_data, bool on_map_load, bool fogged) noexcept {
+        if(!shader_data) {
+            return nullptr;
+        }
         // Check if the tag has already been used to create a generic shader. This should never happen on map load,
         // so don't waste time checking this on map load.
         if(!on_map_load) {
             for(std::uint16_t i = 0; i < generic_tag_cache_index && i < MAX_GENERIC_TAG_COUNT; i++) {
                 if(shader_data == generic_tag_cache[i].tag_address) {
-                    if(!(*fog_enabled)) {
+                    if(!fog_enabled || !(*fog_enabled)) {
                         return generic_instance_cache[generic_tag_cache[i].instance_index].shader_nofog;
                     }
                     if(fogged) {
@@ -546,20 +614,26 @@ namespace Chimera {
             }
         }
 
-        if(generic_tag_cache_index == MAX_GENERIC_TAG_COUNT) {
-            show_error_box("Error", "Max number of generic tags per map reached");
-            std::exit(1);
+        if(generic_tag_cache_index >= MAX_GENERIC_TAG_COUNT) {
+            return chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_WHITE_1_1];
         }
 
         // If the tag has not been used, check whether a valid generic instance already exists.
         // Reference that if possible, otherwise compile a new shader.
         D3D_SHADER_MACRO *defines = generate_defines(shader_data);
+        if(!defines) {
+            return chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_WHITE_1_1];
+        }
         generic_tag_cache[generic_tag_cache_index].instance_index = shader_transparent_generic_create_instance(defines);
+        if(generic_tag_cache[generic_tag_cache_index].instance_index >= MAX_GENERIC_INSTANCE_COUNT) {
+            free_defines(defines);
+            return chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_WHITE_1_1];
+        }
         generic_tag_cache[generic_tag_cache_index].tag_address = shader_data;
         free_defines(defines);
 
         IDirect3DPixelShader9 *shader = nullptr;
-        if(!(*fog_enabled)) {
+        if(!fog_enabled || !(*fog_enabled)) {
             shader = generic_instance_cache[generic_tag_cache[generic_tag_cache_index].instance_index].shader_nofog;
         }
         else {
@@ -577,7 +651,7 @@ namespace Chimera {
 
     void shader_transparent_generic_create_for_new_map() noexcept {
         // Don't compile shaders if we don't support at least ps_2_0
-        if(d3d9_device_caps->PixelShaderVersion < 0xffff0200) {
+        if(!d3d9_device_caps || !global_d3d9_device || !*global_d3d9_device || d3d9_device_caps->PixelShaderVersion < 0xffff0200) {
             return;
         }
 
@@ -589,6 +663,9 @@ namespace Chimera {
         auto &tag_data_header = get_tag_data_header();
         auto *tags = tag_data_header.tag_array;
         auto tag_count = tag_data_header.tag_count;
+        if(!tags || tag_count == 0) {
+            return;
+        }
         std::uint32_t i = 0;
         while(i < tag_count) {
             auto &tag = tags[i];
@@ -602,9 +679,8 @@ namespace Chimera {
                     continue;
                 }
                 else {
-                    // No, we're actually out of room. Exit.
-                    show_error_box("Error", "Max number of generic instances exceeded");
-                    std::exit(1);
+                    // No room remains for more unique generic instances. Keep the game running and skip the rest.
+                    break;
                 }
             }
             if(tag.primary_class != TAG_CLASS_SHADER_TRANSPARENT_GENERIC || !tag.data) {
@@ -623,7 +699,7 @@ namespace Chimera {
 
     void shader_transparent_generic_preload_shaders() noexcept {
         // The precompiled blobs are ps_3_0.
-        if(d3d9_device_caps->PixelShaderVersion < 0xffff0300) {
+        if(!d3d9_device_caps || !global_d3d9_device || !*global_d3d9_device || d3d9_device_caps->PixelShaderVersion < 0xffff0300) {
             return;
         }
 
@@ -643,12 +719,18 @@ namespace Chimera {
 
     // The main thingy.
     extern "C" void rasterizer_shader_transparent_generic_draw(TransparentGeometryGroup *group, bool is_dirty) noexcept {
+        if(!group || !group->shader || !d3d9_device_caps || !global_d3d9_device || !*global_d3d9_device || !global_window_parameters || !global_frame_parameters) {
+            return;
+        }
         // We can't draw generic if the d3d9 device doesn't support at least ps_2_0
         if(d3d9_device_caps->PixelShaderVersion < 0xffff0200) {
             return;
         }
 
         ShaderTransparentGeneric *shader_data = shader_transparent_generic_get(group->shader);
+        if(!shader_data) {
+            return;
+        }
         std::uint16_t bitmap_index = group->shader_permutation_index;
 
         for(std::uint16_t layer_index = 0; layer_index < shader_data->generic.extra_layers.count; layer_index++) {
@@ -667,9 +749,13 @@ namespace Chimera {
 
         short vertex_shader_permutation = shader_get_vertex_shader_permutation(reinterpret_cast<std::byte *>(group->shader));
         short vertex_type = rasterizer_transparent_geometry_get_primary_vertex_type(group);
-        IDirect3DVertexShader9 *vertex_shader = rasterizer_get_vertex_shader_for_permutation(vertex_shader_permutation, vertex_type);
+        auto *vertex_declaration = rasterizer_get_vertex_declaration(vertex_type);
+        auto *vertex_shader = rasterizer_get_vertex_shader_for_permutation(vertex_shader_permutation, vertex_type);
+        if(!vertex_declaration || !vertex_shader) {
+            return;
+        }
         IDirect3DDevice9_SetVertexShader(*global_d3d9_device, vertex_shader);
-        IDirect3DDevice9_SetVertexDeclaration(*global_d3d9_device, rasterizer_get_vertex_declaration(vertex_type));
+        IDirect3DDevice9_SetVertexDeclaration(*global_d3d9_device, vertex_declaration);
         IDirect3DDevice9_SetPixelShader(*global_d3d9_device, NULL);
 
         rasterizer_set_render_state(D3DRS_CULLMODE, TEST_FLAG(shader_data->generic.flags, SHADER_TRANSPARENT_GENERIC_FLAGS_TWO_SIDED_BIT) ? D3DCULL_NONE : D3DCULL_CCW);
@@ -706,12 +792,19 @@ namespace Chimera {
             for(std::uint16_t map_index = 0; map_index < 4; map_index++) {
                 if(map_index < shader_data->generic.maps.count) {
                     ShaderTransparentGenericMap *map = shader_transparent_generic_get_map(shader_data, map_index);
+                    if(!map) {
+                        return;
+                    }
                     ShaderTransparentGenericType type = shader_data->generic.type;
+                    const int type_index = static_cast<int>(type);
+                    if(type_index < static_cast<int>(SHADER_TRANSPARENT_GENERIC_TYPE_2D_MAP) || type_index > static_cast<int>(SHADER_TRANSPARENT_GENERIC_TYPE_FIRST_MAP_IS_VIEWER_CENTERED_CUBE_MAP)) {
+                        return;
+                    }
                     BitmapDataType bitmap_type;
                     bool is_first_map = map_index == 0;
 
                     const BitmapDataType bitmap_type_array[4] = {BITMAP_DATA_TYPE_2D, BITMAP_DATA_TYPE_CUBE_MAP, BITMAP_DATA_TYPE_CUBE_MAP, BITMAP_DATA_TYPE_CUBE_MAP};
-                    bitmap_type = is_first_map ? bitmap_type_array[type] : static_cast<BitmapDataType>(BITMAP_DATA_TYPE_2D);
+                    bitmap_type = is_first_map ? bitmap_type_array[type_index] : static_cast<BitmapDataType>(BITMAP_DATA_TYPE_2D);
 
                     DWORD u_address, v_address, w_address;
 
@@ -723,15 +816,15 @@ namespace Chimera {
                         u_address = D3DTADDRESS_CLAMP;
                     }
                     else {
-                        u_address = is_first_map ? bitmap_address_array[type] : static_cast<DWORD>(D3DTADDRESS_WRAP);
+                        u_address = is_first_map ? bitmap_address_array[type_index] : static_cast<DWORD>(D3DTADDRESS_WRAP);
                     }
                     if(bitmap_type == BITMAP_DATA_TYPE_2D && TEST_FLAG(map->flags, SHADER_TRANSPARENT_GENERIC_MAP_FLAGS_V_CLAMPED_BIT)) {
                         v_address = D3DTADDRESS_CLAMP;
                     }
                     else {
-                        v_address = is_first_map ? bitmap_address_array[type] : static_cast<DWORD>(D3DTADDRESS_WRAP);
+                        v_address = is_first_map ? bitmap_address_array[type_index] : static_cast<DWORD>(D3DTADDRESS_WRAP);
                     }
-                    w_address = is_first_map ? bitmap_address_array[type] : static_cast<DWORD>(D3DTADDRESS_WRAP);
+                    w_address = is_first_map ? bitmap_address_array[type_index] : static_cast<DWORD>(D3DTADDRESS_WRAP);
 
                     DWORD filter_type = D3DTEXF_LINEAR;
                     if(af_is_enabled) {
@@ -755,6 +848,9 @@ namespace Chimera {
 
                 if(map_index < shader_data->generic.maps.count && (map_index > 0 || shader_data->generic.type == SHADER_TRANSPARENT_GENERIC_TYPE_2D_MAP)) {
                     ShaderTransparentGenericMap *map = shader_transparent_generic_get_map(shader_data, map_index);
+                    if(!map) {
+                        return;
+                    }
                     Point2D map_scale = map->scale;
 
                     if(map_index == 0 && TEST_FLAG(shader_data->generic.flags, SHADER_TRANSPARENT_GENERIC_FLAGS_SCALE_FIRST_MAP_WITH_DISTANCE_BIT)) {
@@ -810,7 +906,7 @@ namespace Chimera {
             float *stage_color1 = &ps_constants_buffer[8 * 4];
             float *fog_config   = &ps_constants_buffer[8 * 8];
 
-            if(*fog_enabled) {
+            if(fog_enabled && *fog_enabled) {
                 std::uint16_t fog_stage = (shader_data->generic.stages.count > 0) ? shader_data->generic.stages.count : 1;
 
                 fog_config[0] = 1.0f;
@@ -819,7 +915,8 @@ namespace Chimera {
                     Plane3D *plane = &global_window_parameters->fog.plane;
                     Point3D *camera = &global_window_parameters->camera.position;
                     float eye_distance_to_fog_plane = plane->i * camera->x + plane->j * camera->y + plane->k * camera->z - plane->w;
-                    float planar_eye_density = global_window_parameters->fog.planar_maximum_density * PIN(-eye_distance_to_fog_plane / global_window_parameters->fog.planar_maximum_depth, 0.0f, 1.0f);
+                    float planar_depth = global_window_parameters->fog.planar_maximum_depth;
+                    float planar_eye_density = std::fabs(planar_depth) > 0.000001f ? global_window_parameters->fog.planar_maximum_density * PIN(-eye_distance_to_fog_plane / planar_depth, 0.0f, 1.0f) : 0.0f;
 
                     stage_color0[fog_stage * 4 + 0] = global_window_parameters->fog.planar_color.red;
                     stage_color0[fog_stage * 4 + 1] = global_window_parameters->fog.planar_color.green;
@@ -848,12 +945,15 @@ namespace Chimera {
             if(shader_data->generic.stages.count > 0) {
                 for(std::uint16_t i = 0; i < shader_data->generic.stages.count; i++) {
                     ShaderTransparentGenericStage *stage = shader_transparent_generic_get_stage(shader_data, i);
+                    if(!stage) {
+                        return;
+                    }
 
                     float progress = 0.0f;
                     if(group->animation != NULL && group->animation->values != NULL && TEST_FLAG(stage->flags, SHADER_TRANSPARENT_GENERIC_STAGE_FLAGS_A_CONTROLS_COLOR0_ANIMATION_BIT)) {
                         progress = group->animation->values[0];
                     }
-                    else {
+                    else if(std::fabs(stage->constant_color0_animation_period) > 0.000001f) {
                         progress = periodic_function_evaluate(global_frame_parameters->elapsed_time_sec / stage->constant_color0_animation_period, stage->constant_color0_animation_function);
                     }
 

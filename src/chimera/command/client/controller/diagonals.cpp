@@ -5,6 +5,7 @@
 #include "../../../signature/signature.hpp"
 #include "../../../chimera.hpp"
 #include "../../../output/output.hpp"
+#include <cmath>
 
 namespace Chimera {
     bool diagonals_command(int argc, const char **argv) {
@@ -12,6 +13,10 @@ namespace Chimera {
         static float negative_diagonal = 0.0F;
         if(argc == 1) {
             positive_diagonal = std::stof(*argv);
+            if(!std::isfinite(positive_diagonal)) {
+                console_error("Diagonal value must be a finite number.");
+                return false;
+            }
             if(positive_diagonal < 0.0F) {
                 positive_diagonal = 0.0F;
             }

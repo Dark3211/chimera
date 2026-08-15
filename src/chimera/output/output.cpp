@@ -56,7 +56,7 @@ namespace Chimera {
         for(std::size_t i = 0; i < sizeof(x) / sizeof(*x) - 1 && message[i]; i++) {
             x[i] = message[i];
         }
-        hud_output_asm(x);
+        hud_output_raw(x);
     }
 
     static bool server_messages_are_blocked = false;
@@ -94,7 +94,8 @@ namespace Chimera {
         if(get_chimera().feature_present("client_rcon")) {
             write_jmp_call(chimera.get_signature("rcon_message_sig").data(), hook, reinterpret_cast<const void *>(before_rcon_message));
         }
-        server_message_allow_unsolicted_rcon_messages = chimera.get_ini()->get_value_bool("custom_chat.server_message_allow_unsolicted_rcon_messages").value_or(false);
+        auto *ini = chimera.get_ini();
+        server_message_allow_unsolicted_rcon_messages = ini ? ini->get_value_bool("custom_chat.server_message_allow_unsolicted_rcon_messages").value_or(false) : false;
     }
 
     void set_server_messages_blocked(bool blocked) noexcept {

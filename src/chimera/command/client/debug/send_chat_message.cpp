@@ -6,6 +6,9 @@
 #include "../../../event/tick.hpp"
 #include "../../../halo_data/multiplayer.hpp"
 
+#include <cerrno>
+#include <cstdlib>
+
 namespace Chimera {
     static int throttle_time = 0;
 
@@ -23,14 +26,17 @@ namespace Chimera {
         }
 
         // Get the channel
-        int channel;
-        try {
-            channel = std::stoi(argv[0]);
+        if(!argv || !argv[0] || !argv[1]) {
+            return false;
         }
-        catch(std::exception &) {
+        errno = 0;
+        char *end = nullptr;
+        long parsed_channel = std::strtol(argv[0], &end, 10);
+        if(errno == ERANGE || end == argv[0] || !end || *end != '\0' || parsed_channel < 0 || parsed_channel > 2) {
             console_error(localize("chimera_send_chat_message_invalid_channel"), argv[0]);
             return false;
         }
+        int channel = static_cast<int>(parsed_channel);
 
         // Keep the player from muting themselves by mistake
         if(server_type() == ServerType::SERVER_DEDICATED) {

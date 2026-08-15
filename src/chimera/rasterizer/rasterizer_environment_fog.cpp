@@ -106,7 +106,9 @@ namespace Chimera {
     }
 
     static bool rasterizer_environment_fog_screen_is_active() noexcept {
-        if(d3d9_device_caps->PixelShaderVersion < 0xffff0200 || !rasterizer_debug_options->draw_environment_fog_screen) {
+        if(!d3d9_device_caps || !rasterizer_debug_options || !global_window_parameters || !rasterizer_globals ||
+           !global_d3d9_device || !*global_d3d9_device ||
+           d3d9_device_caps->PixelShaderVersion < 0xffff0200 || !rasterizer_debug_options->draw_environment_fog_screen) {
             return false;
         }
 
@@ -159,8 +161,17 @@ namespace Chimera {
     }
 
     static void rasterizer_environment_fog_screen_wind_update(FogScreen *screen, FogScreenWindData *wind) noexcept {
+        if(!screen || !wind || !global_frame_parameters) {
+            return;
+        }
+
+        auto tick_rate = effective_tick_rate();
+        if(!std::isfinite(tick_rate) || tick_rate <= 0.0f) {
+            return;
+        }
+
         static double last_wind_update = 0;
-        double delta_time = 1.0f / effective_tick_rate();
+        double delta_time = 1.0 / static_cast<double>(tick_rate);
 
         // Wind should only update at the current effective tickrate to prevent incorrect acceleration.
         if(global_frame_parameters->elapsed_time_sec - last_wind_update < delta_time) {
@@ -218,6 +229,9 @@ namespace Chimera {
     }
 
     void rasterizer_environment_fog_screen_wind_get_vector(std::int16_t window_index, float dt, VectorIJK *wind_vector) noexcept {
+        if(!wind_vector || window_index < 0 || window_index >= MAXIMUM_WINDOWS) {
+            return;
+        }
         FogScreenWindData *wind = &local_fog_screen_data[window_index].wind;
 
         wind_vector->i = wind->wind_direction.i * wind->wind_velocity * dt;
@@ -264,7 +278,7 @@ namespace Chimera {
 
                 // Update wind
                 Matrix4x3 wind_transform = identity4x3;
-                VectorIJK wind_vector;
+                VectorIJK wind_vector {};
                 rasterizer_environment_fog_screen_wind_update(screen_fog, &layer_data->wind);
                 rasterizer_environment_fog_screen_wind_get_vector(global_window_parameters->window_index, global_frame_parameters->delta_time, &wind_vector);
                 wind_transform.position.x = wind_vector.i;
@@ -469,6 +483,9 @@ namespace Chimera {
                 if(local_fog_model_geometry_flag && local_queued_model_geometry_groups) {
                     for(std::int16_t group_index = 0; group_index < local_queued_model_geometry_group_count; group_index++) {
                         TransparentGeometryGroup *group = &local_queued_model_geometry_groups[group_index];
+                        if(!group->shader) {
+                            continue;
+                        }
 
                         if(TEST_FLAG(group->geometry_flags, RASTERIZER_GEOMETRY_FLAGS_FIRST_PERSON_BIT)) {
                             if(lock_fp_model_fov) {
@@ -500,8 +517,13 @@ namespace Chimera {
                             }
                         }
 
-                        IDirect3DDevice9_SetVertexShader(*global_d3d9_device, rasterizer_get_vertex_shader(VSH_MODEL_FOG_SCREEN));
-                        IDirect3DDevice9_SetVertexDeclaration(*global_d3d9_device, rasterizer_get_vertex_declaration(rasterizer_transparent_geometry_get_primary_vertex_type(group)));
+                        auto *fog_vertex_shader = rasterizer_get_vertex_shader(VSH_MODEL_FOG_SCREEN);
+                        auto *fog_vertex_declaration = rasterizer_get_vertex_declaration(rasterizer_transparent_geometry_get_primary_vertex_type(group));
+                        if(!fog_vertex_shader || !fog_vertex_declaration) {
+                            continue;
+                        }
+                        IDirect3DDevice9_SetVertexShader(*global_d3d9_device, fog_vertex_shader);
+                        IDirect3DDevice9_SetVertexDeclaration(*global_d3d9_device, fog_vertex_declaration);
 
                         // Skinning
                         RenderSkinning skinning;
@@ -538,14 +560,19 @@ namespace Chimera {
     }
 
     extern "C" void rasterizer_environment_fog_screen_draw(long dynamic_triangle_buffer_index, long first_triangle_index, long triangle_count, VertexBuffer *vertex_buffer) noexcept {
-        if(rasterizer_environment_fog_screen_is_active()) {
-            if(local_fog_environment_geometry_flag) {
-                IDirect3DDevice9_SetVertexShader(*global_d3d9_device, rasterizer_get_vertex_shader(VSH_ENVIRONMENT_FOG_SCREEN));
-                IDirect3DDevice9_SetVertexDeclaration(*global_d3d9_device, rasterizer_get_vertex_declaration(vertex_buffer->type));
-
-                rasterizer_draw_dynamic_triangles_static_vertices(dynamic_triangle_buffer_index, first_triangle_index, triangle_count, vertex_buffer);
-            }
+        if(!vertex_buffer || !rasterizer_environment_fog_screen_is_active() || !local_fog_environment_geometry_flag) {
+            return;
         }
+
+        auto *vertex_shader = rasterizer_get_vertex_shader(VSH_ENVIRONMENT_FOG_SCREEN);
+        auto *vertex_declaration = rasterizer_get_vertex_declaration(vertex_buffer->type);
+        if(!vertex_shader || !vertex_declaration) {
+            return;
+        }
+
+        IDirect3DDevice9_SetVertexShader(*global_d3d9_device, vertex_shader);
+        IDirect3DDevice9_SetVertexDeclaration(*global_d3d9_device, vertex_declaration);
+        rasterizer_draw_dynamic_triangles_static_vertices(dynamic_triangle_buffer_index, first_triangle_index, triangle_count, vertex_buffer);
     }
 
     void rasterizer_environment_fog_screen_end() noexcept {
@@ -562,6 +589,10 @@ namespace Chimera {
             float *stage0_color1 = &ps_constants[8];
             float *stage1_color1 = &ps_constants[12];
             float *planar_color = &ps_constants[16];
+
+            if(!global_rasterizer_data || !*global_rasterizer_data) {
+                return;
+            }
 
             for(short i = 0; i < MAXIMUM_NUMBER_OF_FOG_LAYERS; i++) {
                 short index_2 = wrap_fog_layer(layer_data->base_index + i, clamped_layer_count);
@@ -635,7 +666,7 @@ namespace Chimera {
 
     bool rasterizer_environment_fog_screen_model_begin(const RasterizerModelBeginParams *params) noexcept {
         bool active = false;
-        if(!params) {
+        if(!params || !rasterizer_debug_options) {
             return false;
         }
 
@@ -661,7 +692,7 @@ namespace Chimera {
     }
 
     extern "C" void rasterizer_environment_fog_screen_model_submit(_shader *shader, short shader_permutation_index, TriangleBuffer *triangle_buffer, long dynamic_triangle_buffer_index, long triangle_count, VertexBuffer *vertex_buffer, long dynamic_vertex_buffer_index) noexcept {
-        if(!local_queued_model_geometry_groups || !local_params) {
+        if(!local_queued_model_geometry_groups || !local_params || !rasterizer_debug_options || !shader || !vertex_buffer) {
             return;
         }
         if(rasterizer_debug_options->draw_environment_fog_screen && rasterizer_debug_options->drawing_mode == 0) {

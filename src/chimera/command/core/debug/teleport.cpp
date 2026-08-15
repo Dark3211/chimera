@@ -6,7 +6,36 @@
 #include "../../../halo_data/multiplayer.hpp"
 #include "../../../output/output.hpp"
 
+#include <cerrno>
+#include <cmath>
+#include <cstdlib>
+#include <limits>
+
 namespace Chimera {
+    static bool parse_finite_float(const char *text, float &value) noexcept {
+        if(!text || !*text) {
+            return false;
+        }
+        errno = 0;
+        char *end = nullptr;
+        value = std::strtof(text, &end);
+        return errno != ERANGE && end != text && end && *end == '\0' && std::isfinite(value);
+    }
+
+    static bool parse_player_number(const char *text, int &index) noexcept {
+        if(!text || !*text) {
+            return false;
+        }
+        errno = 0;
+        char *end = nullptr;
+        unsigned long value = std::strtoul(text, &end, 10);
+        if(errno == ERANGE || end == text || !end || *end != '\0' || value == 0 || value > static_cast<unsigned long>(std::numeric_limits<int>::max())) {
+            return false;
+        }
+        index = static_cast<int>(value - 1);
+        return true;
+    }
+
     bool teleport_command(int argc, const char **argv) {
         // Prevent desyncs if needed
         if(server_type() == ServerType::SERVER_DEDICATED) {
@@ -20,12 +49,7 @@ namespace Chimera {
 
         // Teleport to specific coordinates
         if(argc == 3 || argc == 4) {
-            try {
-                x = std::stof(argv[argc - 3]);
-                y = std::stof(argv[argc - 2]);
-                z = std::stof(argv[argc - 1]);
-            }
-            catch(std::exception &) {
+            if(!parse_finite_float(argv[argc - 3], x) || !parse_finite_float(argv[argc - 2], y) || !parse_finite_float(argv[argc - 1], z)) {
                 console_error(localize("chimera_teleport_invalid_arguments"));
                 return false;
             }
@@ -36,10 +60,7 @@ namespace Chimera {
             // Get the player
             Player *player;
             int index;
-            try {
-                index = std::stoul(argv[argc - 1]) - 1;
-            }
-            catch(std::exception &) {
+            if(!parse_player_number(argv[argc - 1], index)) {
                 console_error(localize("chimera_error_takes_player_number"));
                 return false;
             }
@@ -77,10 +98,7 @@ namespace Chimera {
         }
         else {
             int index;
-            try {
-                index = std::stoul(argv[0]) - 1;
-            }
-            catch(std::exception &) {
+            if(!parse_player_number(argv[0], index)) {
                 console_error(localize("chimera_error_takes_player_number"));
                 return false;
             }

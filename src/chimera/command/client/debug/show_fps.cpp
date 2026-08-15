@@ -25,9 +25,15 @@ namespace Chimera {
             bool new_enabled = STR_TO_BOOL(argv[0]);
             if(new_enabled != enabled) {
                 if(new_enabled) {
-                    LARGE_INTEGER freq;
-                    QueryPerformanceFrequency(&freq);
+                    LARGE_INTEGER freq {};
+                    if(!QueryPerformanceFrequency(&freq) || freq.QuadPart <= 0 || !QueryPerformanceCounter(&last_frame)) {
+                        console_error("Unable to initialize the high-resolution performance counter");
+                        return false;
+                    }
                     pc_freq = static_cast<double>(freq.QuadPart);
+                    total_frames = 0;
+                    total_frame_time = 0.0;
+                    last_fps = 0.0;
                     add_preframe_event(show_fps, EventPriority::EVENT_PRIORITY_FINAL);
                 }
                 else {
@@ -42,11 +48,17 @@ namespace Chimera {
     }
 
     static void show_fps() noexcept {
-        LARGE_INTEGER now;
-        QueryPerformanceCounter(&now);
+        LARGE_INTEGER now {};
+        if(pc_freq <= 0.0 || !QueryPerformanceCounter(&now)) {
+            return;
+        }
 
         // Add the current frame time to the total
         auto difference = now.QuadPart - last_frame.QuadPart;
+        if(difference < 0) {
+            last_frame = now;
+            return;
+        }
         total_frames++;
 
         auto frame_time = difference / pc_freq;

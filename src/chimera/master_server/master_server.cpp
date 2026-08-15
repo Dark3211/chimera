@@ -39,6 +39,10 @@ namespace Chimera {
         std::strncpy(key_server_c, key, sizeof(key_server_c) - 1);
         std::strncpy(nat_neg_primary_c, natneg1, sizeof(nat_neg_primary_c) - 1);
         std::strncpy(nat_neg_secondary_c, natneg2, sizeof(nat_neg_secondary_c) - 1);
+        list_server_c[sizeof(list_server_c) - 1] = 0;
+        key_server_c[sizeof(key_server_c) - 1] = 0;
+        nat_neg_primary_c[sizeof(nat_neg_primary_c) - 1] = 0;
+        nat_neg_secondary_c[sizeof(nat_neg_secondary_c) - 1] = 0;
     }
 
     static const char *server_1 = key_server_c;
@@ -57,9 +61,9 @@ namespace Chimera {
         set_master_server(nullptr, nullptr, nullptr, nullptr);
     }
     void get_master_server(const char **list, const char **key, const char **natneg1, const char **natneg2) {
-        *list = list_server_c;
-        *key = key_server_c;
-        *natneg1 = nat_neg_primary_c;
-        *natneg2 = nat_neg_secondary_c;
+        if(list) *list = list_server_c;
+        if(key) *key = key_server_c;
+        if(natneg1) *natneg1 = nat_neg_primary_c;
+        if(natneg2) *natneg2 = nat_neg_secondary_c;
     }
 }

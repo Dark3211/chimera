@@ -146,7 +146,8 @@ namespace Chimera {
         apply_text(buffer, x_val, y, x_val_width, 480, color, font, FontAlignment::ALIGN_CENTER, TextAnchor::ANCHOR_TOP_RIGHT);
         std::snprintf(buffer, sizeof(buffer), "%u", max);
         apply_text(buffer, x_max, y, x_max_width, 480, color, font, FontAlignment::ALIGN_CENTER, TextAnchor::ANCHOR_TOP_RIGHT);
-        std::snprintf(buffer, sizeof(buffer), "%.02f", 100.0 * static_cast<double>(value) / static_cast<double>(max));
+        const double percentage = max == 0 ? 0.0 : 100.0 * static_cast<double>(value) / static_cast<double>(max);
+        std::snprintf(buffer, sizeof(buffer), "%.02f", percentage);
         apply_text(buffer, x_percent, y, x_percent_width, 480, color, font, FontAlignment::ALIGN_CENTER, TextAnchor::ANCHOR_TOP_RIGHT);
     }
 }

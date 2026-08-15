@@ -7,6 +7,14 @@
 
 namespace Chimera {
     const char *localize(const char *string, Language language) noexcept {
+        if(!string) {
+            return "";
+        }
+        auto language_index = static_cast<int>(language);
+        if(language_index < 0 || language_index >= static_cast<int>(CHIMERA_LANGUAGE_COUNT)) {
+            language_index = 0;
+        }
+
         std::size_t begin = 0;
         std::size_t count = sizeof(LOCALIZATION_DATA) / sizeof(LOCALIZATION_DATA[0]);
 
@@ -18,7 +26,7 @@ namespace Chimera {
 
             // Same
             if(r == 0) {
-                result = LOCALIZATION_DATA[middle][language + 1];
+                result = LOCALIZATION_DATA[middle][language_index + 1];
                 break;
             }
 

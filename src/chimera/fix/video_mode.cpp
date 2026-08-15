@@ -9,9 +9,26 @@
 #include "../event/frame.hpp"
 
 #include <cstdint>
+#include <cerrno>
+#include <cstdlib>
+#include <limits>
 
 namespace Chimera {
     static bool vsync = false;
+
+    static bool parse_uint32_setting(const char *value, std::uint32_t &result) noexcept {
+        if(!value || !*value || *value == '-') {
+            return false;
+        }
+        errno = 0;
+        char *end = nullptr;
+        auto parsed = std::strtoull(value, &end, 10);
+        if(errno == ERANGE || end == value || !end || *end != 0 || parsed > std::numeric_limits<std::uint32_t>::max()) {
+            return false;
+        }
+        result = static_cast<std::uint32_t>(parsed);
+        return true;
+    }
 
     extern "C" {
         void on_windowed_check_force_windowed() noexcept;
@@ -58,8 +75,12 @@ namespace Chimera {
     }
 
     extern "C" void override_d3d_present_parameters(D3DPRESENT_PARAMETERS *params) noexcept {
+        if(!params) {
+            return;
+        }
         auto *ini = get_chimera().get_ini();
-        auto refresh_rate = ini->get_value_long("video_mode.refresh_rate").value_or(0);
+        std::uint32_t refresh_rate = 0;
+        parse_uint32_setting(ini->get_value("video_mode.refresh_rate"), refresh_rate);
         params->FullScreen_RefreshRateInHz = params->Windowed ? 0 : refresh_rate;
         params->PresentationInterval = vsync ? D3DPRESENT_DONOTWAIT : 0x80000000;
 
@@ -94,30 +115,31 @@ namespace Chimera {
             return;
         }
 
-        int metric = 0;
-        auto auto_or_i = [&metric](const char *w) {
-            if(std::strcmp(w,"auto") == 0 || std::strcmp(w,"0") == 0) {
-                return GetSystemMetrics(metric);
+        auto read_dimension = [](const char *value, int metric, std::uint32_t &destination) noexcept {
+            if(!value) {
+                return;
             }
-            else {
-                return std::stoi(w);
+            if(std::strcmp(value, "auto") == 0 || std::strcmp(value, "0") == 0) {
+                auto system_value = GetSystemMetrics(metric);
+                if(system_value > 0) {
+                    destination = static_cast<std::uint32_t>(system_value);
+                }
+                return;
+            }
+            std::uint32_t parsed = 0;
+            if(parse_uint32_setting(value, parsed) && parsed > 0) {
+                destination = parsed;
             }
         };
 
-        #define SET_VALUE(key, value, fn) { \
-            auto *v = ini->get_value("video_mode." key); \
-            if(v) { \
-                value = fn(v); \
-            } \
-        }
+        read_dimension(ini->get_value("video_mode.width"), SM_CXSCREEN, default_width);
+        read_dimension(ini->get_value("video_mode.height"), SM_CYSCREEN, default_height);
 
-        // Load and set values
-        metric = SM_CXSCREEN;
-        SET_VALUE("width", default_width, auto_or_i)
-        metric = SM_CYSCREEN;
-        SET_VALUE("height", default_height, auto_or_i)
-        SET_VALUE("refresh_rate", default_refresh_rate, std::stoi)
-        SET_VALUE("vsync", vsync, std::stoi)
+        std::uint32_t parsed_refresh_rate = 0;
+        if(parse_uint32_setting(ini->get_value("video_mode.refresh_rate"), parsed_refresh_rate)) {
+            default_refresh_rate = parsed_refresh_rate;
+        }
+        vsync = ini->get_value_bool("video_mode.vsync").value_or(vsync);
 
         // Don't fallback the resolution to 800x600
         auto fallback_resolution_sig = chimera.get_signature("fallback_resolution_sig").data();

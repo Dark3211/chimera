@@ -50,8 +50,15 @@ namespace Chimera {
      * @param format String format (passed to snprintf)
      * @param args   Additional arguments to pass
      */
+    inline void console_output(const ConsoleColor &color, const char *message) noexcept {
+        console_output_raw(color, message ? message : "");
+    }
+
     template<typename... Args> void console_output(const ConsoleColor &color, const char *format, Args... args) noexcept {
-        char message[256];
+        if(!format) {
+            return;
+        }
+        char message[256] = {};
         std::snprintf(message, sizeof(message), format, args...);
         console_output_raw(color, message);
     }
@@ -61,6 +68,10 @@ namespace Chimera {
      * @param format String format (passed to snprintf)
      * @param args   Additional arguments to pass
      */
+    inline void console_output(const char *message) noexcept {
+        console_output_raw(ConsoleColor {1.0, 1.0, 1.0, 1.0}, message ? message : "");
+    }
+
     template<typename... Args> void console_output(const char *format, Args... args) noexcept {
         console_output(ConsoleColor {1.0, 1.0, 1.0, 1.0}, format, args...);
     }
@@ -70,6 +81,10 @@ namespace Chimera {
      * @param format String format (passed to snprintf)
      * @param args   Additional arguments to pass
      */
+    inline void console_error(const char *message) noexcept {
+        console_output_raw(ConsoleColor {1.0, 1.0, 0.25, 0.25}, message ? message : "");
+    }
+
     template<typename... Args> void console_error(const char *format, Args... args) noexcept {
         console_output(ConsoleColor {1.0, 1.0, 0.25, 0.25}, format, args...);
     }
@@ -79,6 +94,10 @@ namespace Chimera {
      * @param format String format (passed to snprintf)
      * @param args   Additional arguments to pass
      */
+    inline void console_warning(const char *message) noexcept {
+        console_output_raw(ConsoleColor {1.0, 1.0, 1.0, 0.125}, message ? message : "");
+    }
+
     template<typename... Args> void console_warning(const char *format, Args... args) noexcept {
         console_output(ConsoleColor {1.0, 1.0, 1.0, 0.125}, format, args...);
     }
