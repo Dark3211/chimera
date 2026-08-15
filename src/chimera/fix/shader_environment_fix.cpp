@@ -49,9 +49,12 @@ namespace Chimera {
 
     namespace {
         constexpr std::uintptr_t TAG_DATA_SAFE_REGION_SIZE = 0x1700000;
-        constexpr float MATERIAL_SPECULAR_SCALE = 1.15F;
-        constexpr float MATERIAL_REFLECTION_PERPENDICULAR_SCALE = 1.06F;
-        constexpr float MATERIAL_REFLECTION_PARALLEL_SCALE = 1.10F;
+
+        // Deliberately strong test values so A/B comparisons are unmistakable.
+        // If the rendering path responds as expected, these can be tuned down later.
+        constexpr float MATERIAL_SPECULAR_SCALE = 1.50F;
+        constexpr float MATERIAL_REFLECTION_PERPENDICULAR_SCALE = 1.25F;
+        constexpr float MATERIAL_REFLECTION_PARALLEL_SCALE = 1.35F;
         constexpr std::size_t MAX_MATERIAL_QUALITY_SNAPSHOTS = 4096;
 
         struct MaterialQualitySnapshot {
@@ -63,7 +66,18 @@ namespace Chimera {
 
         std::array<MaterialQualitySnapshot, MAX_MATERIAL_QUALITY_SNAPSHOTS> material_quality_snapshots {};
         std::size_t material_quality_snapshot_count = 0;
+        std::size_t material_quality_environment_scanned = 0;
+        std::size_t material_quality_materials_modified = 0;
+        std::size_t material_quality_specular_modified = 0;
+        std::size_t material_quality_reflection_modified = 0;
         bool material_quality_enabled = false;
+
+        void clear_material_quality_diagnostics() noexcept {
+            material_quality_environment_scanned = 0;
+            material_quality_materials_modified = 0;
+            material_quality_specular_modified = 0;
+            material_quality_reflection_modified = 0;
+        }
 
         bool valid_shader_environment_tag(const Tag *tag) noexcept {
             if(!tag || tag->primary_class != TagClassInt::TAG_CLASS_SHADER_ENVIRONMENT || !tag->data) {
@@ -90,6 +104,7 @@ namespace Chimera {
         void clear_material_quality_snapshots() noexcept {
             // Map-load BEFORE event: the old tag pointers are about to become invalid.
             material_quality_snapshot_count = 0;
+            clear_material_quality_diagnostics();
         }
 
         void restore_material_quality() noexcept {
@@ -106,12 +121,15 @@ namespace Chimera {
                 shader->environment.reflection.view_parallel_brightness = snapshot.reflection_view_parallel_brightness;
             }
             material_quality_snapshot_count = 0;
+            clear_material_quality_diagnostics();
         }
 
         void apply_material_quality() noexcept {
             if(material_quality_snapshot_count != 0) {
                 return;
             }
+
+            clear_material_quality_diagnostics();
 
             auto tag_count = static_cast<std::size_t>(get_tag_data_header().tag_count);
             const auto maximum_safe_tag_count = TAG_DATA_SAFE_REGION_SIZE / sizeof(Tag);
@@ -125,6 +143,8 @@ namespace Chimera {
                     continue;
                 }
 
+                material_quality_environment_scanned++;
+
                 auto *shader = reinterpret_cast<ShaderEnvironment *>(tag->data);
                 const auto old_specular = shader->environment.specular.brightness;
                 const auto old_reflection_perpendicular = shader->environment.reflection.view_perpendicular_brightness;
@@ -134,9 +154,11 @@ namespace Chimera {
                 const auto new_reflection_perpendicular = scale_material_value(old_reflection_perpendicular, MATERIAL_REFLECTION_PERPENDICULAR_SCALE);
                 const auto new_reflection_parallel = scale_material_value(old_reflection_parallel, MATERIAL_REFLECTION_PARALLEL_SCALE);
 
-                if(new_specular == old_specular &&
-                   new_reflection_perpendicular == old_reflection_perpendicular &&
-                   new_reflection_parallel == old_reflection_parallel) {
+                const bool specular_changed = new_specular != old_specular;
+                const bool reflection_changed = new_reflection_perpendicular != old_reflection_perpendicular ||
+                                                new_reflection_parallel != old_reflection_parallel;
+
+                if(!specular_changed && !reflection_changed) {
                     continue;
                 }
 
@@ -151,10 +173,25 @@ namespace Chimera {
                     old_reflection_parallel
                 };
 
+                material_quality_materials_modified++;
+                if(specular_changed) {
+                    material_quality_specular_modified++;
+                }
+                if(reflection_changed) {
+                    material_quality_reflection_modified++;
+                }
+
                 shader->environment.specular.brightness = new_specular;
                 shader->environment.reflection.view_perpendicular_brightness = new_reflection_perpendicular;
                 shader->environment.reflection.view_parallel_brightness = new_reflection_parallel;
             }
+        }
+
+        void print_material_quality_diagnostics() noexcept {
+            console_output("Environment shaders scanned: %zu", material_quality_environment_scanned);
+            console_output("Materials modified: %zu", material_quality_materials_modified);
+            console_output("Specular materials modified: %zu", material_quality_specular_modified);
+            console_output("Reflection materials modified: %zu", material_quality_reflection_modified);
         }
 
         void refresh_material_quality_after_map_load() noexcept {
@@ -174,6 +211,9 @@ namespace Chimera {
                 return false;
             }
 
+            std::size_t restored_materials = 0;
+            bool restored = false;
+
             if(arguments.size() == 2) {
                 const auto &value = arguments[1];
                 if(value != "true" && value != "false" && value != "1" && value != "0") {
@@ -188,13 +228,21 @@ namespace Chimera {
                         apply_material_quality();
                     }
                     else {
+                        restored_materials = material_quality_snapshot_count;
                         restore_material_quality();
                         material_quality_enabled = false;
+                        restored = true;
                     }
                 }
             }
 
             console_output("chimera_material_quality: %s", BOOL_TO_STR(material_quality_enabled));
+            if(material_quality_enabled) {
+                print_material_quality_diagnostics();
+            }
+            else if(restored) {
+                console_output("Environment materials restored: %zu", restored_materials);
+            }
             return false;
         }
     }
