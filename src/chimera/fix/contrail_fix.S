@@ -9,10 +9,6 @@ init_value: .long 0x3D088889
 
 .globl _new_contrail_update_function
 _new_contrail_update_function:
-    ;# Diagnostic bypass: run Halo's original update path untouched.
-    cmp dword ptr [_contrail_fix_enabled], 0
-    je original_update
-
     ;# Check if we can update
     push eax
     mov eax, dword ptr [_can_update_contrail]
@@ -38,16 +34,10 @@ _new_contrail_update_function:
 
     ;# We're done. Update
     pop eax
-
-    original_update:
     jmp dword ptr [_original_contrail_update_function]
 
 .globl _interpolation_memes
 _interpolation_memes:
-    ;# Diagnostic bypass: skip Chimera's first-tick interpolation hack.
-    cmp dword ptr [_contrail_fix_enabled], 0
-    je original_interp
-
     ;# Check if interpolation is enabled
     push eax
     mov eax, dword ptr [_apply_interpolation_hack]
@@ -58,7 +48,6 @@ _interpolation_memes:
     jnz hacky_memes
 
     ;# Interpolation disabled? Proceed as normal
-    original_interp:
     jmp dword ptr [_original_instruction]
 
     hacky_memes:

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 #include <algorithm>
-#include <cctype>
 #include <cstdint>
 #include <cstring>
 
@@ -10,10 +9,8 @@
 #include "../signature/signature.hpp"
 #include "../halo_data/object.hpp"
 #include "../halo_data/contrail.hpp"
-#include "../event/command.hpp"
 #include "../event/tick.hpp"
 #include "../event/revert.hpp"
-#include "../output/output.hpp"
 
 extern "C" {
     const void *original_contrail_update_function;
@@ -21,7 +18,6 @@ extern "C" {
     std::byte *skip_update = nullptr;
     std::uint32_t can_update_contrail = 0;
     std::uint32_t apply_interpolation_hack = 1;
-    std::uint32_t contrail_fix_enabled = 1;
     float update_contrail_by = 1.0F / 30.0F;
     void new_contrail_update_function();
     void interpolation_memes();
@@ -62,80 +58,8 @@ namespace Chimera {
 
     static void copy_objects() noexcept;
 
-    static bool contrail_fix_console_command(const char *command) noexcept {
-        if(!command) {
-            return true;
-        }
-
-        static constexpr char command_name[] = "chimera_debug_contrail_fix";
-        static constexpr std::size_t command_name_length = sizeof(command_name) - 1;
-
-        if(std::strncmp(command, command_name, command_name_length) != 0) {
-            return true;
-        }
-
-        const char *argument = command + command_name_length;
-        if(*argument != '\0' && !std::isspace(static_cast<unsigned char>(*argument))) {
-            return true;
-        }
-
-        while(std::isspace(static_cast<unsigned char>(*argument))) {
-            argument++;
-        }
-
-        if(*argument == '\0') {
-            console_output("chimera_debug_contrail_fix: %s", BOOL_TO_STR(contrail_fix_enabled != 0));
-            return false;
-        }
-
-        const char *argument_end = argument;
-        while(*argument_end != '\0' && !std::isspace(static_cast<unsigned char>(*argument_end))) {
-            argument_end++;
-        }
-
-        const std::size_t argument_length = static_cast<std::size_t>(argument_end - argument);
-        while(std::isspace(static_cast<unsigned char>(*argument_end))) {
-            argument_end++;
-        }
-
-        if(*argument_end != '\0') {
-            console_error("chimera_debug_contrail_fix: expected true or false");
-            return false;
-        }
-
-        bool new_enabled;
-        if((argument_length == 4 && std::strncmp(argument, "true", 4) == 0) ||
-           (argument_length == 1 && argument[0] == '1')) {
-            new_enabled = true;
-        }
-        else if((argument_length == 5 && std::strncmp(argument, "false", 5) == 0) ||
-                (argument_length == 1 && argument[0] == '0')) {
-            new_enabled = false;
-        }
-        else {
-            console_error("chimera_debug_contrail_fix: expected true or false");
-            return false;
-        }
-
-        if((contrail_fix_enabled != 0) != new_enabled) {
-            contrail_fix_enabled = new_enabled ? 1U : 0U;
-
-            // Drop all cached parent transforms whenever the diagnostic mode changes.
-            // This avoids reusing data collected under the other update path.
-            std::memset(object_buffers, 0, sizeof(object_buffers));
-            current_tick = object_buffers[0];
-            previous_tick = object_buffers[1];
-            tick_passed = false;
-            can_update_contrail = 0;
-        }
-
-        apply_interpolation_hack = (contrail_fix_enabled && interpolation_enabled) ? 1U : 0U;
-        console_output("chimera_debug_contrail_fix: %s", BOOL_TO_STR(contrail_fix_enabled != 0));
-        return false;
-    }
-
     void fix_contrail_before() noexcept {
-        if(!contrail_fix_enabled || !interpolation_enabled) {
+        if(!interpolation_enabled) {
             return;
         }
 
@@ -173,8 +97,6 @@ namespace Chimera {
             }
 
             auto *object = object_table.get_dynamic_object(current_tick_object.object_id);
-
-            // This shouldn't ever happen but just in case it does...
             if(!object) {
                 continue;
             }
@@ -184,68 +106,57 @@ namespace Chimera {
                 continue;
             }
 
-            // Skip if the tags do not match
+            // Skip if the tags do not match.
             auto &tag_id = object->definition_index;
             if(tag_id != current_tick_object.tag_id || previous_tick_object.tag_id != tag_id) {
                 continue;
             }
 
-            // Skip if object ID's do not match. Mostly a sanity check.
+            // Skip if object IDs do not match.
             if(current_tick_object.object_id != previous_tick_object.object_id) {
                 continue;
             }
 
-            // Copy previous tick positions to object table to fudge contrails
+            // Copy previous tick positions to object table to fudge contrails.
             object->object.bounding_sphere_center = previous_tick_object.center;
             std::copy(previous_tick_object.nodes, previous_tick_object.nodes + previous_tick_object.node_count, nodes);
         }
     }
 
-
-    // Copy objects from Halo's data to buffer
+    // Copy objects from Halo's data to buffer.
     static void copy_objects() noexcept {
-        // Get the object table
         auto &object_table = ObjectTable::get_object_table();
-
-        // Get the contrail table
         auto &contrail_table = ContrailTable::get_contrail_table();
 
-        // Go through all contrails.
         for(std::size_t i = 0; i < CONTRAIL_BUFFER_SIZE; i++) {
             auto &current_tick_object = current_tick[i];
 
-            // Set this to false so if the parent object doesn't exist or is invalid we don't need to restore position data.
+            // Set this to false so invalid parents are never restored.
             current_tick_object.rollback = false;
             current_tick_object.node_count = 0;
 
-            //Check if contrail exists
             if(contrail_table.first_element[i].id == 0) {
                 continue;
             }
 
-            // Store parent Object ID
             current_tick_object.object_id = contrail_table.first_element[i].parent_object_id;
 
-            // See if the parent object exists.
             auto *object = object_table.get_dynamic_object(current_tick_object.object_id);
             if(!object) {
                 continue;
             }
 
-            // Check if we can do anything with this object.
             auto *nodes = object->nodes();
             if(!nodes) {
                 continue;
             }
 
-            // Get the number of model nodes.
             current_tick_object.tag_id = object->definition_index;
             auto *object_tag = get_tag(current_tick_object.tag_id.index.index);
             if(!object_tag || !object_tag->data) {
                 continue;
             }
 
-            // Get the model tag to get the node count
             if(object->object.type == ObjectType::OBJECT_TYPE_PROJECTILE) {
                 current_tick_object.node_count = 1;
             }
@@ -258,23 +169,21 @@ namespace Chimera {
                 current_tick_object.node_count = *reinterpret_cast<std::uint32_t *>(model_tag->data + 0xB8);
             }
 
-            // The snapshot is fixed-size. Refuse malformed/unsupported models rather
-            // than copying beyond the buffer and corrupting adjacent contrail state.
+            // The snapshot is fixed-size. Refuse malformed or unsupported models
+            // rather than copying beyond the buffer and corrupting adjacent state.
             if(current_tick_object.node_count > MAX_NODES) {
                 current_tick_object.node_count = 0;
                 continue;
             }
 
             current_tick_object.rollback = true;
-
-            // Copy nodes from Halo's data
             std::copy(nodes, nodes + current_tick_object.node_count, current_tick_object.nodes);
             current_tick_object.center = object->object.bounding_sphere_center;
         }
     }
 
     void fix_contrail_after() noexcept {
-        if(!contrail_fix_enabled || !interpolation_enabled) {
+        if(!interpolation_enabled) {
             return;
         }
 
@@ -285,14 +194,11 @@ namespace Chimera {
         for(std::size_t i = 0; i < max_objects && i < CONTRAIL_BUFFER_SIZE; i++) {
             auto &current_tick_object = current_tick[i];
 
-            // Skip if we didn't fix the contrails this frame.
             if(!current_tick_object.rollback || current_tick_object.node_count > MAX_NODES) {
                 continue;
             }
 
             auto *object = object_table.get_dynamic_object(current_tick_object.object_id);
-
-            // This shouldn't ever happen but just in case it does...
             if(!object) {
                 continue;
             }
@@ -307,7 +213,7 @@ namespace Chimera {
         }
     }
 
-     // Erase the object buffers to prevent funny things on revert
+    // Erase object buffers to prevent stale state on revert.
     void fix_contrail_clear() noexcept {
         std::memset(object_buffers, 0, sizeof(object_buffers));
         current_tick = object_buffers[0];
@@ -321,7 +227,7 @@ namespace Chimera {
         update_contrail_by = 1.0F / effective_tick_rate();
         tick_passed = true;
 
-        apply_interpolation_hack = (contrail_fix_enabled && interpolation_enabled) ? 1U : 0U;
+        apply_interpolation_hack = interpolation_enabled ? 1U : 0U;
     }
 
     void set_up_contrail_fix() noexcept {
@@ -339,7 +245,6 @@ namespace Chimera {
         // Prevent contrail updating on first tick after creation to prevent visual bugs.
         write_function_override(interp_fix, contrail_interp_fix_hook, reinterpret_cast<const void *>(interpolation_memes), &original_instruction);
 
-        add_command_event(contrail_fix_console_command, EVENT_PRIORITY_BEFORE);
         add_pretick_event(allow_updates);
         add_revert_event(fix_contrail_clear);
     }
