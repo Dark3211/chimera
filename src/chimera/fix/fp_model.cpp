@@ -21,6 +21,7 @@ namespace Chimera {
     static float on_tick_x = 0;
     static float on_tick_y = 0;
     static bool can_update = false;
+    static std::byte *fp_model_node_signature_data = nullptr;
 
     RenderFrustum frustum, frustum_fp;
     static float v_fov;
@@ -37,7 +38,7 @@ namespace Chimera {
 
     void set_per_tick_fp_model_pos() noexcept {
         if(can_update) {
-            auto *signature_data = get_chimera().get_signature("first_person_node_base_address_sig").data();
+            auto *signature_data = fp_model_node_signature_data;
             if(!signature_data) {
                 return;
             }
@@ -122,6 +123,8 @@ namespace Chimera {
     }
 
     void set_up_fp_model_fix() noexcept {
+        fp_model_node_signature_data = get_chimera().get_signature("first_person_node_base_address_sig").data();
+
         // Set up animation fix.
         add_pretick_event(set_per_tick_fp_model_pos);
         add_frame_event(can_update_fp);

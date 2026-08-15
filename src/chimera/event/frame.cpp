@@ -10,6 +10,7 @@ namespace Chimera {
     static void enable_frame_hook();
 
     static std::vector<Event<EventFunction>> preframe_events;
+    static ReusableEventDispatcher<EventFunction> preframe_dispatcher;
 
     void add_preframe_event(const EventFunction function, EventPriority priority) {
         // Remove if exists
@@ -32,6 +33,7 @@ namespace Chimera {
     }
 
     static std::vector<Event<EventFunction>> frame_events;
+    static ReusableEventDispatcher<EventFunction> frame_dispatcher;
 
     void add_frame_event(const EventFunction function, EventPriority priority) {
         // Remove if exists
@@ -54,11 +56,11 @@ namespace Chimera {
     }
 
     static void on_preframe() {
-        call_in_order(preframe_events);
+        preframe_dispatcher.dispatch(preframe_events);
     }
 
     static void on_frame() {
-        call_in_order(frame_events);
+        frame_dispatcher.dispatch(frame_events);
     }
 
     /**

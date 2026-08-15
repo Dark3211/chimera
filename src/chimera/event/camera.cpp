@@ -9,6 +9,7 @@ namespace Chimera {
     static void enable_camera_hook();
 
     static std::vector<Event<EventFunction>> precamera_events;
+    static ReusableEventDispatcher<EventFunction> precamera_dispatcher;
 
     void add_precamera_event(const EventFunction function, EventPriority priority) {
         // Remove if exists
@@ -31,6 +32,7 @@ namespace Chimera {
     }
 
     static std::vector<Event<EventFunction>> camera_events;
+    static ReusableEventDispatcher<EventFunction> camera_dispatcher;
 
     void add_camera_event(const EventFunction function, EventPriority priority) {
         // Remove if exists
@@ -53,11 +55,11 @@ namespace Chimera {
     }
 
     static void on_precamera() {
-        call_in_order(precamera_events);
+        precamera_dispatcher.dispatch(precamera_events);
     }
 
     static void on_camera() {
-        call_in_order(camera_events);
+        camera_dispatcher.dispatch(camera_events);
     }
 
     /**

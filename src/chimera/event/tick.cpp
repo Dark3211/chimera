@@ -14,6 +14,7 @@ namespace Chimera {
     static LARGE_INTEGER current_tick_time;
 
     static std::vector<Event<EventFunction>> pretick_events;
+    static ReusableEventDispatcher<EventFunction> pretick_dispatcher;
 
     void add_pretick_event(const EventFunction function, EventPriority priority) {
         // Remove if exists
@@ -36,6 +37,7 @@ namespace Chimera {
     }
 
     static std::vector<Event<EventFunction>> tick_events;
+    static ReusableEventDispatcher<EventFunction> tick_dispatcher;
 
     void add_tick_event(const EventFunction function, EventPriority priority) {
         // Remove if exists
@@ -58,12 +60,12 @@ namespace Chimera {
     }
 
     static void on_pretick() {
-        call_in_order(pretick_events);
+        pretick_dispatcher.dispatch(pretick_events);
     }
 
     static void on_tick() {
         QueryPerformanceCounter(&current_tick_time);
-        call_in_order(tick_events);
+        tick_dispatcher.dispatch(tick_events);
     }
 
     /**

@@ -1,375 +1,140 @@
-# Chimera Hardened — Fixes, Optimizations and Validation
-
-Branch: `chimera-hardened`
-Last updated: 2026-08-14
-
-## Purpose
-
-This branch keeps Chimera's existing behavior and features while hardening failure paths,
-bounds handling, filesystem access, map loading, downloads, bookmark/server switching and
-the x86 hook/trampoline engine.
-
----
-
-# Earlier hardening
-
-## `src/chimera/bookmark/bookmark.cpp`
-
-- Reworked server address parsing.
-- Added null/empty address validation.
-- Added malformed-port validation.
-- Rejects port `0` and ports above `65535`.
-- Added `[IPv6]:port` parsing.
-- Preserves default port `2302` when a port is omitted.
-- Added password-length validation.
-- Prevents null password pointers from reaching formatting routines.
-- Uses `AF_UNSPEC` for server lookup.
-- Added IPv4 and IPv6 DNS resolution.
-- Tries all usable `getaddrinfo()` results instead of assuming a single result.
-- Added socket creation, `setsockopt()`, `sendto()` and `recvfrom()` failure handling.
-- Added UDP server-query timeouts.
-- Added response-buffer termination and minimum-size validation.
-- Added socket cleanup on failure paths.
-- Sanitizes control characters in server-query responses.
-- Fixed bookmark edits not being written back correctly to `bookmark.txt`.
-- Hardened generated `connect` command formatting.
-- Added quoting for addresses and explicit port formatting.
-- Added IPv6-aware connect formatting.
-- Escapes `\` and `"` in passwords before command generation.
-- Added generated-command length checks.
-
-## `src/chimera/bookmark/bookmark.hpp`
-
-- Added safe default initialization for query result state.
-- Initializes timeout/error/ping fields.
-- Made query-data lookup const/noexcept.
-- Added null-key handling.
-- Missing keys return a safe empty string rather than a null string pointer.
-
-## `src/chimera/chimera.cpp`
-
-- Replaced exception-prone filesystem directory creation with `std::error_code` variants.
-- Uses `create_directories()` for nested Chimera paths.
-- Hardened creation of the Chimera data directory, temporary directory, map directory and
-  downloaded-map directory.
-- Prevents common filesystem permission/path errors from unexpectedly escaping through
-  initialization code.
-
-## `src/chimera/event/connect.cpp`
-
-- Added null-password protection to the pre-connect hook.
-- Prevents invalid memory access when Halo supplies a null password pointer.
-
-## `src/chimera/event/tick.cpp`
-
-- Added `VirtualProtect()` result validation.
-- Initializes page-protection state.
-- Corrected the memory-protection size used when modifying the tick-rate value.
-- Avoids writing the target when page protection cannot safely be changed.
-
-## `src/chimera/halo_data/port.cpp`
-
-- Validates `halo.client_port` and `halo.server_port`.
-- Rejects negative values and values above `65535`.
-- Prevents silent narrowing/truncation to `uint16_t`.
-
-## `src/chimera/map_loading/compression.cpp`
-
-- Added compressed-file minimum-size and header-read validation.
-- Supports validation/fallback between normal and demo map headers.
-- Added `ZSTD_createDStream()` and `ZSTD_initDStream()` failure handling.
-- Added RAII cleanup for Zstd stream state.
-- Corrected streaming decompression state handling.
-- Preserves unconsumed input between `ZSTD_decompressStream()` calls.
-- Added truncated/incomplete stream detection.
-- Added output callback failure handling.
-- Ensures compressed map files close on both success and failure paths.
-
-## `src/chimera/map_loading/fast_load.cpp`
-
-- Replaced exception-prone filesystem checks with `std::error_code` where appropriate.
-- Hardened map existence and directory iteration.
-- Avoids common filesystem errors terminating Halo during map-list handling.
-
-## `src/chimera/map_loading/map_loading.cpp`
-
-- Added null map validation before CRC processing.
-- Added minimum map-size and header validation.
-- Added safer file-open/seek/read handling.
-- Added bounds validation for RAM-preloaded map reads.
-- Added tag-data, scenario-data, BSP-table, BSP-size and model-data bounds checks.
-- Added safer virtual-address-to-tag-data conversion.
-- Hardened resource-map reads and asset precaching.
-- Prevented `ui.map` preload buffer underflow.
-- Hardened downloaded-map rename/install handling with `std::error_code`.
-- Prevents continuing a join when a required downloaded map could not be installed.
-
-## `src/chimera/output/draw_text.cpp`
-
-- Replaced exception-prone font-directory checks with `std::error_code`.
-- Keeps filesystem errors inside the existing font-loading failure handling.
-
-## `src/chimera/signature/hook.cpp`
-
-- Added relocation of copied relative x86 instructions.
-- Supports relocation for:
-  - `CALL rel32` (`E8`)
-  - `JMP rel32` (`E9`)
-  - near conditional branches (`0F 80`–`0F 8F`)
-  - short `JMP` (`EB`)
-  - short conditional branches (`70`–`7F`)
-- Added source-to-trampoline offset mapping.
-- Preserves branch targets that point inside the copied instruction block.
-- Expands short branches when required by trampoline relocation.
-- Added relocated trampoline-size calculation.
-- Added `VirtualProtect()` failure handling and instruction-cache flushing.
-
-## `src/chimera/signature/hook.hpp`
-
-- Added null target/data checks to generic overwrite helpers.
-- Added zero-length checks.
-- Added `VirtualProtect()` failure handling.
-- Restores original page protection after writes.
-- Flushes the CPU instruction cache after executable-memory modifications.
-
-## `src/map_downloader/map_downloader.cpp`
-
-- Protected downloader shared state.
-- Hardened worker-thread configuration snapshots.
-- Added URL-escaping validation and cleanup.
-- Uses literal placeholder replacement where regex replacement was unsafe.
-- Preserves mirror placeholder behavior.
-- Hardened mirror retry state and file-handle cleanup.
-- Added file open/write/partial-write failure detection.
-- Added cURL initialization and critical option validation.
-- Added HTTP-error handling, redirects, connection timeout and total timeout.
-- Added worker-thread exception containment.
-- Added temporary-resource cleanup on failed downloads.
-- Added `joinable()` checks and thread-creation failure handling.
-- Hardened server/password updates and download failure state.
-
----
-
-# Safe bookmark server switching
-
-Files:
-- `src/chimera/bookmark/bookmark.cpp`
-
-The reproducible failure was rapid use of `chimera_bookmark_connect`, especially:
-
-1. connect to server A;
-2. immediately request server B;
-3. or repeatedly trigger the same bookmark.
-
-Older attempts that tried to manipulate Halo's low-level connection cleanup were rejected
-after runtime testing showed that forcing internal disconnect state could cause a segmentation
-fault.
-
-The validated V4 implementation instead serializes bookmark-driven connection requests:
-
-- Adds explicit bookmark connection states:
-  - `IDLE`
-  - `CONNECTING`
-  - `WAITING_TO_DISCONNECT`
-  - `DISCONNECTING`
-- Ignores repeated requests for the same bookmark while the connection is already negotiating.
-- Queues a different requested bookmark rather than entering Halo's connection routine twice.
-- The newest requested target wins while a switch is already in progress.
-- Uses Halo's normal script-level `disconnect` path instead of the low-level forced cleanup routine.
-- Waits for connected/disconnected state to settle before advancing.
-- Refuses to force a second connection if disconnect does not complete safely.
-- Does not automatically launch a queued connection after an unresolved connection timeout.
-- V4.1 reduces the failed-connect recovery timeout from 45 seconds to 15 seconds.
-
-Runtime result:
-- rapid A -> B switching works;
-- repeated bookmark use no longer reproduced the original connection-state crash in testing.
-
----
-
-# Core Safety
-
-Files:
-- `src/chimera/bookmark/bookmark.cpp`
-- `src/chimera/bookmark/bookmark.hpp`
-- `src/chimera/command/client/server/spam_to_join.cpp`
-- `src/chimera/config/ini.cpp`
-- `src/chimera/halo_data/map.cpp`
-- `src/chimera/halo_data/tag.cpp`
-- `src/map_downloader/map_downloader.cpp`
-- `src/map_downloader/map_downloader.hpp`
-
-## Bookmark/history query concurrency
-
-- Removed the invalid pattern where one thread locked a `std::mutex` and a detached worker
-  thread unlocked it.
-- Uses an atomic in-progress flag for query ownership.
-- Builds query results locally in the worker.
-- Publishes finished results under a mutex.
-- Swaps finished results into the frame thread under the same mutex.
-- Handles worker/thread-creation failures without leaving the query state permanently locked.
-
-## Query semantics / spam-to-join compatibility
-
-- Added an explicit key-presence helper for query packets.
-- Preserves the original `sappflags` presence test used by `chimera_spam_to_join`.
-- Keeps the hardened missing-key string contract without changing the intended feature behavior.
-
-## INI correctness
-
-- Fixed `Ini::set_value()` paths that updated an existing key and then still appended a
-  duplicate key.
-- Added null key/value validation.
-- Existing entries are now replaced rather than duplicated.
-
-## UTF conversion
-
-- Corrected UTF-8 -> wide -> ANSI buffer sizing.
-- Uses matching explicit source lengths in both Windows conversion calls.
-- Checks conversion return values.
-
-## Tag / map-data safety
-
-- Fixed tag-index off-by-one checks (`index == tag_count` is no longer accepted).
-- Added null checks around scenario/tag lookup paths.
-- Hardened `TagBlock` address/count/index handling.
-- Added defensive tag-data region/range checks before returning pointers.
-- Avoids dereferencing invalid map/tag structures where the safe result is to reject them.
-
-## Downloader callback/cancellation correctness
-
-- Uses the complete cURL write size (`size * nmemb`) with overflow checks.
-- Hardened shared state with RAII locking.
-- Improved write-buffer capacity validation.
-- The transfer callback can abort when a real cancel state is requested instead of always
-  returning success.
-- Keeps normal downloads and mirror behavior intact.
-
-Runtime result:
-- Stage A compiled successfully and passed bookmark/history, server switching and map
-  download/runtime testing.
-
----
-
-# Map / Memory Safety and Optimization
-
-Files:
-- `src/chimera/map_loading/compression.cpp`
-- `src/chimera/map_loading/fast_load.cpp`
-- `src/chimera/map_loading/map_loading.cpp`
-
-## Zstd / compressed map validation
-
-- Validates null/empty input/output parameters.
-- Uses non-throwing filesystem size lookup.
-- Tracks the decompressed size declared by the compressed map header.
-- Rejects output that exceeds the declared map size.
-- Requires final output size to match the declared decompressed size.
-- Preserves streaming and multi-frame Zstd handling.
-- Rejects truncated/incomplete streams.
-- Protects output-position arithmetic from overflow.
-- Ensures file cleanup on all exception paths.
-
-## Fast map-list safety
-
-- Case-insensitive string comparison is null-safe.
-- Stock-map CRC lookup is null-safe.
-- Custom Edition CRC callback validates map entry, CRC availability and map-list pointers.
-- Map entries require a regular file, not merely a filesystem object that exists.
-- Directory entry checks use `std::error_code`.
-
-## CRC memory optimization
-
-The map CRC processing order remains:
-
-1. BSP data
-2. model vertex data
-3. tag data
-
-The BSP/model portions are now read through a fixed 64 KiB working buffer instead of allocating
-an entire BSP and an entire model-vertex section at once.
-
-Benefits:
-- lower transient memory usage;
-- no change to the incremental CRC byte order;
-- large corrupted size fields are rejected before reading.
-
-Tag data remains available as a validated working region because scenario/BSP metadata requires
-random access while constructing the CRC ranges.
-
-## Map-name / read bounds
-
-- Map names are validated before normalization/copying.
-- Map names must be NUL-terminated inside Halo's 32-byte name field.
-- Lowercase map-name buffers are zero initialized.
-- File seek offsets are checked before narrowing to `long`.
-- Map RAM reads are bounded by `decompressed_size`.
-- `OVERLAPPED`, output pointer and path retrieval are validated in the map-read hook.
-- Preload cursor arithmetic is checked before advancing or writing.
-
-## Map memory-buffer correctness
-
-- `LoadedMap::buffer_size` remains the capacity of the map-memory region.
-- `loaded_size` tracks the amount actually occupied.
-- Prevents repeated preloading from treating already-reduced remaining capacity as a new endpoint.
-
-## Configuration correction
-
-- `memory.max_tmp_files` is treated as a count of files.
-- It no longer passes through the MiB conversion helper, which previously could turn a default
-  count of `3` into `3 * 1024 * 1024`.
-
-## Miscellaneous
-
-- Guards download percentage calculation when total size is still zero.
-- Uses safer filesystem size/error handling when loading maps.
-
-Runtime result:
-- Stage B compiled successfully and passed stock/custom map loading, server switching and
-  map/runtime testing.
-
----
-
-# Hook Engine Safety
-
-Files:
-- `src/chimera/signature/hook.cpp`
-- `src/chimera/signature/hook.hpp`
-
-The x86 decoder is intentionally limited to encodings Chimera knows how to copy safely.
-Stage C does not guess the size of unknown x86 instructions.
-
-## Fail-safe decoder
-
-- Replaced decoder `std::terminate()` paths with clean decode failure.
-- An unsupported instruction now prevents that individual hook from being installed instead of
-  terminating the Halo process.
-- Added decoder no-progress detection so an unhandled sub-form cannot repeatedly decode the same
-  address forever.
-- Clears decoder output before each decode attempt.
-
-## Hook input/state validation
-
-- Initializes `Hook::address` to `nullptr`.
-- Adds null checks for hook targets/functions/output pointers.
-- Rollback only writes original bytes when there is a valid saved address.
-
-## Trampoline allocation / construction
-
-- Uses `new(std::nothrow)` for trampoline allocation.
-- Handles temporary vector/allocation failures.
-- Cleans hook state on failed allocation or protection changes.
-- Builds/validates relocated original instructions before overwriting Halo's target bytes.
-- Prevents a relocation failure from leaving a partially installed target patch.
-
-## Memory protection
-
-- Keeps `VirtualProtect()` validation around generated executable code and Halo target bytes.
-- Retains instruction-cache flushing after generated or patched executable code.
-- Existing working relative-branch relocation support remains unchanged.
-
-Runtime result:
-- Stage C compiled successfully and Halo CE startup, maps, server joins, bookmarks and normal
-  hooked functionality passed runtime testing.
-
----
+# Chimera Hardened — Fixes actuales
+
+Branch: `chimera-hardened`  
+Actualizado: 2026-08-14
+
+## Conexión, bookmarks y servidores
+
+- Validación segura de direcciones de servidor, puertos, contraseñas y comandos `connect` generados.
+- Soporte de resolución DNS IPv4/IPv6 con `AF_UNSPEC` y recorrido de resultados utilizables.
+- Manejo de errores y timeouts en creación de sockets, `setsockopt()`, `sendto()` y `recvfrom()`.
+- Validación de tamaño y terminación de respuestas de consulta de servidor.
+- Limpieza segura de sockets y sanitización de caracteres de control en respuestas.
+- Persistencia correcta de ediciones de bookmarks en `bookmark.txt`.
+- Formateo IPv6-aware de conexiones y escape de `\\`/`\"` en contraseñas.
+- Máquina de estados para conexiones iniciadas por bookmark que serializa solicitudes y evita entrar dos veces en la rutina de conexión de Halo.
+- Solicitudes repetidas al mismo bookmark se ignoran mientras ya se está negociando esa conexión.
+- Una solicitud a otro bookmark se encola y la solicitud más reciente pasa a ser el destino pendiente.
+- El cambio de servidor usa la ruta normal de `disconnect` de Halo y espera estados conectados/desconectados válidos antes de avanzar.
+- Una desconexión no resuelta no fuerza una segunda conexión.
+- Recuperación de conexión fallida con timeout limitado a 15 segundos.
+- Protección contra contraseñas nulas en el hook de pre-conexión.
+- Consultas de bookmark/history publican resultados mediante estado atómico y mutex sin desbloqueos cruzados entre threads.
+- Resultados de consulta se construyen localmente y se intercambian de forma sincronizada con el frame thread.
+- Conservación de la semántica de presencia de `sappflags` usada por `chimera_spam_to_join`.
+
+## Descargador de mapas
+
+- Estado compartido del downloader protegido frente a acceso concurrente.
+- Snapshots seguros de configuración para el worker thread.
+- Validación y limpieza del URL escaping.
+- Sustitución literal de placeholders de mirrors.
+- Estado de retry, handles y recursos temporales limpiados en rutas de fallo.
+- Detección de fallos de apertura, escritura y escrituras parciales.
+- Validación de inicialización de cURL y opciones críticas.
+- Manejo de errores HTTP, redirects, timeout de conexión y timeout total.
+- Contención de excepciones dentro del worker thread.
+- Comprobación de `joinable()` y manejo de fallo al crear threads.
+- Callback de escritura usa `size * nmemb` con protección de overflow.
+- Cancelación real del transfer cuando el estado de cancelación lo solicita.
+- Cálculo de porcentaje protegido cuando el tamaño total todavía es cero.
+
+## Mapas, compresión y memoria
+
+- Validación de tamaño mínimo, headers, seeks, lecturas y rangos antes de procesar mapas.
+- Lecturas desde mapas precargados en RAM limitadas por `decompressed_size`.
+- Validación de tag data, scenario data, BSP table, BSP size y model data.
+- Conversión de direcciones virtuales a tag data con comprobaciones de región/rango.
+- Lecturas de resource maps y precache de assets endurecidas frente a punteros/rangos inválidos.
+- Prevención de underflow durante preload de `ui.map`.
+- Instalación/rename de mapas descargados con manejo no-exception mediante `std::error_code`.
+- Una unión no continúa si un mapa requerido no pudo instalarse correctamente.
+- Zstd valida input/output, tamaño declarado, overflow y finalización completa del stream.
+- Streaming Zstd conserva input no consumido entre llamadas y detecta streams truncados/incompletos.
+- Estado de Zstd y archivos comprimidos se liberan en todas las rutas de salida.
+- CRC conserva el orden BSP -> model vertex data -> tag data usando un buffer de trabajo fijo de 64 KiB para BSP/model data.
+- Tamaños corruptos se rechazan antes de reservar o leer regiones grandes.
+- Nombres de mapa deben terminar en NUL dentro del campo de 32 bytes antes de normalizar/copiar.
+- Offsets de seek se validan antes de reducirlos a `long`.
+- `LoadedMap::buffer_size` conserva la capacidad total y `loaded_size` registra el contenido ocupado.
+- `memory.max_tmp_files` se interpreta como cantidad de archivos, sin conversión accidental a MiB.
+- Entradas de mapas requieren archivos regulares y las operaciones de filesystem usan `std::error_code` donde corresponde.
+- Checks de índices de tags rechazan `index == tag_count` y accesos fuera de región.
+- `TagBlock` valida address, count e index antes de devolver datos.
+
+## Hooks y escritura de código x86
+
+- Relocación de instrucciones relativas copiadas a trampolines para `CALL rel32`, `JMP rel32`, saltos condicionales near, `JMP` short y saltos condicionales short.
+- Mapeo source-to-trampoline para preservar destinos internos dentro del bloque copiado.
+- Expansión de branches cortos cuando la relocalización lo requiere.
+- El decoder falla de forma segura ante instrucciones no soportadas en lugar de terminar el proceso.
+- Detección de decoder sin progreso y limpieza de salida antes de cada intento.
+- Validación de targets, funciones, punteros de salida, tamaños y estado de `Hook`.
+- Trampolines usan asignación `nothrow` y limpian estado ante fallos.
+- La relocalización se construye y valida antes de sobrescribir bytes del ejecutable.
+- `VirtualProtect()` se valida y la protección original se restaura después de escribir.
+- Se ejecuta `FlushInstructionCache()` después de modificar código ejecutable.
+- Helpers genéricos de overwrite rechazan targets/datos nulos y longitudes cero.
+
+## Configuración, filesystem e inicialización
+
+- Creación de directorios de Chimera, temporales y mapas mediante variantes con `std::error_code` y `create_directories()`.
+- Errores comunes de permisos/path no escapan inesperadamente desde la inicialización.
+- `Ini::set_value()` reemplaza valores existentes sin duplicar la misma clave.
+- Claves y valores nulos de INI se rechazan.
+- `halo.client_port` y `halo.server_port` se validan en el rango válido antes de convertir a `uint16_t`.
+- Un `halo.path` demasiado largo se ignora de forma segura sin finalizar Halo.
+- Funciones opcionales no soportadas, como hash personalizado o múltiples instancias, fallan de forma local sin cerrar el proceso completo.
+- Conversión UTF-8 -> wide -> ANSI usa tamaños coherentes y verifica resultados de las APIs de Windows.
+
+## Comandos y parsing de entrada
+
+- `execute_command()` rechaza comandos nulos/vacíos, inicializa `found_command` y contiene fallos de parsing/ejecución.
+- `Command::call()` valida function pointers, `argc/argv` y conversiones antes de invocar comandos.
+- Parsing numérico endurecido contra texto parcial, overflow, `NaN` e infinitos en controles, mouse, FPS/TPS, safe-zone, video mode y comandos de depuración.
+- Canales de chat se aceptan únicamente cuando el valor completo es un entero dentro del rango soportado.
+- Deadzones evitan divisiones por rangos inválidos.
+- Contadores/porcentajes de debug evitan división por cero.
+- `show_fps` y `throttle_fps` validan `QueryPerformanceFrequency()`/`QueryPerformanceCounter()` y estados de timer inválidos.
+- IDs, índices y parámetros de `apply_damage`, `teleport`, `player_info`, `spectate` y comandos relacionados se validan antes de acceder a objetos/jugadores.
+- Formateo de equipos en `player_list` usa `snprintf()` con tamaño de buffer.
+- Hotkeys eliminan la entrada duplicada de F5 y endurecen el manejo de teclas/acciones inválidas.
+
+## Consola, chat, salida y localización
+
+- Buffers de errores de signatures limitan correctamente el offset producido por `snprintf()`.
+- Helpers C de signatures rechazan contexto, nombres o punteros de salida nulos.
+- Consola y custom chat validan tamaños, índices, posición, colores y valores no finitos antes de usarlos.
+- Colores configurables de chat se limitan a rangos válidos.
+- Rutas de salida de texto aceptan strings nulos de forma segura y separan mensajes literales del formateo variádico.
+- `show_error_box()` normaliza header/text nulos.
+- Iteración/carga de fuentes maneja fallos sin finalizar todo el cliente.
+- Localización rechaza claves nulas y protege el índice de idioma antes de indexar la tabla.
+
+## Render, cámara, HUD y video
+
+- FOV, widescreen, Lua screen helpers y medición de texto evitan dividir por una altura de resolución igual a cero.
+- First-person model mantiene un estado explícito de frustum válido y valida `global_window_parameters`/parámetros de lens flare antes de copiar frustums.
+- Safe zones y escalado de HUD validan dimensiones y placement pointers antes de calcular offsets.
+- Video mode valida resolución, refresh rate y valores configurados antes de aplicarlos.
+- Fog/rasterizer valida device caps, globals, shaders, vertex buffers y opciones antes de acceder a ellos.
+- Índices de vertex shaders fuera de rango fallan de forma segura y los shaders liberados se ponen en `nullptr`.
+- Transparent geometry rechaza índices/buffers dinámicos inválidos sin dereferencias inseguras.
+- HUD fonts valida tags, tag data y paths antes de resolver fuentes.
+
+## Lua
+
+- Escrituras Lua validan address, size, overflow y rango permitido del sandbox antes de copiar memoria.
+- Lecturas numéricas preservan la semántica raw existente pero rechazan dirección cero.
+- `read_string` preserva el comportamiento de devolver `nil` para dirección cero.
+- Escrituras de strings validan longitud + terminador y overflow antes de copiar.
+- `read_bit`/`write_bit` restringen el bit a `0..31` y `write_bit` acepta únicamente booleano o `0/1`.
+- Registro de funciones I/O evita operar con un `lua_State` nulo.
+
+## Optimización general actual
+
+- Los dispatchers de `preframe`, `frame`, `pretick`, `tick`, `precamera`, `camera` y `D3D9 EndScene` reutilizan un snapshot interno de eventos en vez de crear/destruir una asignación de `std::vector` en cada dispatch estable.
+- Se conserva el orden exacto por prioridad y FIFO dentro de cada prioridad.
+- Se conserva la capacidad de agregar/eliminar eventos desde un callback porque cada dispatch sigue ejecutando un snapshot independiente de la lista fuente.
+- La reentrada del mismo dispatcher usa el camino de copia original para no sobrescribir el snapshot que ya está activo.
+- El fix del first-person model cachea la dirección de su signature durante el setup y evita repetir el lookup por nombre en cada pretick; el puntero dinámico de datos FP sigue leyéndose en cada tick.

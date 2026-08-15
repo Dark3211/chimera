@@ -7,6 +7,7 @@
 
 namespace Chimera {
     static std::vector<Event<EndSceneEventFunction>> end_scene_events;
+    static ReusableEventDispatcher<EndSceneEventFunction> end_scene_dispatcher;
 
     static void enable_d3d9_end_scene_hook();
 
@@ -35,7 +36,7 @@ namespace Chimera {
     }
 
     extern "C" void do_d3d9_end_scene_event(LPDIRECT3DDEVICE9 device) {
-        call_in_order(end_scene_events, device);
+        end_scene_dispatcher.dispatch(end_scene_events, device);
     }
 
     static void enable_d3d9_end_scene_hook() {
