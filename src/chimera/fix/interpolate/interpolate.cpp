@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 #include <cctype>
+#include <cstring>
 
 #include "../../chimera.hpp"
 #include "../../signature/hook.hpp"
@@ -8,6 +9,7 @@
 #include "../../halo_data/multiplayer.hpp"
 #include "../../halo_data/pause.hpp"
 #include "../../event/camera.hpp"
+#include "../../event/command.hpp"
 #include "../../event/frame.hpp"
 #include "../../event/tick.hpp"
 #include "../../event/revert.hpp"
@@ -34,6 +36,77 @@ namespace Chimera {
     // Set for if interpolation is enabled
     bool interpolation_enabled = false;
 
+    static bool interpolation_command_registered = false;
+
+    static bool interpolation_console_command(const char *command) noexcept {
+        if(!command) {
+            return true;
+        }
+
+        static constexpr char command_name[] = "chimera_interpolate";
+        static constexpr std::size_t command_name_length = sizeof(command_name) - 1;
+
+        if(std::strncmp(command, command_name, command_name_length) != 0) {
+            return true;
+        }
+
+        const char *argument = command + command_name_length;
+
+        // Do not intercept commands that merely start with our command name.
+        if(*argument != '\0' && !std::isspace(static_cast<unsigned char>(*argument))) {
+            return true;
+        }
+
+        while(std::isspace(static_cast<unsigned char>(*argument))) {
+            argument++;
+        }
+
+        if(*argument == '\0') {
+            console_output("chimera_interpolate: %s", BOOL_TO_STR(interpolation_enabled));
+            return false;
+        }
+
+        const char *argument_end = argument;
+        while(*argument_end != '\0' && !std::isspace(static_cast<unsigned char>(*argument_end))) {
+            argument_end++;
+        }
+
+        const std::size_t argument_length = static_cast<std::size_t>(argument_end - argument);
+        while(std::isspace(static_cast<unsigned char>(*argument_end))) {
+            argument_end++;
+        }
+
+        if(*argument_end != '\0') {
+            console_error("chimera_interpolate: expected true or false");
+            return false;
+        }
+
+        bool new_enabled;
+        if((argument_length == 4 && std::strncmp(argument, "true", 4) == 0) ||
+           (argument_length == 1 && argument[0] == '1')) {
+            new_enabled = true;
+        }
+        else if((argument_length == 5 && std::strncmp(argument, "false", 5) == 0) ||
+                (argument_length == 1 && argument[0] == '0')) {
+            new_enabled = false;
+        }
+        else {
+            console_error("chimera_interpolate: expected true or false");
+            return false;
+        }
+
+        if(new_enabled != interpolation_enabled) {
+            if(new_enabled) {
+                set_up_interpolation();
+            }
+            else {
+                disable_interpolation();
+            }
+        }
+
+        console_output("chimera_interpolate: %s", BOOL_TO_STR(interpolation_enabled));
+        return false;
+    }
 
     static void on_tick() noexcept {
         // Prevent interpolation when the game is paused
@@ -92,6 +165,11 @@ namespace Chimera {
         static auto *fp_interp_ptr = get_chimera().get_signature("fp_interp_sig").data();
         static Hook fp_interp_hook;
         first_person_camera_tick_rate = *reinterpret_cast<float **>(get_chimera().get_signature("fp_cam_tick_rate_sig").data() + 2);
+
+        if(!interpolation_command_registered) {
+            add_command_event(interpolation_console_command, EVENT_PRIORITY_BEFORE);
+            interpolation_command_registered = true;
+        }
 
         add_tick_event(on_tick);
         add_preframe_event(on_preframe);
