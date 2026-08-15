@@ -70,9 +70,10 @@ namespace Chimera {
      * Reusable snapshot dispatcher for hot event paths.
      *
      * The source event list is still snapshotted before callbacks run, preserving the
-     * existing add/remove-during-callback behavior. Versioned dispatch can retain that
-     * snapshot unchanged until the source list is actually modified, eliminating both
-     * allocations and element copies in steady-state frame/tick paths.
+     * existing add/remove-during-callback behavior. Versioned dispatch retains that
+     * snapshot until the source list changes. The cached snapshot is grouped by priority
+     * when rebuilt so steady-state dispatch executes a single linear pass rather than
+     * rescanning the event vector once for every priority.
      * Recursive dispatch falls back to the normal copy-based path so the active snapshot
      * cannot be overwritten.
      */
@@ -84,7 +85,7 @@ namespace Chimera {
                 return;
             }
 
-            this->p_snapshot.assign(events.begin(), events.end());
+            this->rebuild_snapshot(events);
             this->dispatch_snapshot(std::forward<Args>(args) ...);
         }
 
@@ -95,7 +96,7 @@ namespace Chimera {
             }
 
             if(!this->p_snapshot_version_valid || this->p_snapshot_version != version) {
-                this->p_snapshot.assign(events.begin(), events.end());
+                this->rebuild_snapshot(events);
                 this->p_snapshot_version = version;
                 this->p_snapshot_version_valid = true;
             }
@@ -104,6 +105,24 @@ namespace Chimera {
         }
 
     private:
+        void rebuild_snapshot(const std::vector<Event<T>> &events) {
+            this->p_snapshot.clear();
+            this->p_snapshot.reserve(events.size());
+
+            auto append_priority = [&](EventPriority priority) {
+                for(const auto &event : events) {
+                    if(event.priority == priority) {
+                        this->p_snapshot.push_back(event);
+                    }
+                }
+            };
+
+            append_priority(EVENT_PRIORITY_BEFORE);
+            append_priority(EVENT_PRIORITY_DEFAULT);
+            append_priority(EVENT_PRIORITY_AFTER);
+            append_priority(EVENT_PRIORITY_FINAL);
+        }
+
         template<typename ... Args> void dispatch_snapshot(Args&& ... args) {
             this->p_dispatching = true;
             struct DispatchGuard {
@@ -113,7 +132,11 @@ namespace Chimera {
                 }
             } guard { this->p_dispatching };
 
-            call_in_order_snapshot(this->p_snapshot, std::forward<Args>(args) ...);
+            for(const auto &event : this->p_snapshot) {
+                if(event.function) {
+                    event.function(std::forward<Args>(args) ...);
+                }
+            }
         }
 
         std::vector<Event<T>> p_snapshot;

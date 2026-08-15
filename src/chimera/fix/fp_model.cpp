@@ -27,6 +27,10 @@ namespace Chimera {
     static float v_fov;
     static bool frustum_adjusted_for_fp_lens_flares = false;
     static bool fp_frustum_valid = false;
+    static bool cached_fp_vertical_fov_valid = false;
+    static std::uint16_t cached_fp_frame_extent = 0;
+    static std::uint16_t cached_fp_resolution_height = 0;
+    static float cached_fp_vertical_fov = 0.0f;
 
     void can_update_fp() noexcept {
         // Don't do the thing if there is a 2nd tick this frame.
@@ -76,12 +80,22 @@ namespace Chimera {
         memcpy(&frustum, &global_window_parameters->frustum, sizeof(RenderFrustum));
 
         // Create new frustum scaled for fov.
-        auto resoution = get_resolution();
-        if(resoution.height == 0) {
+        const auto &resolution = get_resolution();
+        if(resolution.height == 0) {
             return;
         }
-        float fov_scale_factor = static_cast<float>(resoution.frame_bounds[2] - resoution.frame_bounds[0]) / static_cast<float>(resoution.height);
-        global_window_parameters->camera.vertical_field_of_view = 2.0f * std::atan((480.0f / 640.0f) * fov_scale_factor * std::tan(DEGREES_TO_RADIANS(70.0f) * 0.5));
+
+        const auto frame_extent = static_cast<std::uint16_t>(resolution.frame_bounds[2] - resolution.frame_bounds[0]);
+        if(!cached_fp_vertical_fov_valid || cached_fp_frame_extent != frame_extent || cached_fp_resolution_height != resolution.height) {
+            const float fov_scale_factor = static_cast<float>(frame_extent) / static_cast<float>(resolution.height);
+            static const double base_fov_tangent = std::tan(DEGREES_TO_RADIANS(70.0f) * 0.5);
+            cached_fp_vertical_fov = static_cast<float>(2.0 * std::atan((480.0f / 640.0f) * fov_scale_factor * base_fov_tangent));
+            cached_fp_frame_extent = frame_extent;
+            cached_fp_resolution_height = resolution.height;
+            cached_fp_vertical_fov_valid = true;
+        }
+
+        global_window_parameters->camera.vertical_field_of_view = cached_fp_vertical_fov;
         render_camera_build_frustum(&global_window_parameters->camera, &global_window_parameters->frustum.frustum_bounds, &frustum_fp, true);
         fp_frustum_valid = true;
         global_window_parameters->camera.vertical_field_of_view = v_fov;
