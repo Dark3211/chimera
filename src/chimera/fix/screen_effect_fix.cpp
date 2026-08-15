@@ -44,9 +44,10 @@ namespace Chimera {
 
     static void correct_blur_radius() noexcept {
         static std::uint16_t height = 0;
-        auto resolution = get_resolution();
+        const auto &resolution = get_resolution();
         if(resolution.height != height) {
             blur_fix_scale = static_cast<float>(resolution.height) / 480.0F;
+            height = resolution.height;
         }
     }
 
