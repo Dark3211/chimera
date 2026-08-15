@@ -33,6 +33,21 @@ namespace Chimera {
     static std::byte *bump_vertices = nullptr;
     static constexpr float high_quality_water_lod_bias = 0.25f;
 
+    static bool water_af_supported() noexcept {
+        return (d3d9_device_caps->RasterCaps & D3DPRASTERCAPS_ANISOTROPY) != 0 && d3d9_device_caps->MaxAnisotropy > 1;
+    }
+
+    static void apply_high_quality_water_filtering() noexcept {
+        const auto max_anisotropy = d3d9_device_caps->MaxAnisotropy < global_max_anisotropy
+            ? d3d9_device_caps->MaxAnisotropy
+            : global_max_anisotropy;
+
+        IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 0, D3DSAMP_MAXANISOTROPY, max_anisotropy);
+        IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 0, D3DSAMP_MAGFILTER, D3DTEXF_ANISOTROPIC);
+        IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 0, D3DSAMP_MINFILTER, D3DTEXF_ANISOTROPIC);
+        IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 0, D3DSAMP_MIPFILTER, D3DTEXF_LINEAR);
+    }
+
     extern "C" void set_water_shader_const(std::byte *shader, std::uint32_t start_register) noexcept {
         // Apply mip map lod bias to ripple maps. Bullshit the value specified in the tag to look like 480p ripples.
         // This is not how it's implemented on xbox but 4K gamers don't seem to like that.
@@ -50,10 +65,13 @@ namespace Chimera {
             }
             float adjusted_lod_bias = cached_resolution_lod_bias - (*reinterpret_cast<float *>(shader + 0xE0));
 
-            // AF is already the user's high-quality texture toggle. Keep water ripples
-            // slightly sharper with it enabled without changing the tag's base bias.
+            // AF is the user's high-quality texture toggle. Keep water ripples sharper
+            // and better filtered at oblique viewing angles without changing tag data.
             if(af_is_enabled && *af_is_enabled) {
                 adjusted_lod_bias -= high_quality_water_lod_bias;
+                if(water_af_supported()) {
+                    apply_high_quality_water_filtering();
+                }
             }
 
             // Bump map is on sampler 0.
