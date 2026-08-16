@@ -217,7 +217,6 @@ namespace Chimera {
         // Visuals
         ADD_COMMAND("chimera_af", "chimera_category_visual", "client", af_command, true, 0, 1);
         ADD_COMMAND("chimera_material_quality", "chimera_category_visual", "client", material_quality_command, true, 0, 1);
-        ADD_COMMAND("chimera_emissive_quality", "chimera_category_visual", "client", emissive_quality_command, true, 0, 1);
         ADD_COMMAND("chimera_block_auto_center", "chimera_category_visual", "client", block_auto_center_command, true, 0, 1);
         ADD_COMMAND("chimera_block_camera_shake", "chimera_category_visual", "client_camera_shake", block_camera_shake_command, true, 0, 1);
         ADD_COMMAND("chimera_block_gametype_indicator", "chimera_category_visual", "client_gametype_indicator", block_gametype_indicator_command, true, 0, 1);
