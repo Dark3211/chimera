@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+#include <cstring>
+
 #include "../../command.hpp"
 #include "../../../signature/hook.hpp"
 #include "../../../signature/signature.hpp"
@@ -13,6 +15,19 @@ namespace Chimera {
     bool af_command(int argc, const char **argv) {
         static bool active = false;
         if(argc == 1) {
+            // Temporary A/B diagnostic: keep AF + detail sampling unchanged while
+            // enabling/disabling only the environment bump-map sampling override.
+            if(std::strcmp(argv[0], "bump_off") == 0) {
+                set_environment_bump_sampling_enabled(false);
+                console_output("bump %s", BOOL_TO_STR(get_environment_bump_sampling_enabled()));
+                return true;
+            }
+            if(std::strcmp(argv[0], "bump_on") == 0) {
+                set_environment_bump_sampling_enabled(true);
+                console_output("bump %s", BOOL_TO_STR(get_environment_bump_sampling_enabled()));
+                return true;
+            }
+
             bool new_value = STR_TO_BOOL(argv[0]);
             if(new_value != active) {
                 if(get_chimera().feature_present("client_af")) {
