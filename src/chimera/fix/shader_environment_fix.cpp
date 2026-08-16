@@ -68,6 +68,11 @@ namespace Chimera {
             {2.10F, 1.62F, 1.80F, 1.48F, 1.64F, 1.55F, 1.40F}
         }};
 
+        // Temporary A/B diagnostic for shader_model self-illumination. These values
+        // are intentionally aggressive so a working render path is visually obvious.
+        constexpr float MODEL_EMISSIVE_DIAGNOSTIC_SCALE = 4.00F;
+        constexpr float MODEL_EMISSIVE_DIAGNOSTIC_BRIGHT_SCALE = 3.00F;
+
         constexpr std::size_t MAX_MATERIAL_QUALITY_SNAPSHOTS = 4096;
         constexpr std::size_t MAX_MODEL_MATERIAL_QUALITY_SNAPSHOTS = 4096;
         constexpr std::size_t MAX_EMISSIVE_QUALITY_SNAPSHOTS = 4096;
@@ -110,6 +115,7 @@ namespace Chimera {
         std::size_t material_quality_models_scanned = 0;
         std::size_t material_quality_models_modified = 0;
         std::uint8_t material_quality_level = 0;
+        bool model_emissive_diagnostic_enabled = false;
 
         void clear_material_quality_diagnostics() noexcept {
             material_quality_environment_scanned = 0;
@@ -162,6 +168,21 @@ namespace Chimera {
             // Bright authored emissive colors use the second, softer scale for the
             // selected material-quality level. Applying one common RGB gain preserves hue.
             const float scale = maximum >= 1.0F ? profile.emissive_bright_scale : profile.emissive_scale;
+            color.red = scale_material_value(color.red, scale);
+            color.green = scale_material_value(color.green, scale);
+            color.blue = scale_material_value(color.blue, scale);
+            return color;
+        }
+
+        ColorRGB scale_model_emissive_diagnostic(ColorRGB color) noexcept {
+            float maximum = 0.0F;
+            if(std::isfinite(color.red) && color.red > maximum) maximum = color.red;
+            if(std::isfinite(color.green) && color.green > maximum) maximum = color.green;
+            if(std::isfinite(color.blue) && color.blue > maximum) maximum = color.blue;
+
+            const float scale = maximum >= 1.0F
+                ? MODEL_EMISSIVE_DIAGNOSTIC_BRIGHT_SCALE
+                : MODEL_EMISSIVE_DIAGNOSTIC_SCALE;
             color.red = scale_material_value(color.red, scale);
             color.green = scale_material_value(color.green, scale);
             color.blue = scale_material_value(color.blue, scale);
@@ -366,11 +387,15 @@ namespace Chimera {
 
                 const auto old_emissive_lower = shader->model.self_illumination_animation_color_lower_bound;
                 const auto old_emissive_upper = shader->model.self_illumination_animation_color_upper_bound;
-                const auto new_emissive_lower = scale_emissive_color(old_emissive_lower, profile);
-                const auto new_emissive_upper = scale_emissive_color(old_emissive_upper, profile);
-                const bool emissive_changed =
-                    emissive_color_changed(old_emissive_lower, new_emissive_lower) ||
-                    emissive_color_changed(old_emissive_upper, new_emissive_upper);
+                const auto new_emissive_lower = model_emissive_diagnostic_enabled
+                    ? scale_model_emissive_diagnostic(old_emissive_lower)
+                    : old_emissive_lower;
+                const auto new_emissive_upper = model_emissive_diagnostic_enabled
+                    ? scale_model_emissive_diagnostic(old_emissive_upper)
+                    : old_emissive_upper;
+                const bool emissive_changed = model_emissive_diagnostic_enabled &&
+                    (emissive_color_changed(old_emissive_lower, new_emissive_lower) ||
+                     emissive_color_changed(old_emissive_upper, new_emissive_upper));
 
                 if(!reflection_changed && !emissive_changed) {
                     continue;
@@ -414,6 +439,29 @@ namespace Chimera {
             }
 
             const auto *value = argv[0];
+
+            // Temporary shader_model emissive A/B diagnostic. This does not change
+            // material_quality_level; it restores the original tags and reapplies the
+            // same level with only model emissive toggled between original and a very
+            // strong diagnostic multiplier.
+            if(std::strcmp(value, "sm_off") == 0 || std::strcmp(value, "sm_on") == 0) {
+                const bool new_state = std::strcmp(value, "sm_on") == 0;
+                if(new_state != model_emissive_diagnostic_enabled) {
+                    if(material_quality_level != 0 || material_quality_snapshot_count != 0 ||
+                       model_material_quality_snapshot_count != 0 || emissive_quality_snapshot_count != 0) {
+                        restore_material_quality();
+                    }
+
+                    model_emissive_diagnostic_enabled = new_state;
+                    if(material_quality_level != 0) {
+                        apply_material_quality();
+                    }
+                }
+
+                console_output("sm %s", model_emissive_diagnostic_enabled ? "true" : "false");
+                return true;
+            }
+
             std::uint8_t new_level = 0;
 
             if(std::strcmp(value, "false") == 0 || std::strcmp(value, "0") == 0) {
@@ -429,7 +477,7 @@ namespace Chimera {
                 new_level = 3;
             }
             else {
-                console_error("chimera_material_quality: expected false, true, 0, 1, 2, or 3");
+                console_error("chimera_material_quality: expected false, true, 0, 1, 2, 3, sm_off, or sm_on");
                 return false;
             }
 
