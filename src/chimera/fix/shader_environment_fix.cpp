@@ -57,14 +57,13 @@ namespace Chimera {
             float model_reflection_parallel_scale;
         };
 
-        // 0/false is the disabled state and has no quality profile. Level 1 is the
-        // previously validated true/on profile. Levels 2 and 3 build progressively
-        // from the original tag values rather than from the previous level, preventing
-        // repeated command changes from accumulating brightness.
+        // Level 1 is the previously validated true/on profile. Levels 2 and 3 build
+        // progressively from the original tag values rather than from the previous
+        // level, preventing repeated command changes from accumulating brightness.
         constexpr std::array<MaterialQualityProfile, 3> MATERIAL_QUALITY_PROFILES {{
             {1.50F, 1.25F, 1.35F, 1.20F, 1.30F},
-            {1.65F, 1.32F, 1.45F, 1.26F, 1.38F},
-            {1.80F, 1.40F, 1.55F, 1.32F, 1.46F}
+            {1.80F, 1.40F, 1.55F, 1.32F, 1.46F},
+            {2.10F, 1.62F, 1.80F, 1.48F, 1.64F}
         }};
 
         constexpr std::size_t MAX_MATERIAL_QUALITY_SNAPSHOTS = 4096;
