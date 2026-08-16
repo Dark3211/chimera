@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 #include <cstddef>
-#include <cstdint>
 
 #include "effect_shader_fix.hpp"
 #include "../chimera.hpp"
@@ -14,7 +13,6 @@
 #include "../halo_data/shader_effects.hpp"
 #include "../halo_data/game_engine.hpp"
 #include "../math_trig/math_trig.hpp"
-#include "../output/output.hpp"
 #include "../rasterizer/rasterizer.hpp"
 #include "../rasterizer/rasterizer_vertex_shaders.hpp"
 
@@ -22,8 +20,6 @@
 namespace Chimera {
 
     static constexpr std::size_t RASTERIZER_TRANSPARENT_GEOMETRY_TEXCOORD_STREAM_BYTES = 0x10000;
-    static constexpr std::int64_t RASTERIZER_TRANSPARENT_GEOMETRY_TEXCOORD_STREAM_VERTEX_CAPACITY =
-        RASTERIZER_TRANSPARENT_GEOMETRY_TEXCOORD_STREAM_BYTES / (sizeof(float) * 2);
 
     extern "C" {
         void effect_shader_reindex_pixel_shader_asm() noexcept;
@@ -91,45 +87,7 @@ namespace Chimera {
         }
     }
 
-    static bool zsprite_aux_stream_range_is_safe(TransparentGeometryGroup *group) noexcept {
-        if(!group || group->dynamic_vertex_buffer_index < 0) {
-            return true;
-        }
-
-        if(!dynamic_vertices || group->dynamic_vertex_buffer_index >= dynamic_vertices->buffer_count) {
-            return false;
-        }
-
-        const DynamicVertexBuffer &buffer = dynamic_vertices->buffers[group->dynamic_vertex_buffer_index];
-        const std::int64_t vertex_start = buffer.vertex_start_index;
-        const std::int64_t vertex_count = buffer.vertex_count;
-        const std::int64_t vertex_end = vertex_start + vertex_count;
-
-        if(vertex_start < 0 || vertex_count < 0 || vertex_end < vertex_start ||
-           vertex_end > RASTERIZER_TRANSPARENT_GEOMETRY_TEXCOORD_STREAM_VERTEX_CAPACITY) {
-            static bool overflow_reported = false;
-            if(!overflow_reported) {
-                console_error(
-                    "Z-sprite auxiliary stream range exceeded: start=%lld count=%lld end=%lld capacity=%lld type=%d",
-                    static_cast<long long>(vertex_start),
-                    static_cast<long long>(vertex_count),
-                    static_cast<long long>(vertex_end),
-                    static_cast<long long>(RASTERIZER_TRANSPARENT_GEOMETRY_TEXCOORD_STREAM_VERTEX_CAPACITY),
-                    static_cast<int>(buffer.type)
-                );
-                overflow_reported = true;
-            }
-            return false;
-        }
-
-        return true;
-    }
-
     extern "C" void set_up_zsprites(TransparentGeometryGroup *group) noexcept {
-        if(rasterizer_debug_options && !rasterizer_debug_options->zsprite_enabled) {
-            return;
-        }
-
         if(d3d9_device_caps->PixelShaderVersion < 0xffff0200) {
             return;
         }
@@ -137,16 +95,6 @@ namespace Chimera {
         ShaderEffect *shader = reinterpret_cast<ShaderEffect *>(group->shader);
 
         if(shader->effect.secondary_map_anchor == SHADER_EFFECT_PARTICLE_ANCHOR_ZSPRITE && !shader->effect.secondary_map.tag_id.is_null() && !TEST_FLAG(group->geometry_flags, RASTERIZER_GEOMETRY_FLAGS_FIRST_PERSON_BIT)) {
-            // The z-sprite declaration consumes an 8-byte secondary stream. Halo's
-            // stock auxiliary buffer contains 8192 entries. At high frame rates the
-            // dynamic transparent-geometry allocator can expose ranges outside that
-            // stream; allowing the draw to continue makes D3D read past the buffer
-            // and can explode a quad into screen-sized triangles. Fall back to the
-            // normal effect path for only those unsafe ranges while we diagnose it.
-            if(!zsprite_aux_stream_range_is_safe(group)) {
-                return;
-            }
-
             float zsprite_radius_scale = (shader->effect.zsprite_radius_scale != 0.0f) ? shader->effect.zsprite_radius_scale : 1.0f;
             float zn = global_window_parameters->camera.z_near;
             float zf = global_window_parameters->camera.z_far;
