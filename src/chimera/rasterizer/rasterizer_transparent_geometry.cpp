@@ -79,8 +79,10 @@ namespace Chimera {
 
             std::uint64_t device_hook_failures = 0;
             std::uint64_t device_vtable_overflow = 0;
+            std::uint64_t device_hook_restores = 0;
             std::uint64_t index_hook_failures = 0;
             std::uint64_t index_vtable_overflow = 0;
+            std::uint64_t index_hook_restores = 0;
             std::uint64_t target_overflow = 0;
             std::uint64_t target_desc_failures = 0;
             std::uint64_t get_indices_failures = 0;
@@ -222,17 +224,31 @@ namespace Chimera {
             }
 
             auto *device = *global_d3d9_device;
-            if(find_device_vtable_hook(device)) {
-                return true;
-            }
-            if(device_vtable_hook_count >= MAX_DEVICE_VTABLE_HOOKS) {
-                stats.device_vtable_overflow++;
-                return false;
-            }
-
             auto **vtable = *reinterpret_cast<void ***>(device);
             if(!vtable) {
                 stats.device_hook_failures++;
+                return false;
+            }
+
+            void *replacement = reinterpret_cast<void *>(draw_indexed_primitive_diagnostic);
+            if(auto *existing = find_device_vtable_hook(device)) {
+                if(vtable[DEVICE_DRAW_INDEXED_PRIMITIVE_VTABLE_INDEX] == replacement) {
+                    return true;
+                }
+                if(vtable[DEVICE_DRAW_INDEXED_PRIMITIVE_VTABLE_INDEX]
+                    == reinterpret_cast<void *>(existing->original)) {
+                    overwrite(&vtable[DEVICE_DRAW_INDEXED_PRIMITIVE_VTABLE_INDEX], replacement);
+                    if(vtable[DEVICE_DRAW_INDEXED_PRIMITIVE_VTABLE_INDEX] == replacement) {
+                        stats.device_hook_restores++;
+                        return true;
+                    }
+                }
+                stats.device_hook_failures++;
+                return false;
+            }
+
+            if(device_vtable_hook_count >= MAX_DEVICE_VTABLE_HOOKS) {
+                stats.device_vtable_overflow++;
                 return false;
             }
 
@@ -244,7 +260,6 @@ namespace Chimera {
                 return false;
             }
 
-            void *replacement = reinterpret_cast<void *>(draw_indexed_primitive_diagnostic);
             overwrite(&vtable[DEVICE_DRAW_INDEXED_PRIMITIVE_VTABLE_INDEX], replacement);
             if(vtable[DEVICE_DRAW_INDEXED_PRIMITIVE_VTABLE_INDEX] != replacement) {
                 stats.device_hook_failures++;
@@ -261,17 +276,42 @@ namespace Chimera {
             if(!buffer) {
                 return false;
             }
-            if(find_index_vtable_hook(buffer)) {
-                return true;
-            }
-            if(index_vtable_hook_count >= MAX_INDEX_VTABLE_HOOKS) {
-                stats.index_vtable_overflow++;
-                return false;
-            }
 
             auto **vtable = *reinterpret_cast<void ***>(buffer);
             if(!vtable) {
                 stats.index_hook_failures++;
+                return false;
+            }
+
+            void *lock_replacement = reinterpret_cast<void *>(index_buffer_lock_diagnostic);
+            void *unlock_replacement = reinterpret_cast<void *>(index_buffer_unlock_diagnostic);
+
+            if(auto *existing = find_index_vtable_hook(buffer)) {
+                bool ok = true;
+                if(vtable[INDEX_BUFFER_LOCK_VTABLE_INDEX] != lock_replacement) {
+                    if(vtable[INDEX_BUFFER_LOCK_VTABLE_INDEX]
+                        == reinterpret_cast<void *>(existing->original_lock)) {
+                        overwrite(&vtable[INDEX_BUFFER_LOCK_VTABLE_INDEX], lock_replacement);
+                    }
+                    ok = ok && vtable[INDEX_BUFFER_LOCK_VTABLE_INDEX] == lock_replacement;
+                }
+                if(vtable[INDEX_BUFFER_UNLOCK_VTABLE_INDEX] != unlock_replacement) {
+                    if(vtable[INDEX_BUFFER_UNLOCK_VTABLE_INDEX]
+                        == reinterpret_cast<void *>(existing->original_unlock)) {
+                        overwrite(&vtable[INDEX_BUFFER_UNLOCK_VTABLE_INDEX], unlock_replacement);
+                    }
+                    ok = ok && vtable[INDEX_BUFFER_UNLOCK_VTABLE_INDEX] == unlock_replacement;
+                }
+                if(ok) {
+                    stats.index_hook_restores++;
+                    return true;
+                }
+                stats.index_hook_failures++;
+                return false;
+            }
+
+            if(index_vtable_hook_count >= MAX_INDEX_VTABLE_HOOKS) {
+                stats.index_vtable_overflow++;
                 return false;
             }
 
@@ -282,8 +322,6 @@ namespace Chimera {
                 return false;
             }
 
-            void *lock_replacement = reinterpret_cast<void *>(index_buffer_lock_diagnostic);
-            void *unlock_replacement = reinterpret_cast<void *>(index_buffer_unlock_diagnostic);
             overwrite(&vtable[INDEX_BUFFER_LOCK_VTABLE_INDEX], lock_replacement);
             if(vtable[INDEX_BUFFER_LOCK_VTABLE_INDEX] != lock_replacement) {
                 stats.index_hook_failures++;
@@ -307,6 +345,7 @@ namespace Chimera {
 
         static TargetIndexBuffer *register_target_index_buffer(IDirect3DIndexBuffer9 *buffer) noexcept {
             if(auto *existing = find_target_index_buffer(buffer)) {
+                ensure_index_buffer_hooks(buffer);
                 return existing;
             }
             if(target_index_buffer_count >= MAX_TARGET_INDEX_BUFFERS) {
@@ -532,14 +571,25 @@ namespace Chimera {
             return result;
         }
 
-        static void reset_stats() noexcept {
+        static void reset_counters_preserving_targets() noexcept {
             stats = {};
             suspect_context = {};
             last_suspect_index_buffer = nullptr;
-            target_index_buffer_count = 0;
-            for(auto &target : target_index_buffers) {
-                target = {};
+
+            for(std::size_t i = 0; i < target_index_buffer_count; i++) {
+                auto &target = target_index_buffers[i];
+                target.draws = 0;
+                target.locks = 0;
+                target.unlocks = 0;
+                target.max_outstanding_locks = target.outstanding_locks;
+                target.previous_lock_valid = false;
+                target.previous_lock_offset = 0;
+                target.previous_lock_size = 0;
+                target.previous_lock_end = 0;
+                target.previous_lock_frame = -1;
+                ensure_index_buffer_hooks(target.buffer);
             }
+            ensure_device_draw_hook();
         }
 
         static void print_stats() noexcept {
@@ -557,11 +607,13 @@ namespace Chimera {
                 static_cast<unsigned long long>(stats.no_bound_index_buffer),
                 static_cast<unsigned long long>(stats.bound_index_buffer_changes));
 
-            console_output("hooks: device_fail=%llu device_overflow=%llu index_fail=%llu index_overflow=%llu target_overflow=%llu desc_fail=%llu",
+            console_output("hooks: device_fail=%llu device_overflow=%llu device_restore=%llu index_fail=%llu index_overflow=%llu index_restore=%llu target_overflow=%llu desc_fail=%llu",
                 static_cast<unsigned long long>(stats.device_hook_failures),
                 static_cast<unsigned long long>(stats.device_vtable_overflow),
+                static_cast<unsigned long long>(stats.device_hook_restores),
                 static_cast<unsigned long long>(stats.index_hook_failures),
                 static_cast<unsigned long long>(stats.index_vtable_overflow),
+                static_cast<unsigned long long>(stats.index_hook_restores),
                 static_cast<unsigned long long>(stats.target_overflow),
                 static_cast<unsigned long long>(stats.target_desc_failures));
 
@@ -573,7 +625,7 @@ namespace Chimera {
                 static_cast<unsigned long long>(stats.draw_with_outstanding_lock),
                 static_cast<unsigned long long>(stats.unlock_without_lock));
 
-            console_output("flags: discard=%llu nooverwrite=%llu both=%llu neither=%llu",
+            console_output("flags(original): discard=%llu nooverwrite=%llu both=%llu neither=%llu",
                 static_cast<unsigned long long>(stats.discard_locks),
                 static_cast<unsigned long long>(stats.nooverwrite_locks),
                 static_cast<unsigned long long>(stats.both_locks),
@@ -649,29 +701,33 @@ namespace Chimera {
             }
 
             if(std::strcmp(argument, "reset") == 0) {
-                reset_stats();
-                console_output("chimera_debug_chicago_wrap: counters reset; mode=%s", mode_name());
+                reset_counters_preserving_targets();
+                console_output("chimera_debug_chicago_wrap: counters reset; mode=%s targets=%u",
+                    mode_name(), static_cast<unsigned int>(target_index_buffer_count));
                 return false;
             }
 
             if(std::strcmp(argument, "observe") == 0) {
                 diagnostic_mode = WrapDiagnosticMode::OBSERVE;
-                reset_stats();
-                console_output("chimera_debug_chicago_wrap: observe");
+                reset_counters_preserving_targets();
+                console_output("chimera_debug_chicago_wrap: observe targets=%u",
+                    static_cast<unsigned int>(target_index_buffer_count));
                 return false;
             }
 
             if(std::strcmp(argument, "discard_zero") == 0) {
                 diagnostic_mode = WrapDiagnosticMode::DISCARD_ZERO;
-                reset_stats();
-                console_output("chimera_debug_chicago_wrap: discard_zero");
+                reset_counters_preserving_targets();
+                console_output("chimera_debug_chicago_wrap: discard_zero targets=%u",
+                    static_cast<unsigned int>(target_index_buffer_count));
                 return false;
             }
 
             if(std::strcmp(argument, "discard_backward") == 0) {
                 diagnostic_mode = WrapDiagnosticMode::DISCARD_BACKWARD;
-                reset_stats();
-                console_output("chimera_debug_chicago_wrap: discard_backward");
+                reset_counters_preserving_targets();
+                console_output("chimera_debug_chicago_wrap: discard_backward targets=%u",
+                    static_cast<unsigned int>(target_index_buffer_count));
                 return false;
             }
 
