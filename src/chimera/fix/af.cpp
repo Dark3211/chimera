@@ -35,6 +35,7 @@ namespace Chimera {
     static bool environment_detail_sampler_states_saved = false;
     static EnvironmentSamplerState environment_bump_sampler_state {};
     static bool environment_bump_sampler_state_saved = false;
+    static bool environment_bump_sampling_enabled = true;
 
     static bool af_supported() noexcept {
         return d3d9_device_caps &&
@@ -104,6 +105,23 @@ namespace Chimera {
     static void restore_environment_sampling_states() noexcept {
         restore_environment_detail_sampler_states();
         restore_environment_bump_sampler_state();
+    }
+
+    void set_environment_bump_sampling_enabled(bool enabled) noexcept {
+        if(environment_bump_sampling_enabled == enabled) {
+            return;
+        }
+
+        // If the diagnostic is switched off while a lightmap draw still has the
+        // temporary bump sampler state active, restore it immediately.
+        if(!enabled) {
+            restore_environment_bump_sampler_state();
+        }
+        environment_bump_sampling_enabled = enabled;
+    }
+
+    bool get_environment_bump_sampling_enabled() noexcept {
+        return environment_bump_sampling_enabled;
     }
 
     extern "C" void restore_environment_detail_af() noexcept {
@@ -191,7 +209,8 @@ namespace Chimera {
         // detail states first, then isolate the bump-map override to sampler 0.
         restore_environment_sampling_states();
 
-        if(!af_is_enabled || !*af_is_enabled || !af_supported() ||
+        if(!environment_bump_sampling_enabled ||
+           !af_is_enabled || !*af_is_enabled || !af_supported() ||
            !global_d3d9_device || !*global_d3d9_device) {
             return;
         }
