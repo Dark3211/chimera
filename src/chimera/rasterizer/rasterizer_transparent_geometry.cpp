@@ -22,7 +22,11 @@ namespace Chimera {
         enum class EnvironmentTransparentDiagnosticMode {
             NORMAL,
             ENGINE_OFF,
-            GROUP_DRAWS_OFF
+            SKIP_ENVIRONMENT_UNCOMPRESSED,
+            SKIP_ENVIRONMENT_UNCOMPRESSED_DYNAMIC,
+            SKIP_ENVIRONMENT_UNCOMPRESSED_DYNAMIC_CHICAGO,
+            SKIP_ENVIRONMENT_UNCOMPRESSED_DYNAMIC_CHICAGO_EXTENDED,
+            SKIP_ENVIRONMENT_UNCOMPRESSED_DYNAMIC_GLASS
         };
 
         struct TransparentGroupStats {
@@ -46,6 +50,14 @@ namespace Chimera {
             std::uint64_t sky = 0;
             std::uint64_t viewspace = 0;
             std::uint64_t first_person = 0;
+
+            std::uint64_t environment_uncompressed_total = 0;
+            std::uint64_t environment_uncompressed_dynamic_triangles = 0;
+            std::uint64_t environment_uncompressed_static_triangles = 0;
+            std::uint64_t environment_uncompressed_no_triangles = 0;
+            std::uint64_t environment_uncompressed_shader_types[NUMBER_OF_SHADER_TYPES] = {};
+            std::uint64_t environment_uncompressed_shader_other = 0;
+            std::uint64_t skipped = 0;
         };
 
         static EnvironmentTransparentDiagnosticMode diagnostic_mode = EnvironmentTransparentDiagnosticMode::NORMAL;
@@ -59,8 +71,16 @@ namespace Chimera {
             switch(diagnostic_mode) {
                 case EnvironmentTransparentDiagnosticMode::ENGINE_OFF:
                     return "engine_off";
-                case EnvironmentTransparentDiagnosticMode::GROUP_DRAWS_OFF:
-                    return "group_draws";
+                case EnvironmentTransparentDiagnosticMode::SKIP_ENVIRONMENT_UNCOMPRESSED:
+                    return "env_uncompressed";
+                case EnvironmentTransparentDiagnosticMode::SKIP_ENVIRONMENT_UNCOMPRESSED_DYNAMIC:
+                    return "env_uncompressed_dynamic";
+                case EnvironmentTransparentDiagnosticMode::SKIP_ENVIRONMENT_UNCOMPRESSED_DYNAMIC_CHICAGO:
+                    return "env_uncompressed_chicago";
+                case EnvironmentTransparentDiagnosticMode::SKIP_ENVIRONMENT_UNCOMPRESSED_DYNAMIC_CHICAGO_EXTENDED:
+                    return "env_uncompressed_chicago_extended";
+                case EnvironmentTransparentDiagnosticMode::SKIP_ENVIRONMENT_UNCOMPRESSED_DYNAMIC_GLASS:
+                    return "env_uncompressed_glass";
                 default:
                     return "normal";
             }
@@ -110,6 +130,21 @@ namespace Chimera {
             }
         }
 
+        static short group_shader_type(TransparentGeometryGroup *group) noexcept {
+            if(!group || !group->shader) {
+                return -1;
+            }
+            return reinterpret_cast<_shader *>(group->shader)->type;
+        }
+
+        static bool group_is_environment_uncompressed(TransparentGeometryGroup *group) noexcept {
+            return rasterizer_transparent_geometry_get_primary_vertex_type(group) == RASTERIZER_VERTEX_TYPE_ENVIRONMENT_UNCOMPRESSED;
+        }
+
+        static bool group_uses_dynamic_triangles(TransparentGeometryGroup *group) noexcept {
+            return group && group->dynamic_triangle_buffer_index != -1;
+        }
+
         static void reset_stats() noexcept {
             stats = {};
         }
@@ -124,10 +159,7 @@ namespace Chimera {
                 return;
             }
 
-            short shader_type = -1;
-            if(group->shader) {
-                shader_type = reinterpret_cast<_shader *>(group->shader)->type;
-            }
+            const short shader_type = group_shader_type(group);
             if(shader_type >= 0 && shader_type < NUMBER_OF_SHADER_TYPES) {
                 stats.shader_types[shader_type]++;
             }
@@ -135,7 +167,7 @@ namespace Chimera {
                 stats.shader_other++;
             }
 
-            short vertex_type = rasterizer_transparent_geometry_get_primary_vertex_type(group);
+            const short vertex_type = rasterizer_transparent_geometry_get_primary_vertex_type(group);
             if(vertex_type >= 0 && vertex_type < NUMBER_OF_RASTERIZER_VERTEX_TYPES) {
                 stats.vertex_types[vertex_type]++;
             }
@@ -183,11 +215,60 @@ namespace Chimera {
             if(TEST_FLAG(group->geometry_flags, RASTERIZER_GEOMETRY_FLAGS_SKY_BIT)) stats.sky++;
             if(TEST_FLAG(group->geometry_flags, RASTERIZER_GEOMETRY_FLAGS_VIEWSPACE_BIT)) stats.viewspace++;
             if(TEST_FLAG(group->geometry_flags, RASTERIZER_GEOMETRY_FLAGS_FIRST_PERSON_BIT)) stats.first_person++;
+
+            if(vertex_type == RASTERIZER_VERTEX_TYPE_ENVIRONMENT_UNCOMPRESSED) {
+                stats.environment_uncompressed_total++;
+
+                if(group->dynamic_triangle_buffer_index != -1) {
+                    stats.environment_uncompressed_dynamic_triangles++;
+                }
+                else if(group->triangle_buffer) {
+                    stats.environment_uncompressed_static_triangles++;
+                }
+                else {
+                    stats.environment_uncompressed_no_triangles++;
+                }
+
+                if(shader_type >= 0 && shader_type < NUMBER_OF_SHADER_TYPES) {
+                    stats.environment_uncompressed_shader_types[shader_type]++;
+                }
+                else {
+                    stats.environment_uncompressed_shader_other++;
+                }
+            }
+        }
+
+        static bool should_skip_group(TransparentGeometryGroup *group) noexcept {
+            if(!group_is_environment_uncompressed(group)) {
+                return false;
+            }
+
+            switch(diagnostic_mode) {
+                case EnvironmentTransparentDiagnosticMode::SKIP_ENVIRONMENT_UNCOMPRESSED:
+                    return true;
+
+                case EnvironmentTransparentDiagnosticMode::SKIP_ENVIRONMENT_UNCOMPRESSED_DYNAMIC:
+                    return group_uses_dynamic_triangles(group);
+
+                case EnvironmentTransparentDiagnosticMode::SKIP_ENVIRONMENT_UNCOMPRESSED_DYNAMIC_CHICAGO:
+                    return group_uses_dynamic_triangles(group) && group_shader_type(group) == SHADER_TYPE_TRANSPARENT_CHICAGO;
+
+                case EnvironmentTransparentDiagnosticMode::SKIP_ENVIRONMENT_UNCOMPRESSED_DYNAMIC_CHICAGO_EXTENDED:
+                    return group_uses_dynamic_triangles(group) && group_shader_type(group) == SHADER_TYPE_TRANSPARENT_CHICAGO_EXTENDED;
+
+                case EnvironmentTransparentDiagnosticMode::SKIP_ENVIRONMENT_UNCOMPRESSED_DYNAMIC_GLASS:
+                    return group_uses_dynamic_triangles(group) && group_shader_type(group) == SHADER_TYPE_TRANSPARENT_GLASS;
+
+                default:
+                    return false;
+            }
         }
 
         static void print_stats() noexcept {
             console_output("chimera_debug_environment_transparent: %s", diagnostic_mode_name());
-            console_output("group_draw_calls=%llu", static_cast<unsigned long long>(stats.total));
+            console_output("group_draw_calls=%llu skipped=%llu",
+                static_cast<unsigned long long>(stats.total),
+                static_cast<unsigned long long>(stats.skipped));
             console_output("vertices: static=%llu dynamic=%llu none=%llu",
                 static_cast<unsigned long long>(stats.static_vertices),
                 static_cast<unsigned long long>(stats.dynamic_vertices),
@@ -225,6 +306,24 @@ namespace Chimera {
             if(stats.vertex_other) {
                 console_output("vertex.other=%llu", static_cast<unsigned long long>(stats.vertex_other));
             }
+
+            console_output("env_uncompressed: total=%llu dynamic_triangles=%llu static_triangles=%llu no_triangles=%llu",
+                static_cast<unsigned long long>(stats.environment_uncompressed_total),
+                static_cast<unsigned long long>(stats.environment_uncompressed_dynamic_triangles),
+                static_cast<unsigned long long>(stats.environment_uncompressed_static_triangles),
+                static_cast<unsigned long long>(stats.environment_uncompressed_no_triangles));
+
+            for(short type = 0; type < NUMBER_OF_SHADER_TYPES; type++) {
+                if(stats.environment_uncompressed_shader_types[type]) {
+                    console_output("env_uncompressed.shader.%s=%llu",
+                        shader_type_name(type),
+                        static_cast<unsigned long long>(stats.environment_uncompressed_shader_types[type]));
+                }
+            }
+            if(stats.environment_uncompressed_shader_other) {
+                console_output("env_uncompressed.shader.other=%llu",
+                    static_cast<unsigned long long>(stats.environment_uncompressed_shader_other));
+            }
         }
 
         static void restore_engine_flag() noexcept {
@@ -242,7 +341,8 @@ namespace Chimera {
             }
 
             record_group(group);
-            if(diagnostic_mode == EnvironmentTransparentDiagnosticMode::GROUP_DRAWS_OFF) {
+            if(should_skip_group(group)) {
+                stats.skipped++;
                 return;
             }
 
@@ -270,7 +370,7 @@ namespace Chimera {
 
             if(*argument == '\0' || std::strcmp(argument, "stats") == 0) {
                 print_stats();
-                console_output("modes: normal engine_off group_draws stats reset");
+                console_output("modes: normal engine_off env_uncompressed env_uncompressed_dynamic env_uncompressed_chicago env_uncompressed_chicago_extended env_uncompressed_glass stats reset");
                 return false;
             }
 
@@ -304,12 +404,24 @@ namespace Chimera {
             else if(matches("engine_off")) {
                 new_mode = EnvironmentTransparentDiagnosticMode::ENGINE_OFF;
             }
-            else if(matches("group_draws")) {
-                new_mode = EnvironmentTransparentDiagnosticMode::GROUP_DRAWS_OFF;
+            else if(matches("env_uncompressed")) {
+                new_mode = EnvironmentTransparentDiagnosticMode::SKIP_ENVIRONMENT_UNCOMPRESSED;
+            }
+            else if(matches("env_uncompressed_dynamic")) {
+                new_mode = EnvironmentTransparentDiagnosticMode::SKIP_ENVIRONMENT_UNCOMPRESSED_DYNAMIC;
+            }
+            else if(matches("env_uncompressed_chicago")) {
+                new_mode = EnvironmentTransparentDiagnosticMode::SKIP_ENVIRONMENT_UNCOMPRESSED_DYNAMIC_CHICAGO;
+            }
+            else if(matches("env_uncompressed_chicago_extended")) {
+                new_mode = EnvironmentTransparentDiagnosticMode::SKIP_ENVIRONMENT_UNCOMPRESSED_DYNAMIC_CHICAGO_EXTENDED;
+            }
+            else if(matches("env_uncompressed_glass")) {
+                new_mode = EnvironmentTransparentDiagnosticMode::SKIP_ENVIRONMENT_UNCOMPRESSED_DYNAMIC_GLASS;
             }
             else {
                 console_error("chimera_debug_environment_transparent: unknown mode");
-                console_output("modes: normal engine_off group_draws stats reset");
+                console_output("modes: normal engine_off env_uncompressed env_uncompressed_dynamic env_uncompressed_chicago env_uncompressed_chicago_extended env_uncompressed_glass stats reset");
                 return false;
             }
 
