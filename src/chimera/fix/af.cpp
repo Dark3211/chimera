@@ -22,13 +22,130 @@ namespace Chimera {
     bool af_trial = false;
 
     static constexpr float high_quality_mip_lod_bias = -0.25f;
+    static constexpr float environment_detail_mip_lod_bias = -0.45f;
+
+    struct EnvironmentDetailSamplerState {
+        bool valid = false;
+        DWORD mip_filter = 0;
+        DWORD mip_lod_bias = 0;
+    };
+
+    static EnvironmentDetailSamplerState environment_detail_sampler_states[3] {};
+    static bool environment_detail_sampler_states_saved = false;
 
     static bool af_supported() noexcept {
-        return (d3d9_device_caps->RasterCaps & D3DPRASTERCAPS_ANISOTROPY) != 0 && 1 < d3d9_device_caps->MaxAnisotropy;
+        return d3d9_device_caps &&
+               (d3d9_device_caps->RasterCaps & D3DPRASTERCAPS_ANISOTROPY) != 0 &&
+               1 < d3d9_device_caps->MaxAnisotropy;
     }
 
     static std::uint32_t effective_max_anisotropy() noexcept {
         return d3d9_device_caps->MaxAnisotropy < global_max_anisotropy ? d3d9_device_caps->MaxAnisotropy : global_max_anisotropy;
+    }
+
+    static void clear_environment_detail_sampler_states() noexcept {
+        for(auto &state : environment_detail_sampler_states) {
+            state = {};
+        }
+        environment_detail_sampler_states_saved = false;
+    }
+
+    static void restore_environment_detail_sampler_states() noexcept {
+        if(!environment_detail_sampler_states_saved) {
+            return;
+        }
+
+        if(global_d3d9_device && *global_d3d9_device) {
+            for(std::uint32_t sampler = 1; sampler <= 3; sampler++) {
+                const auto &state = environment_detail_sampler_states[sampler - 1];
+                if(!state.valid) {
+                    continue;
+                }
+
+                IDirect3DDevice9_SetSamplerState(*global_d3d9_device, sampler, D3DSAMP_MIPFILTER, state.mip_filter);
+                IDirect3DDevice9_SetSamplerState(*global_d3d9_device, sampler, D3DSAMP_MIPMAPLODBIAS, state.mip_lod_bias);
+            }
+        }
+
+        clear_environment_detail_sampler_states();
+    }
+
+    extern "C" void restore_environment_detail_af() noexcept {
+        restore_environment_detail_sampler_states();
+    }
+
+    extern "C" void apply_environment_detail_af() noexcept {
+        // A stale state should never be allowed to accumulate into the next material.
+        restore_environment_detail_sampler_states();
+
+        if(!af_is_enabled || !*af_is_enabled || !af_supported() ||
+           !global_d3d9_device || !*global_d3d9_device) {
+            return;
+        }
+
+        const bool lod_bias_supported =
+            (d3d9_device_caps->RasterCaps & D3DPRASTERCAPS_MIPMAPLODBIAS) != 0;
+        const bool linear_mips_supported =
+            (d3d9_device_caps->TextureFilterCaps & D3DPTFILTERCAPS_MIPFLINEAR) != 0;
+        if(!lod_bias_supported && !linear_mips_supported) {
+            return;
+        }
+
+        // CEnshine's reconstructed Halo environment shader confirms that sampler 0
+        // is the base map, while samplers 1/2/3 are primary, secondary and micro
+        // detail maps. Never touch sampler 0 here so the authored base texture keeps
+        // the normal AF sampling profile.
+        const std::uint32_t highest_sampler =
+            d3d9_device_caps->PixelShaderVersion > 0xffff0100 ? 3U : 1U;
+
+        bool saved_any_state = false;
+        for(std::uint32_t sampler = 1; sampler <= highest_sampler; sampler++) {
+            DWORD mip_filter = 0;
+            DWORD mip_lod_bias = 0;
+
+            const auto mip_result = IDirect3DDevice9_GetSamplerState(
+                *global_d3d9_device,
+                sampler,
+                D3DSAMP_MIPFILTER,
+                &mip_filter
+            );
+            const auto bias_result = IDirect3DDevice9_GetSamplerState(
+                *global_d3d9_device,
+                sampler,
+                D3DSAMP_MIPMAPLODBIAS,
+                &mip_lod_bias
+            );
+
+            // Only change a sampler if both states can be restored exactly later.
+            if(FAILED(mip_result) || FAILED(bias_result)) {
+                continue;
+            }
+
+            auto &saved = environment_detail_sampler_states[sampler - 1];
+            saved.valid = true;
+            saved.mip_filter = mip_filter;
+            saved.mip_lod_bias = mip_lod_bias;
+            saved_any_state = true;
+
+            if(linear_mips_supported) {
+                IDirect3DDevice9_SetSamplerState(
+                    *global_d3d9_device,
+                    sampler,
+                    D3DSAMP_MIPFILTER,
+                    D3DTEXF_LINEAR
+                );
+            }
+            if(lod_bias_supported) {
+                IDirect3DDevice9_SetSamplerState(
+                    *global_d3d9_device,
+                    sampler,
+                    D3DSAMP_MIPMAPLODBIAS,
+                    std::bit_cast<DWORD>(environment_detail_mip_lod_bias)
+                );
+            }
+        }
+
+        environment_detail_sampler_states_saved = saved_any_state;
     }
 
     static void apply_high_quality_af(std::uint32_t sampler, std::uint32_t max_anisotropy) noexcept {
@@ -48,6 +165,8 @@ namespace Chimera {
     }
 
     void set_sampler_states_for_models() noexcept {
+        restore_environment_detail_sampler_states();
+
         if(*af_is_enabled && af_supported()) {
             auto max_anisotropy = effective_max_anisotropy();
 
@@ -63,6 +182,8 @@ namespace Chimera {
     }
 
     void set_sampler_states_for_structures() noexcept {
+        restore_environment_detail_sampler_states();
+
         // This is only for the demo. The base game does it for retail/custom edition on 1.0.10.
         if(*af_is_enabled && af_supported()) {
             auto max_anisotropy = effective_max_anisotropy();
@@ -79,12 +200,16 @@ namespace Chimera {
     }
 
     void set_sampler_states_for_decals() noexcept {
+        restore_environment_detail_sampler_states();
+
         if(*af_is_enabled && af_supported()) {
             apply_high_quality_af(0, effective_max_anisotropy());
         }
     }
 
     void set_sampler_states_for_plasma() noexcept {
+        restore_environment_detail_sampler_states();
+
         if(*af_is_enabled && af_supported()) {
             auto max_anisotropy = effective_max_anisotropy();
 
@@ -95,6 +220,8 @@ namespace Chimera {
     }
 
     extern "C" void set_sampler_states_for_chicago(std::byte *map, std::uint32_t map_index) noexcept {
+        restore_environment_detail_sampler_states();
+
         if(*af_is_enabled) {
             auto *map_flags = reinterpret_cast<std::uint16_t *>(map);
             // If unfiltered flag is true, do nothing.
