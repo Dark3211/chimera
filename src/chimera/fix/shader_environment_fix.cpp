@@ -55,19 +55,22 @@ namespace Chimera {
             float environment_reflection_parallel_scale;
             float model_reflection_perpendicular_scale;
             float model_reflection_parallel_scale;
+            float emissive_scale;
+            float emissive_bright_scale;
         };
 
-        // Level 1 is the previously validated true/on profile. Levels 2 and 3 build
-        // progressively from the original tag values rather than from the previous
-        // level, preventing repeated command changes from accumulating brightness.
+        // 0/false restores the original tag values. Levels 1-3 apply all material
+        // enhancements from the original values, so switching levels never accumulates
+        // specular, reflection, or emissive intensity.
         constexpr std::array<MaterialQualityProfile, 3> MATERIAL_QUALITY_PROFILES {{
-            {1.50F, 1.25F, 1.35F, 1.20F, 1.30F},
-            {1.80F, 1.40F, 1.55F, 1.32F, 1.46F},
-            {2.10F, 1.62F, 1.80F, 1.48F, 1.64F}
+            {1.50F, 1.25F, 1.35F, 1.20F, 1.30F, 1.35F, 1.20F},
+            {1.80F, 1.40F, 1.55F, 1.32F, 1.46F, 1.45F, 1.30F},
+            {2.10F, 1.62F, 1.80F, 1.48F, 1.64F, 1.55F, 1.40F}
         }};
 
         constexpr std::size_t MAX_MATERIAL_QUALITY_SNAPSHOTS = 4096;
         constexpr std::size_t MAX_MODEL_MATERIAL_QUALITY_SNAPSHOTS = 4096;
+        constexpr std::size_t MAX_EMISSIVE_QUALITY_SNAPSHOTS = 4096;
 
         struct MaterialQualitySnapshot {
             TagID id;
@@ -81,10 +84,6 @@ namespace Chimera {
             ColorARGB reflection_view_perpendicular_color;
             ColorARGB reflection_view_parallel_color;
         };
-
-        constexpr std::size_t MAX_EMISSIVE_QUALITY_SNAPSHOTS = 4096;
-        constexpr float EMISSIVE_QUALITY_SCALE = 1.20F;
-        constexpr float EMISSIVE_QUALITY_BRIGHT_SCALE = 1.10F;
 
         struct EmissiveQualitySnapshot {
             TagID id;
@@ -101,15 +100,14 @@ namespace Chimera {
         std::array<EmissiveQualitySnapshot, MAX_EMISSIVE_QUALITY_SNAPSHOTS> emissive_quality_snapshots {};
         std::size_t material_quality_snapshot_count = 0;
         std::size_t model_material_quality_snapshot_count = 0;
+        std::size_t emissive_quality_snapshot_count = 0;
         std::size_t material_quality_environment_scanned = 0;
         std::size_t material_quality_materials_modified = 0;
         std::size_t material_quality_specular_modified = 0;
         std::size_t material_quality_reflection_modified = 0;
         std::size_t material_quality_models_scanned = 0;
         std::size_t material_quality_models_modified = 0;
-        std::size_t emissive_quality_snapshot_count = 0;
         std::uint8_t material_quality_level = 0;
-        bool emissive_quality_enabled = false;
 
         void clear_material_quality_diagnostics() noexcept {
             material_quality_environment_scanned = 0;
@@ -153,22 +151,15 @@ namespace Chimera {
             return value * scale;
         }
 
-        bool emissive_color_has_energy(const ColorRGB &color) noexcept {
-            return (std::isfinite(color.red) && color.red > 0.0F) ||
-                   (std::isfinite(color.green) && color.green > 0.0F) ||
-                   (std::isfinite(color.blue) && color.blue > 0.0F);
-        }
-
-        ColorRGB scale_emissive_color(ColorRGB color) noexcept {
+        ColorRGB scale_emissive_color(ColorRGB color, const MaterialQualityProfile &profile) noexcept {
             float maximum = 0.0F;
             if(std::isfinite(color.red) && color.red > maximum) maximum = color.red;
             if(std::isfinite(color.green) && color.green > maximum) maximum = color.green;
             if(std::isfinite(color.blue) && color.blue > maximum) maximum = color.blue;
 
-            // Preserve bright authored highlights by applying a smaller gain once any
-            // channel is already at or above 1.0. Dimmer emissive colors receive the
-            // full enhancement. The common gain preserves the original hue.
-            const float scale = maximum >= 1.0F ? EMISSIVE_QUALITY_BRIGHT_SCALE : EMISSIVE_QUALITY_SCALE;
+            // Bright authored emissive colors use the second, softer scale for the
+            // selected material-quality level. Applying one common RGB gain preserves hue.
+            const float scale = maximum >= 1.0F ? profile.emissive_bright_scale : profile.emissive_scale;
             color.red = scale_material_value(color.red, scale);
             color.green = scale_material_value(color.green, scale);
             color.blue = scale_material_value(color.blue, scale);
@@ -191,9 +182,10 @@ namespace Chimera {
         }
 
         void clear_material_quality_snapshots() noexcept {
-            // Map-load BEFORE event: the old tag pointers are about to become invalid.
+            // Map-load BEFORE event: old tag pointers are about to become invalid.
             material_quality_snapshot_count = 0;
             model_material_quality_snapshot_count = 0;
+            emissive_quality_snapshot_count = 0;
             clear_material_quality_diagnostics();
         }
 
@@ -223,8 +215,26 @@ namespace Chimera {
                 shader->model.reflection_view_parallel_color = snapshot.reflection_view_parallel_color;
             }
 
+            for(std::size_t i = 0; i < emissive_quality_snapshot_count; i++) {
+                auto &snapshot = emissive_quality_snapshots[i];
+                auto *tag = get_tag(snapshot.id);
+                if(!valid_shader_environment_tag(tag)) {
+                    continue;
+                }
+
+                auto *shader = reinterpret_cast<ShaderEnvironment *>(tag->data);
+                auto &self_illumination = shader->environment.self_illumination;
+                self_illumination.primary_on_color = snapshot.primary_on_color;
+                self_illumination.primary_off_color = snapshot.primary_off_color;
+                self_illumination.secondary_on_color = snapshot.secondary_on_color;
+                self_illumination.secondary_off_color = snapshot.secondary_off_color;
+                self_illumination.plasma_on_color = snapshot.plasma_on_color;
+                self_illumination.plasma_off_color = snapshot.plasma_off_color;
+            }
+
             material_quality_snapshot_count = 0;
             model_material_quality_snapshot_count = 0;
+            emissive_quality_snapshot_count = 0;
             clear_material_quality_diagnostics();
         }
 
@@ -233,7 +243,8 @@ namespace Chimera {
                 return;
             }
 
-            if(material_quality_snapshot_count != 0 || model_material_quality_snapshot_count != 0) {
+            if(material_quality_snapshot_count != 0 || model_material_quality_snapshot_count != 0 ||
+               emissive_quality_snapshot_count != 0) {
                 return;
             }
 
@@ -267,32 +278,63 @@ namespace Chimera {
                 const bool reflection_changed = new_reflection_perpendicular != old_reflection_perpendicular ||
                                                 new_reflection_parallel != old_reflection_parallel;
 
-                if(!specular_changed && !reflection_changed) {
-                    continue;
+                auto &self_illumination = shader->environment.self_illumination;
+                const auto primary_on = scale_emissive_color(self_illumination.primary_on_color, profile);
+                const auto primary_off = scale_emissive_color(self_illumination.primary_off_color, profile);
+                const auto secondary_on = scale_emissive_color(self_illumination.secondary_on_color, profile);
+                const auto secondary_off = scale_emissive_color(self_illumination.secondary_off_color, profile);
+                const auto plasma_on = scale_emissive_color(self_illumination.plasma_on_color, profile);
+                const auto plasma_off = scale_emissive_color(self_illumination.plasma_off_color, profile);
+
+                const bool emissive_changed =
+                    emissive_color_changed(self_illumination.primary_on_color, primary_on) ||
+                    emissive_color_changed(self_illumination.primary_off_color, primary_off) ||
+                    emissive_color_changed(self_illumination.secondary_on_color, secondary_on) ||
+                    emissive_color_changed(self_illumination.secondary_off_color, secondary_off) ||
+                    emissive_color_changed(self_illumination.plasma_on_color, plasma_on) ||
+                    emissive_color_changed(self_illumination.plasma_off_color, plasma_off);
+
+                if(specular_changed || reflection_changed) {
+                    if(material_quality_snapshot_count < material_quality_snapshots.size()) {
+                        material_quality_snapshots[material_quality_snapshot_count++] = MaterialQualitySnapshot {
+                            tag->id,
+                            old_specular,
+                            old_reflection_perpendicular,
+                            old_reflection_parallel
+                        };
+
+                        material_quality_materials_modified++;
+                        if(specular_changed) {
+                            material_quality_specular_modified++;
+                        }
+                        if(reflection_changed) {
+                            material_quality_reflection_modified++;
+                        }
+
+                        shader->environment.specular.brightness = new_specular;
+                        shader->environment.reflection.view_perpendicular_brightness = new_reflection_perpendicular;
+                        shader->environment.reflection.view_parallel_brightness = new_reflection_parallel;
+                    }
                 }
 
-                if(material_quality_snapshot_count >= material_quality_snapshots.size()) {
-                    break;
-                }
+                if(emissive_changed && emissive_quality_snapshot_count < emissive_quality_snapshots.size()) {
+                    emissive_quality_snapshots[emissive_quality_snapshot_count++] = EmissiveQualitySnapshot {
+                        tag->id,
+                        self_illumination.primary_on_color,
+                        self_illumination.primary_off_color,
+                        self_illumination.secondary_on_color,
+                        self_illumination.secondary_off_color,
+                        self_illumination.plasma_on_color,
+                        self_illumination.plasma_off_color
+                    };
 
-                material_quality_snapshots[material_quality_snapshot_count++] = MaterialQualitySnapshot {
-                    tag->id,
-                    old_specular,
-                    old_reflection_perpendicular,
-                    old_reflection_parallel
-                };
-
-                material_quality_materials_modified++;
-                if(specular_changed) {
-                    material_quality_specular_modified++;
+                    self_illumination.primary_on_color = primary_on;
+                    self_illumination.primary_off_color = primary_off;
+                    self_illumination.secondary_on_color = secondary_on;
+                    self_illumination.secondary_off_color = secondary_off;
+                    self_illumination.plasma_on_color = plasma_on;
+                    self_illumination.plasma_off_color = plasma_off;
                 }
-                if(reflection_changed) {
-                    material_quality_reflection_modified++;
-                }
-
-                shader->environment.specular.brightness = new_specular;
-                shader->environment.reflection.view_perpendicular_brightness = new_reflection_perpendicular;
-                shader->environment.reflection.view_parallel_brightness = new_reflection_parallel;
             }
 
             for(std::size_t i = 0; i < tag_count; i++) {
@@ -334,148 +376,11 @@ namespace Chimera {
             }
         }
 
-        void clear_emissive_quality_snapshots() noexcept {
-            // Map-load BEFORE event: the old tag pointers are about to become invalid.
-            emissive_quality_snapshot_count = 0;
-        }
-
-        void restore_emissive_quality() noexcept {
-            for(std::size_t i = 0; i < emissive_quality_snapshot_count; i++) {
-                auto &snapshot = emissive_quality_snapshots[i];
-                auto *tag = get_tag(snapshot.id);
-                if(!valid_shader_environment_tag(tag)) {
-                    continue;
-                }
-
-                auto *shader = reinterpret_cast<ShaderEnvironment *>(tag->data);
-                auto &self_illumination = shader->environment.self_illumination;
-                self_illumination.primary_on_color = snapshot.primary_on_color;
-                self_illumination.primary_off_color = snapshot.primary_off_color;
-                self_illumination.secondary_on_color = snapshot.secondary_on_color;
-                self_illumination.secondary_off_color = snapshot.secondary_off_color;
-                self_illumination.plasma_on_color = snapshot.plasma_on_color;
-                self_illumination.plasma_off_color = snapshot.plasma_off_color;
-            }
-            emissive_quality_snapshot_count = 0;
-        }
-
-        void apply_emissive_quality() noexcept {
-            if(!emissive_quality_enabled || emissive_quality_snapshot_count != 0) {
-                return;
-            }
-
-            auto tag_count = static_cast<std::size_t>(get_tag_data_header().tag_count);
-            const auto maximum_safe_tag_count = TAG_DATA_SAFE_REGION_SIZE / sizeof(Tag);
-            if(tag_count > maximum_safe_tag_count) {
-                return;
-            }
-
-            for(std::size_t i = 0; i < tag_count; i++) {
-                auto *tag = get_tag(i);
-                if(!valid_shader_environment_tag(tag)) {
-                    continue;
-                }
-
-                auto *shader = reinterpret_cast<ShaderEnvironment *>(tag->data);
-                auto &self_illumination = shader->environment.self_illumination;
-
-                const bool has_emissive_color =
-                    emissive_color_has_energy(self_illumination.primary_on_color) ||
-                    emissive_color_has_energy(self_illumination.primary_off_color) ||
-                    emissive_color_has_energy(self_illumination.secondary_on_color) ||
-                    emissive_color_has_energy(self_illumination.secondary_off_color) ||
-                    emissive_color_has_energy(self_illumination.plasma_on_color) ||
-                    emissive_color_has_energy(self_illumination.plasma_off_color);
-                if(!has_emissive_color) {
-                    continue;
-                }
-
-                const auto primary_on = scale_emissive_color(self_illumination.primary_on_color);
-                const auto primary_off = scale_emissive_color(self_illumination.primary_off_color);
-                const auto secondary_on = scale_emissive_color(self_illumination.secondary_on_color);
-                const auto secondary_off = scale_emissive_color(self_illumination.secondary_off_color);
-                const auto plasma_on = scale_emissive_color(self_illumination.plasma_on_color);
-                const auto plasma_off = scale_emissive_color(self_illumination.plasma_off_color);
-
-                const bool changed =
-                    emissive_color_changed(self_illumination.primary_on_color, primary_on) ||
-                    emissive_color_changed(self_illumination.primary_off_color, primary_off) ||
-                    emissive_color_changed(self_illumination.secondary_on_color, secondary_on) ||
-                    emissive_color_changed(self_illumination.secondary_off_color, secondary_off) ||
-                    emissive_color_changed(self_illumination.plasma_on_color, plasma_on) ||
-                    emissive_color_changed(self_illumination.plasma_off_color, plasma_off);
-                if(!changed) {
-                    continue;
-                }
-
-                if(emissive_quality_snapshot_count >= emissive_quality_snapshots.size()) {
-                    break;
-                }
-
-                emissive_quality_snapshots[emissive_quality_snapshot_count++] = EmissiveQualitySnapshot {
-                    tag->id,
-                    self_illumination.primary_on_color,
-                    self_illumination.primary_off_color,
-                    self_illumination.secondary_on_color,
-                    self_illumination.secondary_off_color,
-                    self_illumination.plasma_on_color,
-                    self_illumination.plasma_off_color
-                };
-
-                self_illumination.primary_on_color = primary_on;
-                self_illumination.primary_off_color = primary_off;
-                self_illumination.secondary_on_color = secondary_on;
-                self_illumination.secondary_off_color = secondary_off;
-                self_illumination.plasma_on_color = plasma_on;
-                self_illumination.plasma_off_color = plasma_off;
-            }
-        }
-
         void refresh_material_quality_after_map_load() noexcept {
             if(material_quality_level != 0) {
                 apply_material_quality();
             }
         }
-
-        void refresh_emissive_quality_after_map_load() noexcept {
-            if(emissive_quality_enabled) {
-                apply_emissive_quality();
-            }
-        }
-    }
-
-    bool emissive_quality_command(int argc, const char **argv) {
-        if(argc == 1) {
-            if(!argv || !argv[0]) {
-                return false;
-            }
-
-            bool new_enabled;
-            if(std::strcmp(argv[0], "false") == 0 || std::strcmp(argv[0], "0") == 0) {
-                new_enabled = false;
-            }
-            else if(std::strcmp(argv[0], "true") == 0 || std::strcmp(argv[0], "1") == 0) {
-                new_enabled = true;
-            }
-            else {
-                console_error("chimera_emissive_quality: expected false, true, 0, or 1");
-                return false;
-            }
-
-            if(new_enabled != emissive_quality_enabled) {
-                if(emissive_quality_enabled || emissive_quality_snapshot_count != 0) {
-                    restore_emissive_quality();
-                }
-
-                emissive_quality_enabled = new_enabled;
-                if(emissive_quality_enabled) {
-                    apply_emissive_quality();
-                }
-            }
-        }
-
-        console_output("%u", emissive_quality_enabled ? 1U : 0U);
-        return true;
     }
 
     bool material_quality_command(int argc, const char **argv) {
@@ -505,10 +410,10 @@ namespace Chimera {
             }
 
             if(new_level != material_quality_level) {
-                // Always restore the original tag values before applying a different
-                // profile. This makes 1 -> 2 -> 3 -> 1 deterministic and non-cumulative.
+                // Restore every material component before applying the new profile.
+                // This keeps 1 -> 2 -> 3 -> 1 deterministic and non-cumulative.
                 if(material_quality_level != 0 || material_quality_snapshot_count != 0 ||
-                   model_material_quality_snapshot_count != 0) {
+                   model_material_quality_snapshot_count != 0 || emissive_quality_snapshot_count != 0) {
                     restore_material_quality();
                 }
 
@@ -593,12 +498,10 @@ namespace Chimera {
     }
 
     void set_up_shader_environment_fix() noexcept {
-        // Keep the material snapshots synchronized with the active map. The command
-        // itself is registered in Chimera's normal command table so it can autosave.
+        // Keep all material-quality snapshots synchronized with the active map. The
+        // command itself is registered in Chimera's normal command table so it can autosave.
         add_map_load_event(clear_material_quality_snapshots, EVENT_PRIORITY_BEFORE);
-        add_map_load_event(clear_emissive_quality_snapshots, EVENT_PRIORITY_BEFORE);
         add_map_load_event(refresh_material_quality_after_map_load, EVENT_PRIORITY_AFTER);
-        add_map_load_event(refresh_emissive_quality_after_map_load, EVENT_PRIORITY_AFTER);
 
         // Fix specular_light texture/sampler mismatch
         add_game_start_event(meme_the_speular_light_draw);
