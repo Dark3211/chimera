@@ -77,27 +77,6 @@ _rasterizer_transparent_geometry_group_draw_vertices:
     pop ecx
     ret
 
-.globl _rasterizer_transparent_geometry_group_draw_vertices_guarded
-_rasterizer_transparent_geometry_group_draw_vertices_guarded:
-    ;# Halo passes the TransparentGeometryGroup in ECX and has_lightmap on the stack.
-    ;# Preserve the complete caller state while the C++ validator runs.
-    pushfd
-    pushad
-    push ecx
-    call _rasterizer_validate_transparent_geometry_group
-    add esp, 4
-    test al, al
-    jz .transparent_geometry_rejected
-
-    popad
-    popfd
-    jmp dword ptr [_rasterizer_transparent_geometry_group_draw_vertices_original_func]
-
-.transparent_geometry_rejected:
-    popad
-    popfd
-    ret
-
 .globl _periodic_function_evaluate
 _periodic_function_evaluate:
     push eax

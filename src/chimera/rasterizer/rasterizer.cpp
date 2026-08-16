@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 #include "rasterizer.hpp"
-#include "rasterizer_transparent_geometry.hpp"
 #include "../chimera.hpp"
 #include "../signature/hook.hpp"
 #include "../halo_data/game_variables.hpp"
@@ -100,7 +99,6 @@ namespace Chimera {
         add_game_start_event(rasterizer_create_pixel_shaders);
 
         chimera_rasterizer_enabled = true;
-        set_up_transparent_geometry_guard_diagnostics();
     }
 
 }

@@ -15,7 +15,6 @@ namespace Chimera {
         void *rasterizer_set_texture_func = nullptr;
         void *shader_texture_animation_evaluate_func = nullptr;
         void *rasterizer_transparent_geometry_group_draw_vertices_func = nullptr;
-        void *rasterizer_transparent_geometry_group_draw_vertices_original_func = nullptr;
         void *periodic_function_evaluate_func = nullptr;
         void *rasterizer_set_frustum_z_func = nullptr;
         void *rasterizer_draw_dynamic_triangles_static_vertices_func = nullptr;
@@ -30,13 +29,10 @@ namespace Chimera {
         void *matrix4x3_inverse_func = nullptr;
         void *matrix4x3_transform_normal_func = nullptr;
         void *matrix4x3_transform_point_func = nullptr;
-
-        void rasterizer_transparent_geometry_group_draw_vertices_guarded() noexcept;
     }
 
     void set_up_function_hooks() noexcept {
         static bool functions_hooks_enabled = false;
-        static Hook transparent_geometry_draw_vertices_guard_hook;
         if(!functions_hooks_enabled) {
             rasterizer_transparent_geometry_group_draw_func = reinterpret_cast<void *>(get_chimera().get_signature("transparent_geometry_group_draw_sig").data());
             shader_get_vertex_shader_permutation_func = reinterpret_cast<void *>(get_chimera().get_signature("shader_get_vertex_shader_permutation_sig").data());
@@ -64,21 +60,6 @@ namespace Chimera {
             matrix4x3_inverse_func = reinterpret_cast<void *>(get_chimera().get_signature("matrix4x3_inverse_sig").data());
             matrix4x3_transform_normal_func = reinterpret_cast<void *>(get_chimera().get_signature("matrix4x3_transform_normal_sig").data());
             matrix4x3_transform_point_func = reinterpret_cast<void *>(get_chimera().get_signature("matrix4x3_transform_point_sig").data());
-
-            // Guard Halo's common transparent-geometry vertex submission entry point.
-            // Leave the public wrapper pointing at Halo's hooked entry point so both
-            // Halo callers and Chimera callers pass through the validator. The guard
-            // itself jumps to this relocated original trampoline after validation.
-            if(rasterizer_transparent_geometry_group_draw_vertices_func) {
-                const void *original_draw_vertices = nullptr;
-                write_function_override(rasterizer_transparent_geometry_group_draw_vertices_func,
-                                        transparent_geometry_draw_vertices_guard_hook,
-                                        reinterpret_cast<const void *>(rasterizer_transparent_geometry_group_draw_vertices_guarded),
-                                        &original_draw_vertices);
-                if(original_draw_vertices) {
-                    rasterizer_transparent_geometry_group_draw_vertices_original_func = const_cast<void *>(original_draw_vertices);
-                }
-            }
 
             functions_hooks_enabled = true;
         }
