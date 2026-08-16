@@ -8,6 +8,8 @@
 
 namespace Chimera {
     static std::vector<Event<DamageEventFunction>> damage_events;
+    static std::size_t damage_events_version = 0;
+    static ReusableEventDispatcher<DamageEventFunction> damage_dispatcher;
 
     static void enable_damage_hook();
 
@@ -34,12 +36,14 @@ namespace Chimera {
 
         // Add the event
         damage_events.emplace_back(Event<DamageEventFunction> { function, priority });
+        damage_events_version++;
     }
 
     void remove_damage_event(const DamageEventFunction function) {
         for(std::size_t i = 0; i < damage_events.size(); i++) {
             if(damage_events[i].function == function) {
                 damage_events.erase(damage_events.begin() + i);
+                damage_events_version++;
                 return;
             }
         }
@@ -50,7 +54,16 @@ namespace Chimera {
             return true;
         }
         bool allow = true;
-        call_in_order_allow(damage_events, allow, *object, damage_thing->damage_tag_id, damage_thing->multiplier, damage_thing->causer_player, damage_thing->causer_object);
+        damage_dispatcher.dispatch_allow_versioned(
+            damage_events,
+            damage_events_version,
+            allow,
+            *object,
+            damage_thing->damage_tag_id,
+            damage_thing->multiplier,
+            damage_thing->causer_player,
+            damage_thing->causer_object
+        );
         return allow;
     }
 

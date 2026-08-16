@@ -67,6 +67,29 @@ namespace Chimera {
     }
 
     /**
+     * Call events in order but the event can be denied by any function, preventing further events from firing.
+     * @param events These are the events being used. A copy is made, allowing events to be added/removed when needed.
+     * @param allow  This is a reference to a boolean to use which may be set to false when denied. If it is already false, no events will be fired.
+     * @param args   These are the arguments to pass to each events' function.
+     */
+    template<typename T, typename ... Args> static inline void call_in_order_allow(std::vector<Event<T>> events, bool &allow, Args&& ... args) {
+        auto call_events = [&](const std::vector<Event<T>> &events, bool &allow, EventPriority priority) {
+            for(const auto &event : events) {
+                if(!allow) {
+                    break;
+                }
+                if(event.priority == priority && event.function) {
+                    allow = event.function(std::forward<Args>(args) ...);
+                }
+            }
+        };
+        call_events(events, allow, EVENT_PRIORITY_BEFORE);
+        call_events(events, allow, EVENT_PRIORITY_DEFAULT);
+        call_events(events, allow, EVENT_PRIORITY_AFTER);
+        call_events(events, allow, EVENT_PRIORITY_FINAL);
+    }
+
+    /**
      * Reusable snapshot dispatcher for hot event paths.
      *
      * The source event list is still snapshotted before callbacks run, preserving the
@@ -104,6 +127,21 @@ namespace Chimera {
             this->dispatch_snapshot(std::forward<Args>(args) ...);
         }
 
+        template<typename ... Args> void dispatch_allow_versioned(const std::vector<Event<T>> &events, std::size_t version, bool &allow, Args&& ... args) {
+            if(this->p_dispatching) {
+                call_in_order_allow(events, allow, std::forward<Args>(args) ...);
+                return;
+            }
+
+            if(!this->p_snapshot_version_valid || this->p_snapshot_version != version) {
+                this->rebuild_snapshot(events);
+                this->p_snapshot_version = version;
+                this->p_snapshot_version_valid = true;
+            }
+
+            this->dispatch_allow_snapshot(allow, std::forward<Args>(args) ...);
+        }
+
     private:
         void rebuild_snapshot(const std::vector<Event<T>> &events) {
             this->p_snapshot.clear();
@@ -139,34 +177,30 @@ namespace Chimera {
             }
         }
 
+        template<typename ... Args> void dispatch_allow_snapshot(bool &allow, Args&& ... args) {
+            this->p_dispatching = true;
+            struct DispatchGuard {
+                bool &dispatching;
+                ~DispatchGuard() {
+                    dispatching = false;
+                }
+            } guard { this->p_dispatching };
+
+            for(const auto &event : this->p_snapshot) {
+                if(!allow) {
+                    break;
+                }
+                if(event.function) {
+                    allow = event.function(std::forward<Args>(args) ...);
+                }
+            }
+        }
+
         std::vector<Event<T>> p_snapshot;
         std::size_t p_snapshot_version = 0;
         bool p_snapshot_version_valid = false;
         bool p_dispatching = false;
     };
-
-    /**
-     * Call events in order but the event can be denied by any function, preventing further events from firing.
-     * @param events These are the events being used. A copy is made, allowing events to be added/removed when needed.
-     * @param allow  This is a reference to a boolean to use which may be set to false when denied. If it is already false, no events will be fired.
-     * @param args   These are the arguments to pass to each events' function.
-     */
-    template<typename T, typename ... Args> static inline void call_in_order_allow(std::vector<Event<T>> events, bool &allow, Args&& ... args) {
-        auto call_events = [&](const std::vector<Event<T>> &events, bool &allow, EventPriority priority) {
-            for(const auto &event : events) {
-                if(!allow) {
-                    break;
-                }
-                if(event.priority == priority && event.function) {
-                    allow = event.function(std::forward<Args>(args) ...);
-                }
-            }
-        };
-        call_events(events, allow, EVENT_PRIORITY_BEFORE);
-        call_events(events, allow, EVENT_PRIORITY_DEFAULT);
-        call_events(events, allow, EVENT_PRIORITY_AFTER);
-        call_events(events, allow, EVENT_PRIORITY_FINAL);
-    }
 }
 
 #endif
