@@ -49,17 +49,23 @@ namespace Chimera {
     namespace {
         constexpr std::uintptr_t TAG_DATA_SAFE_REGION_SIZE = 0x1700000;
 
-        // Validated high-quality profile. Only positive, existing material values are
-        // scaled, so maps retain their original material intent when the option is on.
-        constexpr float MATERIAL_SPECULAR_SCALE = 1.50F;
-        constexpr float MATERIAL_REFLECTION_PERPENDICULAR_SCALE = 1.25F;
-        constexpr float MATERIAL_REFLECTION_PARALLEL_SCALE = 1.35F;
+        struct MaterialQualityProfile {
+            float environment_specular_scale;
+            float environment_reflection_perpendicular_scale;
+            float environment_reflection_parallel_scale;
+            float model_reflection_perpendicular_scale;
+            float model_reflection_parallel_scale;
+        };
 
-        // Model shaders encode reflection strength in their two view-dependent colors.
-        // Keep this boost milder than environment materials because it applies to close
-        // first-person weapons, characters, vehicles and scenery models.
-        constexpr float MODEL_REFLECTION_PERPENDICULAR_SCALE = 1.20F;
-        constexpr float MODEL_REFLECTION_PARALLEL_SCALE = 1.30F;
+        // Level 1 is the previously validated true/on profile. Levels 2 and 3 build
+        // progressively from the original tag values rather than from the previous
+        // level, preventing repeated command changes from accumulating brightness.
+        constexpr std::array<MaterialQualityProfile, 4> MATERIAL_QUALITY_PROFILES {{
+            {1.00F, 1.00F, 1.00F, 1.00F, 1.00F},
+            {1.50F, 1.25F, 1.35F, 1.20F, 1.30F},
+            {1.65F, 1.32F, 1.45F, 1.26F, 1.38F},
+            {1.80F, 1.40F, 1.55F, 1.32F, 1.46F}
+        }};
 
         constexpr std::size_t MAX_MATERIAL_QUALITY_SNAPSHOTS = 4096;
         constexpr std::size_t MAX_MODEL_MATERIAL_QUALITY_SNAPSHOTS = 4096;
@@ -87,7 +93,7 @@ namespace Chimera {
         std::size_t material_quality_reflection_modified = 0;
         std::size_t material_quality_models_scanned = 0;
         std::size_t material_quality_models_modified = 0;
-        bool material_quality_enabled = false;
+        std::uint8_t material_quality_level = 0;
 
         void clear_material_quality_diagnostics() noexcept {
             material_quality_environment_scanned = 0;
@@ -181,11 +187,16 @@ namespace Chimera {
         }
 
         void apply_material_quality() noexcept {
+            if(material_quality_level == 0 || material_quality_level >= MATERIAL_QUALITY_PROFILES.size()) {
+                return;
+            }
+
             if(material_quality_snapshot_count != 0 || model_material_quality_snapshot_count != 0) {
                 return;
             }
 
             clear_material_quality_diagnostics();
+            const auto &profile = MATERIAL_QUALITY_PROFILES[material_quality_level];
 
             auto tag_count = static_cast<std::size_t>(get_tag_data_header().tag_count);
             const auto maximum_safe_tag_count = TAG_DATA_SAFE_REGION_SIZE / sizeof(Tag);
@@ -206,9 +217,9 @@ namespace Chimera {
                 const auto old_reflection_perpendicular = shader->environment.reflection.view_perpendicular_brightness;
                 const auto old_reflection_parallel = shader->environment.reflection.view_parallel_brightness;
 
-                const auto new_specular = scale_material_value(old_specular, MATERIAL_SPECULAR_SCALE);
-                const auto new_reflection_perpendicular = scale_material_value(old_reflection_perpendicular, MATERIAL_REFLECTION_PERPENDICULAR_SCALE);
-                const auto new_reflection_parallel = scale_material_value(old_reflection_parallel, MATERIAL_REFLECTION_PARALLEL_SCALE);
+                const auto new_specular = scale_material_value(old_specular, profile.environment_specular_scale);
+                const auto new_reflection_perpendicular = scale_material_value(old_reflection_perpendicular, profile.environment_reflection_perpendicular_scale);
+                const auto new_reflection_parallel = scale_material_value(old_reflection_parallel, profile.environment_reflection_parallel_scale);
 
                 const bool specular_changed = new_specular != old_specular;
                 const bool reflection_changed = new_reflection_perpendicular != old_reflection_perpendicular ||
@@ -257,8 +268,8 @@ namespace Chimera {
 
                 const auto old_perpendicular = shader->model.reflection_view_perpendicular_color;
                 const auto old_parallel = shader->model.reflection_view_parallel_color;
-                const auto new_perpendicular = scale_model_reflection_color(old_perpendicular, MODEL_REFLECTION_PERPENDICULAR_SCALE);
-                const auto new_parallel = scale_model_reflection_color(old_parallel, MODEL_REFLECTION_PARALLEL_SCALE);
+                const auto new_perpendicular = scale_model_reflection_color(old_perpendicular, profile.model_reflection_perpendicular_scale);
+                const auto new_parallel = scale_model_reflection_color(old_parallel, profile.model_reflection_parallel_scale);
 
                 if(!model_reflection_color_changed(old_perpendicular, new_perpendicular) &&
                    !model_reflection_color_changed(old_parallel, new_parallel)) {
@@ -282,7 +293,7 @@ namespace Chimera {
         }
 
         void refresh_material_quality_after_map_load() noexcept {
-            if(material_quality_enabled) {
+            if(material_quality_level != 0) {
                 apply_material_quality();
             }
         }
@@ -295,26 +306,41 @@ namespace Chimera {
             }
 
             const auto *value = argv[0];
-            if(std::strcmp(value, "true") != 0 && std::strcmp(value, "false") != 0 &&
-               std::strcmp(value, "1") != 0 && std::strcmp(value, "0") != 0) {
-                console_error("chimera_material_quality: expected true, false, 1, or 0");
+            std::uint8_t new_level = 0;
+
+            if(std::strcmp(value, "false") == 0 || std::strcmp(value, "0") == 0) {
+                new_level = 0;
+            }
+            else if(std::strcmp(value, "true") == 0 || std::strcmp(value, "1") == 0) {
+                new_level = 1;
+            }
+            else if(std::strcmp(value, "2") == 0) {
+                new_level = 2;
+            }
+            else if(std::strcmp(value, "3") == 0) {
+                new_level = 3;
+            }
+            else {
+                console_error("chimera_material_quality: expected false, true, 0, 1, 2, or 3");
                 return false;
             }
 
-            const bool new_enabled = STR_TO_BOOL(value);
-            if(new_enabled != material_quality_enabled) {
-                if(new_enabled) {
-                    material_quality_enabled = true;
-                    apply_material_quality();
-                }
-                else {
+            if(new_level != material_quality_level) {
+                // Always restore the original tag values before applying a different
+                // profile. This makes 1 -> 2 -> 3 -> 1 deterministic and non-cumulative.
+                if(material_quality_level != 0 || material_quality_snapshot_count != 0 ||
+                   model_material_quality_snapshot_count != 0) {
                     restore_material_quality();
-                    material_quality_enabled = false;
+                }
+
+                material_quality_level = new_level;
+                if(material_quality_level != 0) {
+                    apply_material_quality();
                 }
             }
         }
 
-        console_output(BOOL_TO_STR(material_quality_enabled));
+        console_output("%u", static_cast<unsigned int>(material_quality_level));
         return true;
     }
 
