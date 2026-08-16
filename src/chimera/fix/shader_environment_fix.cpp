@@ -57,11 +57,11 @@ namespace Chimera {
             float model_reflection_parallel_scale;
         };
 
-        // Level 1 is the previously validated true/on profile. Levels 2 and 3 build
-        // progressively from the original tag values rather than from the previous
-        // level, preventing repeated command changes from accumulating brightness.
-        constexpr std::array<MaterialQualityProfile, 4> MATERIAL_QUALITY_PROFILES {{
-            {1.00F, 1.00F, 1.00F, 1.00F, 1.00F},
+        // 0/false is the disabled state and has no quality profile. Level 1 is the
+        // previously validated true/on profile. Levels 2 and 3 build progressively
+        // from the original tag values rather than from the previous level, preventing
+        // repeated command changes from accumulating brightness.
+        constexpr std::array<MaterialQualityProfile, 3> MATERIAL_QUALITY_PROFILES {{
             {1.50F, 1.25F, 1.35F, 1.20F, 1.30F},
             {1.65F, 1.32F, 1.45F, 1.26F, 1.38F},
             {1.80F, 1.40F, 1.55F, 1.32F, 1.46F}
@@ -187,7 +187,7 @@ namespace Chimera {
         }
 
         void apply_material_quality() noexcept {
-            if(material_quality_level == 0 || material_quality_level >= MATERIAL_QUALITY_PROFILES.size()) {
+            if(material_quality_level == 0 || material_quality_level > MATERIAL_QUALITY_PROFILES.size()) {
                 return;
             }
 
@@ -196,7 +196,7 @@ namespace Chimera {
             }
 
             clear_material_quality_diagnostics();
-            const auto &profile = MATERIAL_QUALITY_PROFILES[material_quality_level];
+            const auto &profile = MATERIAL_QUALITY_PROFILES[material_quality_level - 1];
 
             auto tag_count = static_cast<std::size_t>(get_tag_data_header().tag_count);
             const auto maximum_safe_tag_count = TAG_DATA_SAFE_REGION_SIZE / sizeof(Tag);
