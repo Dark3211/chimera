@@ -111,7 +111,7 @@ namespace Chimera {
         }
 
         static void reset_stats() noexcept {
-            std::memset(&stats, 0, sizeof(stats));
+            stats = {};
         }
 
         static void record_group(TransparentGeometryGroup *group) noexcept {
