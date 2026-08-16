@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+#include <cstddef>
+
 #include "effect_shader_fix.hpp"
 #include "../chimera.hpp"
 #include "../signature/hook.hpp"
@@ -17,7 +19,7 @@
 
 namespace Chimera {
 
-    #define RASTERIZER_TRANSPARENT_GEOMETRY_TEXCOORD_STREAM_SIZE 8192;
+    static constexpr std::size_t RASTERIZER_TRANSPARENT_GEOMETRY_TEXCOORD_STREAM_BYTES = 0x10000;
 
     extern "C" {
         void effect_shader_reindex_pixel_shader_asm() noexcept;
@@ -131,17 +133,39 @@ namespace Chimera {
     }
 
     void meme_up_the_aux_buffer() noexcept {
-        float *vertices = nullptr;
-        IDirect3DVertexBuffer9_Lock(*aux_buffer, 0, 0x10000, reinterpret_cast<void **>(&vertices), 0);
+        if(!aux_buffer || !*aux_buffer) {
+            return;
+        }
 
-        float sequence[] = { 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.0f };
-        int sequence_size = 8;
-        int count = RASTERIZER_TRANSPARENT_GEOMETRY_TEXCOORD_STREAM_SIZE;
+        void *locked_data = nullptr;
+        const HRESULT lock_result = IDirect3DVertexBuffer9_Lock(
+            *aux_buffer,
+            0,
+            static_cast<UINT>(RASTERIZER_TRANSPARENT_GEOMETRY_TEXCOORD_STREAM_BYTES),
+            &locked_data,
+            0
+        );
+        if(FAILED(lock_result) || !locked_data) {
+            return;
+        }
 
-        while (count > 0) {
-            memcpy(vertices, sequence, sizeof(sequence));
-            vertices += sequence_size;
-            count -= sequence_size;
+        static constexpr float sequence[] = {
+            0.0f, 0.0f,
+            0.0f, 1.0f,
+            1.0f, 1.0f,
+            1.0f, 0.0f
+        };
+        constexpr std::size_t sequence_bytes = sizeof(sequence);
+        auto *vertices = static_cast<std::byte *>(locked_data);
+
+        // Stream 1 uses an 8-byte stride (two floats per vertex). The previous
+        // loop only initialized 0x8000 bytes even though Halo/Chimera can index
+        // the full 0x10000-byte auxiliary stream, leaving the upper half as
+        // uninitialized zsprite corner data.
+        for(std::size_t offset = 0;
+            offset + sequence_bytes <= RASTERIZER_TRANSPARENT_GEOMETRY_TEXCOORD_STREAM_BYTES;
+            offset += sequence_bytes) {
+            memcpy(vertices + offset, sequence, sequence_bytes);
         }
 
         IDirect3DVertexBuffer9_Unlock(*aux_buffer);
