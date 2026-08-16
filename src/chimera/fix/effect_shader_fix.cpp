@@ -88,6 +88,10 @@ namespace Chimera {
     }
 
     extern "C" void set_up_zsprites(TransparentGeometryGroup *group) noexcept {
+        if(rasterizer_debug_options && !rasterizer_debug_options->zsprite_enabled) {
+            return;
+        }
+
         if(d3d9_device_caps->PixelShaderVersion < 0xffff0200) {
             return;
         }
