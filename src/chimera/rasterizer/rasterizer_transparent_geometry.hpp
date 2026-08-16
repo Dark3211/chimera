@@ -12,6 +12,11 @@ namespace Chimera {
     */
     short rasterizer_transparent_geometry_get_primary_vertex_type(TransparentGeometryGroup *group) noexcept;
 
+    /**
+    * Install temporary diagnostics for the environment transparent renderer path.
+    */
+    void set_up_environment_transparent_diagnostic() noexcept;
+
 }
 
 #endif
