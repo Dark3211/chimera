@@ -95,6 +95,11 @@ _set_psh_constant_for_alternate_bump_retail_asm:
     push ebx
     call _set_psh_constant_for_alternate_bump
     add esp, 8
+    pushfd
+    pushad
+    call _restore_environment_detail_af
+    popad
+    popfd
     ret
 
 .global _set_psh_constant_for_alternate_bump_custom_asm
@@ -103,6 +108,11 @@ _set_psh_constant_for_alternate_bump_custom_asm:
     push esi
     call _set_psh_constant_for_alternate_bump
     add esp, 8
+    pushfd
+    pushad
+    call _restore_environment_detail_af
+    popad
+    popfd
     ret
 
 .global _environment_texture_alternate_normal_custom_asm
@@ -110,6 +120,11 @@ _environment_texture_alternate_normal_custom_asm:
     push [esp + 0x30]
     call _set_psh_constants_for_alternate_normal
     add esp, 4
+    pushfd
+    pushad
+    call _apply_environment_detail_af
+    popad
+    popfd
     ret
 
 .global _environment_texture_alternate_normal_retail_asm
@@ -117,10 +132,20 @@ _environment_texture_alternate_normal_retail_asm:
     push [esp + 0x38]
     call _set_psh_constants_for_alternate_normal
     add esp, 4
+    pushfd
+    pushad
+    call _apply_environment_detail_af
+    popad
+    popfd
     ret
 
 .global _environment_reflection_mirror_set_constants_custom_asm
 _environment_reflection_mirror_set_constants_custom_asm:
+    pushfd
+    pushad
+    call _restore_environment_detail_af
+    popad
+    popfd
     push ecx
     push edi
     call _set_constants_for_reflection_mirror
@@ -129,6 +154,11 @@ _environment_reflection_mirror_set_constants_custom_asm:
 
 .global _environment_reflection_mirror_set_constants_retail_asm
 _environment_reflection_mirror_set_constants_retail_asm:
+    pushfd
+    pushad
+    call _restore_environment_detail_af
+    popad
+    popfd
     push esi
     push ebx
     call _set_constants_for_reflection_mirror
@@ -137,6 +167,11 @@ _environment_reflection_mirror_set_constants_retail_asm:
 
 .global _environment_reflection_set_constants_custom_asm
 _environment_reflection_set_constants_custom_asm:
+    pushfd
+    pushad
+    call _restore_environment_detail_af
+    popad
+    popfd
     push edx
     push esi
     call _set_constants_for_environment_reflection
@@ -145,6 +180,11 @@ _environment_reflection_set_constants_custom_asm:
 
 .global _environment_reflection_set_constants_retail_asm
 _environment_reflection_set_constants_retail_asm:
+    pushfd
+    pushad
+    call _restore_environment_detail_af
+    popad
+    popfd
     push esi
     push ebp
     call _set_constants_for_environment_reflection
