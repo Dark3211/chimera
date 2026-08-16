@@ -83,6 +83,8 @@ namespace Chimera {
             TagID id;
             ColorARGB reflection_view_perpendicular_color;
             ColorARGB reflection_view_parallel_color;
+            ColorRGB self_illumination_color_lower_bound;
+            ColorRGB self_illumination_color_upper_bound;
         };
 
         struct EmissiveQualitySnapshot {
@@ -213,6 +215,8 @@ namespace Chimera {
                 auto *shader = reinterpret_cast<ShaderModel *>(tag->data);
                 shader->model.reflection_view_perpendicular_color = snapshot.reflection_view_perpendicular_color;
                 shader->model.reflection_view_parallel_color = snapshot.reflection_view_parallel_color;
+                shader->model.self_illumination_animation_color_lower_bound = snapshot.self_illumination_color_lower_bound;
+                shader->model.self_illumination_animation_color_upper_bound = snapshot.self_illumination_color_upper_bound;
             }
 
             for(std::size_t i = 0; i < emissive_quality_snapshot_count; i++) {
@@ -346,17 +350,29 @@ namespace Chimera {
                 material_quality_models_scanned++;
 
                 auto *shader = reinterpret_cast<ShaderModel *>(tag->data);
-                if(shader->model.reflection_map.tag_id.is_null()) {
-                    continue;
-                }
+                const bool has_reflection = !shader->model.reflection_map.tag_id.is_null();
 
                 const auto old_perpendicular = shader->model.reflection_view_perpendicular_color;
                 const auto old_parallel = shader->model.reflection_view_parallel_color;
-                const auto new_perpendicular = scale_model_reflection_color(old_perpendicular, profile.model_reflection_perpendicular_scale);
-                const auto new_parallel = scale_model_reflection_color(old_parallel, profile.model_reflection_parallel_scale);
+                const auto new_perpendicular = has_reflection
+                    ? scale_model_reflection_color(old_perpendicular, profile.model_reflection_perpendicular_scale)
+                    : old_perpendicular;
+                const auto new_parallel = has_reflection
+                    ? scale_model_reflection_color(old_parallel, profile.model_reflection_parallel_scale)
+                    : old_parallel;
+                const bool reflection_changed = has_reflection &&
+                    (model_reflection_color_changed(old_perpendicular, new_perpendicular) ||
+                     model_reflection_color_changed(old_parallel, new_parallel));
 
-                if(!model_reflection_color_changed(old_perpendicular, new_perpendicular) &&
-                   !model_reflection_color_changed(old_parallel, new_parallel)) {
+                const auto old_emissive_lower = shader->model.self_illumination_animation_color_lower_bound;
+                const auto old_emissive_upper = shader->model.self_illumination_animation_color_upper_bound;
+                const auto new_emissive_lower = scale_emissive_color(old_emissive_lower, profile);
+                const auto new_emissive_upper = scale_emissive_color(old_emissive_upper, profile);
+                const bool emissive_changed =
+                    emissive_color_changed(old_emissive_lower, new_emissive_lower) ||
+                    emissive_color_changed(old_emissive_upper, new_emissive_upper);
+
+                if(!reflection_changed && !emissive_changed) {
                     continue;
                 }
 
@@ -367,12 +383,20 @@ namespace Chimera {
                 model_material_quality_snapshots[model_material_quality_snapshot_count++] = ModelMaterialQualitySnapshot {
                     tag->id,
                     old_perpendicular,
-                    old_parallel
+                    old_parallel,
+                    old_emissive_lower,
+                    old_emissive_upper
                 };
 
                 material_quality_models_modified++;
-                shader->model.reflection_view_perpendicular_color = new_perpendicular;
-                shader->model.reflection_view_parallel_color = new_parallel;
+                if(reflection_changed) {
+                    shader->model.reflection_view_perpendicular_color = new_perpendicular;
+                    shader->model.reflection_view_parallel_color = new_parallel;
+                }
+                if(emissive_changed) {
+                    shader->model.self_illumination_animation_color_lower_bound = new_emissive_lower;
+                    shader->model.self_illumination_animation_color_upper_bound = new_emissive_upper;
+                }
             }
         }
 
