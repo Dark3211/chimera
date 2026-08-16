@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 #include <cctype>
+#include <cstdint>
 #include <cstring>
 
 #include "rasterizer.hpp"
 #include "../chimera.hpp"
 #include "../signature/hook.hpp"
 #include "../halo_data/game_variables.hpp"
+#include "../halo_data/shader_defs.hpp"
 #include "../halo_data/shaders/shader_blob.hpp"
 #include "../output/error_box.hpp"
 #include "../output/output.hpp"
@@ -22,64 +24,219 @@ namespace Chimera {
 
     IDirect3DPixelShader9 *chimera_pixel_shaders[NUMBER_OF_CHIMERA_PIXEL_SHADERS] = { nullptr };
 
+    extern "C" void *rasterizer_transparent_geometry_group_draw_func;
+
     namespace {
-        enum class DynamicGeometryDiagnosticMode {
+        enum class EnvironmentTransparentDiagnosticMode {
             NORMAL,
-            UNLIT,
-            LIT,
-            SCREEN
+            ENGINE_OFF,
+            ALL_CANDIDATES,
+            SHADER_TYPE
         };
 
-        struct DynamicGeometryDiagnosticSnapshot {
-            bool draw_dynamic_unlit_geometry;
-            bool draw_dynamic_lit_geometry;
-            bool draw_dynamic_screen_geometry;
-        };
+        static EnvironmentTransparentDiagnosticMode environment_transparent_diagnostic_mode = EnvironmentTransparentDiagnosticMode::NORMAL;
+        static short environment_transparent_skipped_shader_type = -1;
 
-        static DynamicGeometryDiagnosticMode dynamic_geometry_diagnostic_mode = DynamicGeometryDiagnosticMode::NORMAL;
-        static DynamicGeometryDiagnosticSnapshot dynamic_geometry_diagnostic_snapshot = {};
-        static bool dynamic_geometry_diagnostic_snapshot_valid = false;
+        static Hook environment_transparent_group_draw_hook;
+        static const void *environment_transparent_group_draw_original = nullptr;
 
-        static const char *dynamic_geometry_diagnostic_mode_name(DynamicGeometryDiagnosticMode mode) noexcept {
-            switch(mode) {
-                case DynamicGeometryDiagnosticMode::UNLIT:
-                    return "unlit";
-                case DynamicGeometryDiagnosticMode::LIT:
-                    return "lit";
-                case DynamicGeometryDiagnosticMode::SCREEN:
+        static bool environment_transparent_engine_flag_snapshot_valid = false;
+        static bool environment_transparent_engine_flag_snapshot = true;
+
+        static std::uint64_t environment_transparent_candidate_count = 0;
+        static std::uint64_t environment_transparent_shader_counts[NUMBER_OF_SHADER_TYPES] = {};
+        static std::uint64_t environment_transparent_other_shader_count = 0;
+
+        static const char *shader_type_name(short shader_type) noexcept {
+            switch(shader_type) {
+                case SHADER_TYPE_SCREEN:
                     return "screen";
+                case SHADER_TYPE_EFFECT:
+                    return "effect";
+                case SHADER_TYPE_DECAL:
+                    return "decal";
+                case SHADER_TYPE_ENVIRONMENT:
+                    return "environment";
+                case SHADER_TYPE_MODEL:
+                    return "model";
+                case SHADER_TYPE_TRANSPARENT_GENERIC:
+                    return "generic";
+                case SHADER_TYPE_TRANSPARENT_CHICAGO:
+                    return "chicago";
+                case SHADER_TYPE_TRANSPARENT_CHICAGO_EXTENDED:
+                    return "chicago_extended";
+                case SHADER_TYPE_TRANSPARENT_WATER:
+                    return "water";
+                case SHADER_TYPE_TRANSPARENT_GLASS:
+                    return "glass";
+                case SHADER_TYPE_TRANSPARENT_METER:
+                    return "meter";
+                case SHADER_TYPE_TRANSPARENT_PLASMA:
+                    return "plasma";
+                default:
+                    return "other";
+            }
+        }
+
+        static bool shader_type_from_name(const char *name, std::size_t length, short &shader_type) noexcept {
+            if(!name) {
+                return false;
+            }
+
+            auto matches = [&](const char *value) noexcept {
+                return std::strlen(value) == length && std::strncmp(name, value, length) == 0;
+            };
+
+            if(matches("screen")) {
+                shader_type = SHADER_TYPE_SCREEN;
+            }
+            else if(matches("effect")) {
+                shader_type = SHADER_TYPE_EFFECT;
+            }
+            else if(matches("decal")) {
+                shader_type = SHADER_TYPE_DECAL;
+            }
+            else if(matches("environment")) {
+                shader_type = SHADER_TYPE_ENVIRONMENT;
+            }
+            else if(matches("model")) {
+                shader_type = SHADER_TYPE_MODEL;
+            }
+            else if(matches("generic")) {
+                shader_type = SHADER_TYPE_TRANSPARENT_GENERIC;
+            }
+            else if(matches("chicago")) {
+                shader_type = SHADER_TYPE_TRANSPARENT_CHICAGO;
+            }
+            else if(matches("chicago_extended")) {
+                shader_type = SHADER_TYPE_TRANSPARENT_CHICAGO_EXTENDED;
+            }
+            else if(matches("water")) {
+                shader_type = SHADER_TYPE_TRANSPARENT_WATER;
+            }
+            else if(matches("glass")) {
+                shader_type = SHADER_TYPE_TRANSPARENT_GLASS;
+            }
+            else if(matches("meter")) {
+                shader_type = SHADER_TYPE_TRANSPARENT_METER;
+            }
+            else if(matches("plasma")) {
+                shader_type = SHADER_TYPE_TRANSPARENT_PLASMA;
+            }
+            else if(matches("other")) {
+                shader_type = NUMBER_OF_SHADER_TYPES;
+            }
+            else {
+                return false;
+            }
+
+            return true;
+        }
+
+        static bool is_environment_transparent_candidate(const TransparentGeometryGroup *group) noexcept {
+            if(!group || !group->shader) {
+                return false;
+            }
+
+            // BSP/environment transparent geometry has no owning object and normally uses
+            // static vertex buffers. Keep the diagnostic deliberately narrow so effects,
+            // models, HUD geometry, and other transparent paths are not suppressed.
+            return group->object_index.is_null()
+                && group->source_object_index.is_null()
+                && group->dynamic_vertex_buffer_index == -1
+                && group->vertex_buffers != nullptr;
+        }
+
+        static short get_group_shader_type(const TransparentGeometryGroup *group) noexcept {
+            if(!group || !group->shader) {
+                return -1;
+            }
+
+            return reinterpret_cast<const _shader *>(group->shader)->type;
+        }
+
+        static void reset_environment_transparent_stats() noexcept {
+            environment_transparent_candidate_count = 0;
+            std::memset(environment_transparent_shader_counts, 0, sizeof(environment_transparent_shader_counts));
+            environment_transparent_other_shader_count = 0;
+        }
+
+        static void restore_environment_transparent_engine_flag() noexcept {
+            if(environment_transparent_engine_flag_snapshot_valid && rasterizer_debug_options) {
+                rasterizer_debug_options->draw_environment_transparent_geometry = environment_transparent_engine_flag_snapshot;
+            }
+            environment_transparent_engine_flag_snapshot_valid = false;
+        }
+
+        static const char *environment_transparent_mode_name() noexcept {
+            switch(environment_transparent_diagnostic_mode) {
+                case EnvironmentTransparentDiagnosticMode::ENGINE_OFF:
+                    return "engine_off";
+                case EnvironmentTransparentDiagnosticMode::ALL_CANDIDATES:
+                    return "all";
+                case EnvironmentTransparentDiagnosticMode::SHADER_TYPE:
+                    return shader_type_name(environment_transparent_skipped_shader_type);
                 default:
                     return "normal";
             }
         }
 
-        static void capture_dynamic_geometry_diagnostic_snapshot() noexcept {
-            if(dynamic_geometry_diagnostic_snapshot_valid || !rasterizer_debug_options) {
+        static void print_environment_transparent_stats() noexcept {
+            console_output("chimera_debug_environment_transparent: %s", environment_transparent_mode_name());
+            console_output("candidate_groups=%llu other=%llu",
+                static_cast<unsigned long long>(environment_transparent_candidate_count),
+                static_cast<unsigned long long>(environment_transparent_other_shader_count));
+
+            for(short shader_type = 0; shader_type < NUMBER_OF_SHADER_TYPES; shader_type++) {
+                if(environment_transparent_shader_counts[shader_type] != 0) {
+                    console_output("%s=%llu",
+                        shader_type_name(shader_type),
+                        static_cast<unsigned long long>(environment_transparent_shader_counts[shader_type]));
+                }
+            }
+        }
+
+        static void environment_transparent_group_draw_diagnostic(TransparentGeometryGroup *group, bool is_dirty) noexcept {
+            using GroupDrawFunction = void (*)(TransparentGeometryGroup *, bool);
+            auto original = reinterpret_cast<GroupDrawFunction>(const_cast<void *>(environment_transparent_group_draw_original));
+            if(!original) {
                 return;
             }
 
-            dynamic_geometry_diagnostic_snapshot.draw_dynamic_unlit_geometry = rasterizer_debug_options->draw_dynamic_unlit_geometry;
-            dynamic_geometry_diagnostic_snapshot.draw_dynamic_lit_geometry = rasterizer_debug_options->draw_dynamic_lit_geometry;
-            dynamic_geometry_diagnostic_snapshot.draw_dynamic_screen_geometry = rasterizer_debug_options->draw_dynamic_screen_geometry;
-            dynamic_geometry_diagnostic_snapshot_valid = true;
-        }
+            if(is_environment_transparent_candidate(group)) {
+                environment_transparent_candidate_count++;
 
-        static void restore_dynamic_geometry_diagnostic_snapshot() noexcept {
-            if(!dynamic_geometry_diagnostic_snapshot_valid || !rasterizer_debug_options) {
-                return;
+                short shader_type = get_group_shader_type(group);
+                if(shader_type >= 0 && shader_type < NUMBER_OF_SHADER_TYPES) {
+                    environment_transparent_shader_counts[shader_type]++;
+                }
+                else {
+                    environment_transparent_other_shader_count++;
+                }
+
+                if(environment_transparent_diagnostic_mode == EnvironmentTransparentDiagnosticMode::ALL_CANDIDATES) {
+                    return;
+                }
+
+                if(environment_transparent_diagnostic_mode == EnvironmentTransparentDiagnosticMode::SHADER_TYPE) {
+                    const bool shader_matches = shader_type == environment_transparent_skipped_shader_type;
+                    const bool other_matches = environment_transparent_skipped_shader_type == NUMBER_OF_SHADER_TYPES
+                        && (shader_type < 0 || shader_type >= NUMBER_OF_SHADER_TYPES);
+                    if(shader_matches || other_matches) {
+                        return;
+                    }
+                }
             }
 
-            rasterizer_debug_options->draw_dynamic_unlit_geometry = dynamic_geometry_diagnostic_snapshot.draw_dynamic_unlit_geometry;
-            rasterizer_debug_options->draw_dynamic_lit_geometry = dynamic_geometry_diagnostic_snapshot.draw_dynamic_lit_geometry;
-            rasterizer_debug_options->draw_dynamic_screen_geometry = dynamic_geometry_diagnostic_snapshot.draw_dynamic_screen_geometry;
+            original(group, is_dirty);
         }
 
-        static bool dynamic_geometry_diagnostic_command(const char *command) noexcept {
+        static bool environment_transparent_diagnostic_command(const char *command) noexcept {
             if(!command) {
                 return true;
             }
 
-            static constexpr char command_name[] = "chimera_debug_dynamic_geometry";
+            static constexpr char command_name[] = "chimera_debug_environment_transparent";
             static constexpr std::size_t command_name_length = sizeof(command_name) - 1;
 
             if(std::strncmp(command, command_name, command_name_length) != 0) {
@@ -95,9 +252,9 @@ namespace Chimera {
                 argument++;
             }
 
-            if(*argument == '\0') {
-                console_output("chimera_debug_dynamic_geometry: %s", dynamic_geometry_diagnostic_mode_name(dynamic_geometry_diagnostic_mode));
-                console_output("modes: normal unlit lit screen");
+            if(*argument == '\0' || std::strcmp(argument, "stats") == 0) {
+                print_environment_transparent_stats();
+                console_output("modes: normal engine_off all screen effect decal environment model generic chicago chicago_extended water glass meter plasma other reset");
                 return false;
             }
 
@@ -112,7 +269,7 @@ namespace Chimera {
             }
 
             if(*argument_end != '\0') {
-                console_error("chimera_debug_dynamic_geometry: expected one mode");
+                console_error("chimera_debug_environment_transparent: expected one mode");
                 return false;
             }
 
@@ -120,51 +277,71 @@ namespace Chimera {
                 return std::strlen(value) == argument_length && std::strncmp(argument, value, argument_length) == 0;
             };
 
-            DynamicGeometryDiagnosticMode new_mode;
+            if(matches("reset")) {
+                reset_environment_transparent_stats();
+                console_output("chimera_debug_environment_transparent: counters reset");
+                return false;
+            }
+
+            restore_environment_transparent_engine_flag();
+            environment_transparent_skipped_shader_type = -1;
+
             if(matches("normal")) {
-                new_mode = DynamicGeometryDiagnosticMode::NORMAL;
+                environment_transparent_diagnostic_mode = EnvironmentTransparentDiagnosticMode::NORMAL;
             }
-            else if(matches("unlit")) {
-                new_mode = DynamicGeometryDiagnosticMode::UNLIT;
+            else if(matches("engine_off")) {
+                if(!rasterizer_debug_options) {
+                    console_error("chimera_debug_environment_transparent: rasterizer debug options unavailable");
+                    environment_transparent_diagnostic_mode = EnvironmentTransparentDiagnosticMode::NORMAL;
+                    return false;
+                }
+
+                environment_transparent_engine_flag_snapshot = rasterizer_debug_options->draw_environment_transparent_geometry;
+                environment_transparent_engine_flag_snapshot_valid = true;
+                rasterizer_debug_options->draw_environment_transparent_geometry = false;
+                environment_transparent_diagnostic_mode = EnvironmentTransparentDiagnosticMode::ENGINE_OFF;
             }
-            else if(matches("lit")) {
-                new_mode = DynamicGeometryDiagnosticMode::LIT;
-            }
-            else if(matches("screen")) {
-                new_mode = DynamicGeometryDiagnosticMode::SCREEN;
+            else if(matches("all")) {
+                environment_transparent_diagnostic_mode = EnvironmentTransparentDiagnosticMode::ALL_CANDIDATES;
             }
             else {
-                console_error("chimera_debug_dynamic_geometry: unknown mode");
-                console_output("modes: normal unlit lit screen");
-                return false;
+                short shader_type = -1;
+                if(!shader_type_from_name(argument, argument_length, shader_type)) {
+                    console_error("chimera_debug_environment_transparent: unknown mode");
+                    console_output("modes: normal engine_off all screen effect decal environment model generic chicago chicago_extended water glass meter plasma other reset");
+                    environment_transparent_diagnostic_mode = EnvironmentTransparentDiagnosticMode::NORMAL;
+                    return false;
+                }
+
+                environment_transparent_skipped_shader_type = shader_type;
+                environment_transparent_diagnostic_mode = EnvironmentTransparentDiagnosticMode::SHADER_TYPE;
             }
 
-            if(!rasterizer_debug_options) {
-                console_error("chimera_debug_dynamic_geometry: rasterizer debug options unavailable");
-                return false;
-            }
-
-            capture_dynamic_geometry_diagnostic_snapshot();
-            restore_dynamic_geometry_diagnostic_snapshot();
-
-            switch(new_mode) {
-                case DynamicGeometryDiagnosticMode::UNLIT:
-                    rasterizer_debug_options->draw_dynamic_unlit_geometry = false;
-                    break;
-                case DynamicGeometryDiagnosticMode::LIT:
-                    rasterizer_debug_options->draw_dynamic_lit_geometry = false;
-                    break;
-                case DynamicGeometryDiagnosticMode::SCREEN:
-                    rasterizer_debug_options->draw_dynamic_screen_geometry = false;
-                    break;
-                default:
-                    dynamic_geometry_diagnostic_snapshot_valid = false;
-                    break;
-            }
-
-            dynamic_geometry_diagnostic_mode = new_mode;
-            console_output("chimera_debug_dynamic_geometry: %s", dynamic_geometry_diagnostic_mode_name(dynamic_geometry_diagnostic_mode));
+            reset_environment_transparent_stats();
+            console_output("chimera_debug_environment_transparent: %s", environment_transparent_mode_name());
             return false;
+        }
+
+        static void set_up_environment_transparent_diagnostic() noexcept {
+            auto *target = get_chimera().get_signature("transparent_geometry_group_draw_sig").data();
+            if(!target) {
+                console_error("chimera_debug_environment_transparent: group draw signature unavailable");
+                return;
+            }
+
+            write_function_override(
+                target,
+                environment_transparent_group_draw_hook,
+                reinterpret_cast<const void *>(environment_transparent_group_draw_diagnostic),
+                &environment_transparent_group_draw_original
+            );
+
+            // set_up_function_hooks() runs before set_up_rasterizer(). Point Chimera's
+            // assembly thunk at the trampoline so Chimera-internal calls do not recurse
+            // back through this diagnostic override.
+            if(environment_transparent_group_draw_original) {
+                rasterizer_transparent_geometry_group_draw_func = const_cast<void *>(environment_transparent_group_draw_original);
+            }
         }
     }
 
@@ -245,7 +422,8 @@ namespace Chimera {
     void set_up_rasterizer() noexcept {
         global_d3d9_device = reinterpret_cast<IDirect3DDevice9 **>(*reinterpret_cast<std::byte **>(get_chimera().get_signature("model_af_set_sampler_states_sig").data() + 1));
         d3d9_device_caps = reinterpret_cast<D3DCAPS9 *>(*reinterpret_cast<std::byte **>(get_chimera().get_signature("d3d9_device_caps_sig").data() + 1));
-        add_command_event(dynamic_geometry_diagnostic_command, EVENT_PRIORITY_BEFORE);
+        add_command_event(environment_transparent_diagnostic_command, EVENT_PRIORITY_BEFORE);
+        set_up_environment_transparent_diagnostic();
         add_game_exit_event(rasterizer_release_vertex_shaders_3_0);
         add_game_exit_event(rasterizer_release_pixel_shaders);
         add_game_start_event(rasterizer_create_pixel_shaders);
