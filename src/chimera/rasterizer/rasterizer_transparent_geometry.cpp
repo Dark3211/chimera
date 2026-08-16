@@ -12,7 +12,6 @@
 #include "../output/output.hpp"
 #include "../event/command.hpp"
 
-
 namespace Chimera {
 
     extern DynamicVertices *dynamic_vertices;
@@ -34,11 +33,14 @@ namespace Chimera {
         );
         using IndexBufferUnlockFunction = HRESULT (STDMETHODCALLTYPE *)(IDirect3DIndexBuffer9 *);
 
+        enum class WrapDiagnosticMode {
+            OBSERVE,
+            DISCARD_ZERO,
+            DISCARD_BACKWARD
+        };
+
         struct SuspectGroupContext {
             bool active = false;
-            long dynamic_triangle_buffer_index = -1;
-            long first_triangle_index = 0;
-            long triangle_count = 0;
         };
 
         struct DeviceVtableHook {
@@ -63,84 +65,62 @@ namespace Chimera {
             long outstanding_locks = 0;
             long max_outstanding_locks = 0;
 
-            bool last_draw_range_valid = false;
-            std::uint64_t last_draw_byte_start = 0;
-            std::uint64_t last_draw_byte_end = 0;
-            std::int64_t last_draw_frame = -1;
-
-            bool last_lock_range_valid = false;
-            std::uint64_t last_lock_byte_start = 0;
-            std::uint64_t last_lock_byte_end = 0;
-            std::int64_t last_lock_frame = -1;
-            DWORD last_lock_flags = 0;
+            bool previous_lock_valid = false;
+            UINT previous_lock_offset = 0;
+            UINT previous_lock_size = 0;
+            std::uint64_t previous_lock_end = 0;
+            std::int64_t previous_lock_frame = -1;
         };
 
-        struct ChicagoIndexStats {
+        struct WrapStats {
             std::uint64_t group_draw_calls = 0;
             std::uint64_t suspect_group_calls = 0;
-            std::uint64_t suspect_groups_without_dip = 0;
-            std::uint64_t suspect_groups_multiple_dips = 0;
+            std::uint64_t suspect_dip_calls = 0;
 
             std::uint64_t device_hook_failures = 0;
             std::uint64_t device_vtable_overflow = 0;
-            std::uint64_t index_vtable_hook_failures = 0;
+            std::uint64_t index_hook_failures = 0;
             std::uint64_t index_vtable_overflow = 0;
-
-            std::uint64_t suspect_dip_calls = 0;
-            std::uint64_t triangle_list_dip_calls = 0;
-            std::uint64_t other_primitive_dip_calls = 0;
-            std::uint64_t get_indices_failures = 0;
-            std::uint64_t no_bound_index_buffer = 0;
             std::uint64_t target_overflow = 0;
             std::uint64_t target_desc_failures = 0;
+            std::uint64_t get_indices_failures = 0;
+            std::uint64_t no_bound_index_buffer = 0;
             std::uint64_t bound_index_buffer_changes = 0;
-            std::uint64_t draw_with_outstanding_lock = 0;
-
-            std::uint64_t start_matches_first_triangle = 0;
-            std::uint64_t start_matches_first_triangle_x3 = 0;
-            std::uint64_t start_matches_neither = 0;
-            std::uint64_t primitive_count_matches = 0;
-            std::uint64_t primitive_count_mismatches = 0;
-            std::uint64_t draw_range_out_of_bounds = 0;
-            std::uint64_t draw_range_unknown = 0;
-
-            bool dip_range_initialized = false;
-            INT min_base_vertex = 0;
-            INT max_base_vertex = 0;
-            UINT min_start_index = 0;
-            UINT max_start_index = 0;
-            UINT min_primitive_count = 0;
-            UINT max_primitive_count = 0;
-            UINT min_num_vertices = 0;
-            UINT max_num_vertices = 0;
 
             std::uint64_t target_lock_calls = 0;
             std::uint64_t target_unlock_calls = 0;
             std::uint64_t lock_failures = 0;
             std::uint64_t unlock_failures = 0;
+            std::uint64_t unlock_without_lock = 0;
+            std::uint64_t draw_with_outstanding_lock = 0;
+
             std::uint64_t discard_locks = 0;
             std::uint64_t nooverwrite_locks = 0;
-            std::uint64_t discard_and_nooverwrite_locks = 0;
-            std::uint64_t neither_streaming_flag_locks = 0;
-            std::uint64_t readonly_locks = 0;
-            std::uint64_t whole_buffer_locks = 0;
-            std::uint64_t zero_size_nonzero_offset_locks = 0;
-            std::uint64_t lock_range_out_of_bounds = 0;
-            std::uint64_t lock_range_unknown = 0;
-            std::uint64_t lock_overlaps_last_draw_same_frame = 0;
-            std::uint64_t nooverwrite_overlaps_last_draw_same_frame = 0;
-            std::uint64_t discard_overlaps_last_draw_same_frame = 0;
-            std::uint64_t unlock_without_lock = 0;
+            std::uint64_t neither_locks = 0;
+            std::uint64_t both_locks = 0;
 
-            bool lock_range_initialized = false;
-            UINT min_lock_offset = 0;
-            UINT max_lock_offset = 0;
-            UINT min_lock_size = 0;
-            UINT max_lock_size = 0;
-            std::uint64_t max_lock_end = 0;
+            std::uint64_t zero_offset_locks = 0;
+            std::uint64_t zero_offset_after_previous = 0;
+            std::uint64_t backward_locks = 0;
+            std::uint64_t same_frame_backward_locks = 0;
+            std::uint64_t forward_gap_locks = 0;
+            std::uint64_t contiguous_locks = 0;
+            std::uint64_t overlapping_previous_lock = 0;
+            std::uint64_t range_out_of_bounds = 0;
+
+            std::uint64_t forced_discard_zero = 0;
+            std::uint64_t forced_discard_backward = 0;
+
+            bool lock_span_initialized = false;
+            UINT min_offset = 0;
+            UINT max_offset = 0;
+            UINT min_size = 0;
+            UINT max_size = 0;
+            std::uint64_t max_end = 0;
         };
 
-        static ChicagoIndexStats stats = {};
+        static WrapDiagnosticMode diagnostic_mode = WrapDiagnosticMode::OBSERVE;
+        static WrapStats stats = {};
         static SuspectGroupContext suspect_context = {};
         static TargetIndexBuffer target_index_buffers[MAX_TARGET_INDEX_BUFFERS] = {};
         static std::size_t target_index_buffer_count = 0;
@@ -158,30 +138,24 @@ namespace Chimera {
             return rasterizer_globals ? rasterizer_globals->frame_index : -1;
         }
 
-        static bool ranges_overlap(std::uint64_t a_start, std::uint64_t a_end,
-                                   std::uint64_t b_start, std::uint64_t b_end) noexcept {
-            return a_start < b_end && b_start < a_end;
-        }
-
-        static UINT index_element_size(D3DFORMAT format) noexcept {
-            if(format == D3DFMT_INDEX16) {
-                return 2;
+        static const char *mode_name() noexcept {
+            switch(diagnostic_mode) {
+                case WrapDiagnosticMode::DISCARD_ZERO:
+                    return "discard_zero";
+                case WrapDiagnosticMode::DISCARD_BACKWARD:
+                    return "discard_backward";
+                default:
+                    return "observe";
             }
-            if(format == D3DFMT_INDEX32) {
-                return 4;
-            }
-            return 0;
         }
 
         static bool is_suspect_chicago_group(TransparentGeometryGroup *group) noexcept {
             if(!group || group->dynamic_triangle_buffer_index == -1 || !group->shader) {
                 return false;
             }
-
             if(reinterpret_cast<_shader *>(group->shader)->type != SHADER_TYPE_TRANSPARENT_CHICAGO) {
                 return false;
             }
-
             return rasterizer_transparent_geometry_get_primary_vertex_type(group)
                 == RASTERIZER_VERTEX_TYPE_ENVIRONMENT_UNCOMPRESSED;
         }
@@ -251,7 +225,6 @@ namespace Chimera {
             if(find_device_vtable_hook(device)) {
                 return true;
             }
-
             if(device_vtable_hook_count >= MAX_DEVICE_VTABLE_HOOKS) {
                 stats.device_vtable_overflow++;
                 return false;
@@ -298,23 +271,22 @@ namespace Chimera {
 
             auto **vtable = *reinterpret_cast<void ***>(buffer);
             if(!vtable) {
-                stats.index_vtable_hook_failures++;
+                stats.index_hook_failures++;
                 return false;
             }
 
             auto original_lock = reinterpret_cast<IndexBufferLockFunction>(vtable[INDEX_BUFFER_LOCK_VTABLE_INDEX]);
             auto original_unlock = reinterpret_cast<IndexBufferUnlockFunction>(vtable[INDEX_BUFFER_UNLOCK_VTABLE_INDEX]);
             if(!original_lock || !original_unlock) {
-                stats.index_vtable_hook_failures++;
+                stats.index_hook_failures++;
                 return false;
             }
 
             void *lock_replacement = reinterpret_cast<void *>(index_buffer_lock_diagnostic);
             void *unlock_replacement = reinterpret_cast<void *>(index_buffer_unlock_diagnostic);
-
             overwrite(&vtable[INDEX_BUFFER_LOCK_VTABLE_INDEX], lock_replacement);
             if(vtable[INDEX_BUFFER_LOCK_VTABLE_INDEX] != lock_replacement) {
-                stats.index_vtable_hook_failures++;
+                stats.index_hook_failures++;
                 return false;
             }
 
@@ -322,7 +294,7 @@ namespace Chimera {
             if(vtable[INDEX_BUFFER_UNLOCK_VTABLE_INDEX] != unlock_replacement) {
                 void *restore_lock = reinterpret_cast<void *>(original_lock);
                 overwrite(&vtable[INDEX_BUFFER_LOCK_VTABLE_INDEX], restore_lock);
-                stats.index_vtable_hook_failures++;
+                stats.index_hook_failures++;
                 return false;
             }
 
@@ -353,66 +325,25 @@ namespace Chimera {
                 target.desc_valid = true;
             }
 
-            if(!ensure_index_buffer_hooks(buffer)) {
-                stats.index_vtable_hook_failures++;
-            }
-
+            ensure_index_buffer_hooks(buffer);
             return &target;
         }
 
-        static void update_dip_ranges(INT base_vertex_index, UINT start_index,
-                                      UINT primitive_count, UINT num_vertices) noexcept {
-            if(!stats.dip_range_initialized) {
-                stats.dip_range_initialized = true;
-                stats.min_base_vertex = base_vertex_index;
-                stats.max_base_vertex = base_vertex_index;
-                stats.min_start_index = start_index;
-                stats.max_start_index = start_index;
-                stats.min_primitive_count = primitive_count;
-                stats.max_primitive_count = primitive_count;
-                stats.min_num_vertices = num_vertices;
-                stats.max_num_vertices = num_vertices;
+        static void update_lock_span(UINT offset, UINT size, std::uint64_t end) noexcept {
+            if(!stats.lock_span_initialized) {
+                stats.lock_span_initialized = true;
+                stats.min_offset = offset;
+                stats.max_offset = offset;
+                stats.min_size = size;
+                stats.max_size = size;
+                stats.max_end = end;
                 return;
             }
-
-            if(base_vertex_index < stats.min_base_vertex) stats.min_base_vertex = base_vertex_index;
-            if(base_vertex_index > stats.max_base_vertex) stats.max_base_vertex = base_vertex_index;
-            if(start_index < stats.min_start_index) stats.min_start_index = start_index;
-            if(start_index > stats.max_start_index) stats.max_start_index = start_index;
-            if(primitive_count < stats.min_primitive_count) stats.min_primitive_count = primitive_count;
-            if(primitive_count > stats.max_primitive_count) stats.max_primitive_count = primitive_count;
-            if(num_vertices < stats.min_num_vertices) stats.min_num_vertices = num_vertices;
-            if(num_vertices > stats.max_num_vertices) stats.max_num_vertices = num_vertices;
-        }
-
-        static void record_draw_range(TargetIndexBuffer &target, D3DPRIMITIVETYPE primitive_type,
-                                      UINT start_index, UINT primitive_count) noexcept {
-            target.last_draw_range_valid = false;
-            target.last_draw_frame = current_frame_index();
-
-            if(!target.desc_valid || primitive_type != D3DPT_TRIANGLELIST) {
-                stats.draw_range_unknown++;
-                return;
-            }
-
-            const UINT element_size = index_element_size(target.desc.Format);
-            if(element_size == 0) {
-                stats.draw_range_unknown++;
-                return;
-            }
-
-            const std::uint64_t index_start = start_index;
-            const std::uint64_t index_end = index_start + static_cast<std::uint64_t>(primitive_count) * 3ULL;
-            const std::uint64_t byte_start = index_start * element_size;
-            const std::uint64_t byte_end = index_end * element_size;
-
-            target.last_draw_byte_start = byte_start;
-            target.last_draw_byte_end = byte_end;
-            target.last_draw_range_valid = true;
-
-            if(byte_end > target.desc.Size) {
-                stats.draw_range_out_of_bounds++;
-            }
+            if(offset < stats.min_offset) stats.min_offset = offset;
+            if(offset > stats.max_offset) stats.max_offset = offset;
+            if(size < stats.min_size) stats.min_size = size;
+            if(size > stats.max_size) stats.max_size = size;
+            if(end > stats.max_end) stats.max_end = end;
         }
 
         static HRESULT STDMETHODCALLTYPE draw_indexed_primitive_diagnostic(
@@ -431,38 +362,6 @@ namespace Chimera {
 
             if(suspect_context.active) {
                 stats.suspect_dip_calls++;
-                update_dip_ranges(base_vertex_index, start_index, primitive_count, num_vertices);
-
-                if(primitive_type == D3DPT_TRIANGLELIST) {
-                    stats.triangle_list_dip_calls++;
-                }
-                else {
-                    stats.other_primitive_dip_calls++;
-                }
-
-                if(suspect_context.first_triangle_index >= 0) {
-                    const std::uint64_t first = static_cast<std::uint64_t>(suspect_context.first_triangle_index);
-                    if(start_index == first) {
-                        stats.start_matches_first_triangle++;
-                    }
-                    else if(start_index == first * 3ULL) {
-                        stats.start_matches_first_triangle_x3++;
-                    }
-                    else {
-                        stats.start_matches_neither++;
-                    }
-                }
-                else {
-                    stats.start_matches_neither++;
-                }
-
-                if(suspect_context.triangle_count >= 0
-                    && primitive_count == static_cast<UINT>(suspect_context.triangle_count)) {
-                    stats.primitive_count_matches++;
-                }
-                else {
-                    stats.primitive_count_mismatches++;
-                }
 
                 IDirect3DIndexBuffer9 *bound_buffer = nullptr;
                 const HRESULT get_indices_result = device->GetIndices(&bound_buffer);
@@ -483,9 +382,7 @@ namespace Chimera {
                         if(target->outstanding_locks > 0) {
                             stats.draw_with_outstanding_lock++;
                         }
-                        record_draw_range(*target, primitive_type, start_index, primitive_count);
                     }
-
                     bound_buffer->Release();
                 }
             }
@@ -499,24 +396,6 @@ namespace Chimera {
                 start_index,
                 primitive_count
             );
-        }
-
-        static void update_lock_range_stats(UINT offset, UINT size, std::uint64_t end) noexcept {
-            if(!stats.lock_range_initialized) {
-                stats.lock_range_initialized = true;
-                stats.min_lock_offset = offset;
-                stats.max_lock_offset = offset;
-                stats.min_lock_size = size;
-                stats.max_lock_size = size;
-                stats.max_lock_end = end;
-                return;
-            }
-
-            if(offset < stats.min_lock_offset) stats.min_lock_offset = offset;
-            if(offset > stats.max_lock_offset) stats.max_lock_offset = offset;
-            if(size < stats.min_lock_size) stats.min_lock_size = size;
-            if(size > stats.max_lock_size) stats.max_lock_size = size;
-            if(end > stats.max_lock_end) stats.max_lock_end = end;
         }
 
         static HRESULT STDMETHODCALLTYPE index_buffer_lock_diagnostic(
@@ -539,56 +418,74 @@ namespace Chimera {
             stats.target_lock_calls++;
             target->locks++;
 
-            const bool discard = (flags & D3DLOCK_DISCARD) != 0;
-            const bool nooverwrite = (flags & D3DLOCK_NOOVERWRITE) != 0;
-            if(discard) stats.discard_locks++;
-            if(nooverwrite) stats.nooverwrite_locks++;
-            if(discard && nooverwrite) stats.discard_and_nooverwrite_locks++;
-            if(!discard && !nooverwrite) stats.neither_streaming_flag_locks++;
-            if(flags & D3DLOCK_READONLY) stats.readonly_locks++;
+            const bool original_discard = (flags & D3DLOCK_DISCARD) != 0;
+            const bool original_nooverwrite = (flags & D3DLOCK_NOOVERWRITE) != 0;
+            if(original_discard) stats.discard_locks++;
+            if(original_nooverwrite) stats.nooverwrite_locks++;
+            if(original_discard && original_nooverwrite) stats.both_locks++;
+            if(!original_discard && !original_nooverwrite) stats.neither_locks++;
 
-            bool lock_range_valid = false;
-            std::uint64_t lock_start = offset_to_lock;
-            std::uint64_t lock_end = lock_start;
+            const std::uint64_t lock_start = offset_to_lock;
+            const std::uint64_t lock_end = lock_start + size_to_lock;
+            update_lock_span(offset_to_lock, size_to_lock, lock_end);
 
-            if(offset_to_lock == 0 && size_to_lock == 0) {
-                stats.whole_buffer_locks++;
-                if(target->desc_valid) {
-                    lock_start = 0;
-                    lock_end = target->desc.Size;
-                    lock_range_valid = true;
+            if(offset_to_lock == 0) {
+                stats.zero_offset_locks++;
+                if(target->previous_lock_valid) {
+                    stats.zero_offset_after_previous++;
                 }
             }
-            else if(size_to_lock == 0) {
-                stats.zero_size_nonzero_offset_locks++;
-                stats.lock_range_unknown++;
-            }
-            else {
-                lock_end = lock_start + size_to_lock;
-                lock_range_valid = true;
-            }
 
-            if(lock_range_valid) {
-                update_lock_range_stats(offset_to_lock, size_to_lock, lock_end);
-                if(target->desc_valid && lock_end > target->desc.Size) {
-                    stats.lock_range_out_of_bounds++;
-                }
-
-                if(target->last_draw_range_valid
-                    && target->last_draw_frame == current_frame_index()
-                    && ranges_overlap(lock_start, lock_end,
-                                      target->last_draw_byte_start, target->last_draw_byte_end)) {
-                    stats.lock_overlaps_last_draw_same_frame++;
-                    if(nooverwrite) {
-                        stats.nooverwrite_overlaps_last_draw_same_frame++;
-                    }
-                    if(discard) {
-                        stats.discard_overlaps_last_draw_same_frame++;
+            bool backward = false;
+            if(target->previous_lock_valid) {
+                backward = offset_to_lock < target->previous_lock_offset;
+                if(backward) {
+                    stats.backward_locks++;
+                    if(target->previous_lock_frame == current_frame_index()) {
+                        stats.same_frame_backward_locks++;
                     }
                 }
+                else if(lock_start == target->previous_lock_end) {
+                    stats.contiguous_locks++;
+                }
+                else if(lock_start > target->previous_lock_end) {
+                    stats.forward_gap_locks++;
+                }
+                else if(lock_start < target->previous_lock_end) {
+                    stats.overlapping_previous_lock++;
+                }
             }
 
-            const HRESULT result = vtable_hook->original_lock(buffer, offset_to_lock, size_to_lock, data, flags);
+            if(target->desc_valid && lock_end > target->desc.Size) {
+                stats.range_out_of_bounds++;
+            }
+
+            DWORD effective_flags = flags;
+            const bool dynamic_buffer = target->desc_valid
+                && (target->desc.Usage & D3DUSAGE_DYNAMIC) != 0;
+
+            if(dynamic_buffer && original_nooverwrite && !original_discard) {
+                if(diagnostic_mode == WrapDiagnosticMode::DISCARD_ZERO
+                    && offset_to_lock == 0
+                    && target->previous_lock_valid) {
+                    effective_flags &= ~static_cast<DWORD>(D3DLOCK_NOOVERWRITE);
+                    effective_flags |= D3DLOCK_DISCARD;
+                    stats.forced_discard_zero++;
+                }
+                else if(diagnostic_mode == WrapDiagnosticMode::DISCARD_BACKWARD && backward) {
+                    effective_flags &= ~static_cast<DWORD>(D3DLOCK_NOOVERWRITE);
+                    effective_flags |= D3DLOCK_DISCARD;
+                    stats.forced_discard_backward++;
+                }
+            }
+
+            const HRESULT result = vtable_hook->original_lock(
+                buffer,
+                offset_to_lock,
+                size_to_lock,
+                data,
+                effective_flags
+            );
             if(FAILED(result)) {
                 stats.lock_failures++;
                 return result;
@@ -598,11 +495,11 @@ namespace Chimera {
             if(target->outstanding_locks > target->max_outstanding_locks) {
                 target->max_outstanding_locks = target->outstanding_locks;
             }
-            target->last_lock_range_valid = lock_range_valid;
-            target->last_lock_byte_start = lock_start;
-            target->last_lock_byte_end = lock_end;
-            target->last_lock_frame = current_frame_index();
-            target->last_lock_flags = flags;
+            target->previous_lock_valid = true;
+            target->previous_lock_offset = offset_to_lock;
+            target->previous_lock_size = size_to_lock;
+            target->previous_lock_end = lock_end;
+            target->previous_lock_frame = current_frame_index();
             return result;
         }
 
@@ -646,93 +543,69 @@ namespace Chimera {
         }
 
         static void print_stats() noexcept {
-            console_output("chimera_debug_chicago_index: device_hooks=%u index_hooks=%u targets=%u",
+            console_output("chimera_debug_chicago_wrap: mode=%s device_hooks=%u index_hooks=%u targets=%u",
+                mode_name(),
                 static_cast<unsigned int>(device_vtable_hook_count),
                 static_cast<unsigned int>(index_vtable_hook_count),
                 static_cast<unsigned int>(target_index_buffer_count));
 
-            console_output("groups: total=%llu suspect=%llu no_dip=%llu multi_dip=%llu",
+            console_output("groups: total=%llu suspect=%llu dip=%llu get_indices_fail=%llu no_ib=%llu ib_changes=%llu",
                 static_cast<unsigned long long>(stats.group_draw_calls),
                 static_cast<unsigned long long>(stats.suspect_group_calls),
-                static_cast<unsigned long long>(stats.suspect_groups_without_dip),
-                static_cast<unsigned long long>(stats.suspect_groups_multiple_dips));
-
-            console_output("hooks: device_fail=%llu device_overflow=%llu index_fail=%llu index_overflow=%llu target_overflow=%llu",
-                static_cast<unsigned long long>(stats.device_hook_failures),
-                static_cast<unsigned long long>(stats.device_vtable_overflow),
-                static_cast<unsigned long long>(stats.index_vtable_hook_failures),
-                static_cast<unsigned long long>(stats.index_vtable_overflow),
-                static_cast<unsigned long long>(stats.target_overflow));
-
-            console_output("dip: suspect=%llu triangle_list=%llu other=%llu get_indices_fail=%llu no_ib=%llu ib_changes=%llu outstanding_lock=%llu",
                 static_cast<unsigned long long>(stats.suspect_dip_calls),
-                static_cast<unsigned long long>(stats.triangle_list_dip_calls),
-                static_cast<unsigned long long>(stats.other_primitive_dip_calls),
                 static_cast<unsigned long long>(stats.get_indices_failures),
                 static_cast<unsigned long long>(stats.no_bound_index_buffer),
-                static_cast<unsigned long long>(stats.bound_index_buffer_changes),
-                static_cast<unsigned long long>(stats.draw_with_outstanding_lock));
+                static_cast<unsigned long long>(stats.bound_index_buffer_changes));
 
-            console_output("mapping: start=first:%llu first_x3:%llu other:%llu primitive_match=%llu mismatch=%llu oob=%llu unknown=%llu",
-                static_cast<unsigned long long>(stats.start_matches_first_triangle),
-                static_cast<unsigned long long>(stats.start_matches_first_triangle_x3),
-                static_cast<unsigned long long>(stats.start_matches_neither),
-                static_cast<unsigned long long>(stats.primitive_count_matches),
-                static_cast<unsigned long long>(stats.primitive_count_mismatches),
-                static_cast<unsigned long long>(stats.draw_range_out_of_bounds),
-                static_cast<unsigned long long>(stats.draw_range_unknown));
+            console_output("hooks: device_fail=%llu device_overflow=%llu index_fail=%llu index_overflow=%llu target_overflow=%llu desc_fail=%llu",
+                static_cast<unsigned long long>(stats.device_hook_failures),
+                static_cast<unsigned long long>(stats.device_vtable_overflow),
+                static_cast<unsigned long long>(stats.index_hook_failures),
+                static_cast<unsigned long long>(stats.index_vtable_overflow),
+                static_cast<unsigned long long>(stats.target_overflow),
+                static_cast<unsigned long long>(stats.target_desc_failures));
 
-            if(stats.dip_range_initialized) {
-                console_output("dip_ranges: base=%d..%d start=%u..%u primitives=%u..%u vertices=%u..%u",
-                    stats.min_base_vertex,
-                    stats.max_base_vertex,
-                    stats.min_start_index,
-                    stats.max_start_index,
-                    stats.min_primitive_count,
-                    stats.max_primitive_count,
-                    stats.min_num_vertices,
-                    stats.max_num_vertices);
-            }
-
-            console_output("locks: lock=%llu unlock=%llu lock_fail=%llu unlock_fail=%llu discard=%llu nooverwrite=%llu both=%llu neither=%llu readonly=%llu",
+            console_output("locks: lock=%llu unlock=%llu lock_fail=%llu unlock_fail=%llu outstanding_draw=%llu unlock_without_lock=%llu",
                 static_cast<unsigned long long>(stats.target_lock_calls),
                 static_cast<unsigned long long>(stats.target_unlock_calls),
                 static_cast<unsigned long long>(stats.lock_failures),
                 static_cast<unsigned long long>(stats.unlock_failures),
-                static_cast<unsigned long long>(stats.discard_locks),
-                static_cast<unsigned long long>(stats.nooverwrite_locks),
-                static_cast<unsigned long long>(stats.discard_and_nooverwrite_locks),
-                static_cast<unsigned long long>(stats.neither_streaming_flag_locks),
-                static_cast<unsigned long long>(stats.readonly_locks));
-
-            console_output("lock_ranges: whole=%llu zero_size_offset=%llu oob=%llu unknown=%llu overlap_last_draw=%llu nooverwrite_overlap=%llu discard_overlap=%llu unlock_without_lock=%llu",
-                static_cast<unsigned long long>(stats.whole_buffer_locks),
-                static_cast<unsigned long long>(stats.zero_size_nonzero_offset_locks),
-                static_cast<unsigned long long>(stats.lock_range_out_of_bounds),
-                static_cast<unsigned long long>(stats.lock_range_unknown),
-                static_cast<unsigned long long>(stats.lock_overlaps_last_draw_same_frame),
-                static_cast<unsigned long long>(stats.nooverwrite_overlaps_last_draw_same_frame),
-                static_cast<unsigned long long>(stats.discard_overlaps_last_draw_same_frame),
+                static_cast<unsigned long long>(stats.draw_with_outstanding_lock),
                 static_cast<unsigned long long>(stats.unlock_without_lock));
 
-            if(stats.lock_range_initialized) {
-                console_output("lock_span: offset=%u..%u size=%u..%u max_end=%llu",
-                    stats.min_lock_offset,
-                    stats.max_lock_offset,
-                    stats.min_lock_size,
-                    stats.max_lock_size,
-                    static_cast<unsigned long long>(stats.max_lock_end));
-            }
+            console_output("flags: discard=%llu nooverwrite=%llu both=%llu neither=%llu",
+                static_cast<unsigned long long>(stats.discard_locks),
+                static_cast<unsigned long long>(stats.nooverwrite_locks),
+                static_cast<unsigned long long>(stats.both_locks),
+                static_cast<unsigned long long>(stats.neither_locks));
 
-            if(stats.target_desc_failures) {
-                console_output("target_desc_failures=%llu",
-                    static_cast<unsigned long long>(stats.target_desc_failures));
+            console_output("wrap: zero=%llu zero_after_previous=%llu backward=%llu same_frame_backward=%llu contiguous=%llu forward_gap=%llu overlap_previous=%llu oob=%llu",
+                static_cast<unsigned long long>(stats.zero_offset_locks),
+                static_cast<unsigned long long>(stats.zero_offset_after_previous),
+                static_cast<unsigned long long>(stats.backward_locks),
+                static_cast<unsigned long long>(stats.same_frame_backward_locks),
+                static_cast<unsigned long long>(stats.contiguous_locks),
+                static_cast<unsigned long long>(stats.forward_gap_locks),
+                static_cast<unsigned long long>(stats.overlapping_previous_lock),
+                static_cast<unsigned long long>(stats.range_out_of_bounds));
+
+            console_output("forced: discard_zero=%llu discard_backward=%llu",
+                static_cast<unsigned long long>(stats.forced_discard_zero),
+                static_cast<unsigned long long>(stats.forced_discard_backward));
+
+            if(stats.lock_span_initialized) {
+                console_output("span: offset=%u..%u size=%u..%u max_end=%llu",
+                    stats.min_offset,
+                    stats.max_offset,
+                    stats.min_size,
+                    stats.max_size,
+                    static_cast<unsigned long long>(stats.max_end));
             }
 
             for(std::size_t i = 0; i < target_index_buffer_count; i++) {
                 const auto &target = target_index_buffers[i];
                 if(target.desc_valid) {
-                    console_output("target.%u ib=%p draws=%llu locks=%llu unlocks=%llu outstanding=%ld max_outstanding=%ld size=%u format=%lu usage=0x%08lX pool=%lu last_flags=0x%08lX",
+                    console_output("target.%u ib=%p draws=%llu locks=%llu unlocks=%llu outstanding=%ld max_outstanding=%ld size=%u format=%lu usage=0x%08lX pool=%lu prev_offset=%u prev_size=%u",
                         static_cast<unsigned int>(i),
                         reinterpret_cast<void *>(target.buffer),
                         static_cast<unsigned long long>(target.draws),
@@ -744,28 +617,18 @@ namespace Chimera {
                         static_cast<unsigned long>(target.desc.Format),
                         static_cast<unsigned long>(target.desc.Usage),
                         static_cast<unsigned long>(target.desc.Pool),
-                        static_cast<unsigned long>(target.last_lock_flags));
-                }
-                else {
-                    console_output("target.%u ib=%p draws=%llu locks=%llu unlocks=%llu outstanding=%ld max_outstanding=%ld no_desc last_flags=0x%08lX",
-                        static_cast<unsigned int>(i),
-                        reinterpret_cast<void *>(target.buffer),
-                        static_cast<unsigned long long>(target.draws),
-                        static_cast<unsigned long long>(target.locks),
-                        static_cast<unsigned long long>(target.unlocks),
-                        target.outstanding_locks,
-                        target.max_outstanding_locks,
-                        static_cast<unsigned long>(target.last_lock_flags));
+                        target.previous_lock_offset,
+                        target.previous_lock_size);
                 }
             }
         }
 
-        static bool chicago_index_diagnostic_command(const char *command) noexcept {
+        static bool chicago_wrap_diagnostic_command(const char *command) noexcept {
             if(!command) {
                 return true;
             }
 
-            static constexpr char command_name[] = "chimera_debug_chicago_index";
+            static constexpr char command_name[] = "chimera_debug_chicago_wrap";
             static constexpr std::size_t command_name_length = sizeof(command_name) - 1;
             if(std::strncmp(command, command_name, command_name_length) != 0) {
                 return true;
@@ -781,17 +644,39 @@ namespace Chimera {
 
             if(*argument == '\0' || std::strcmp(argument, "stats") == 0) {
                 print_stats();
-                console_output("usage: chimera_debug_chicago_index [stats|reset]");
+                console_output("usage: chimera_debug_chicago_wrap [observe|discard_zero|discard_backward|stats|reset]");
                 return false;
             }
 
             if(std::strcmp(argument, "reset") == 0) {
                 reset_stats();
-                console_output("chimera_debug_chicago_index: counters reset");
+                console_output("chimera_debug_chicago_wrap: counters reset; mode=%s", mode_name());
                 return false;
             }
 
-            console_error("chimera_debug_chicago_index: expected stats or reset");
+            if(std::strcmp(argument, "observe") == 0) {
+                diagnostic_mode = WrapDiagnosticMode::OBSERVE;
+                reset_stats();
+                console_output("chimera_debug_chicago_wrap: observe");
+                return false;
+            }
+
+            if(std::strcmp(argument, "discard_zero") == 0) {
+                diagnostic_mode = WrapDiagnosticMode::DISCARD_ZERO;
+                reset_stats();
+                console_output("chimera_debug_chicago_wrap: discard_zero");
+                return false;
+            }
+
+            if(std::strcmp(argument, "discard_backward") == 0) {
+                diagnostic_mode = WrapDiagnosticMode::DISCARD_BACKWARD;
+                reset_stats();
+                console_output("chimera_debug_chicago_wrap: discard_backward");
+                return false;
+            }
+
+            console_error("chimera_debug_chicago_wrap: unknown mode");
+            console_output("usage: chimera_debug_chicago_wrap [observe|discard_zero|discard_backward|stats|reset]");
             return false;
         }
 
@@ -813,21 +698,7 @@ namespace Chimera {
 
             const auto previous_context = suspect_context;
             suspect_context.active = true;
-            suspect_context.dynamic_triangle_buffer_index = group->dynamic_triangle_buffer_index;
-            suspect_context.first_triangle_index = group->first_triangle_index;
-            suspect_context.triangle_count = group->triangle_count;
-
-            const auto dip_before = stats.suspect_dip_calls;
             original(group, is_dirty);
-            const auto dip_delta = stats.suspect_dip_calls - dip_before;
-
-            if(dip_delta == 0) {
-                stats.suspect_groups_without_dip++;
-            }
-            else if(dip_delta > 1) {
-                stats.suspect_groups_multiple_dips++;
-            }
-
             suspect_context = previous_context;
         }
     }
@@ -866,7 +737,7 @@ namespace Chimera {
         );
 
         if(group_draw_original) {
-            add_command_event(chicago_index_diagnostic_command, EVENT_PRIORITY_BEFORE);
+            add_command_event(chicago_wrap_diagnostic_command, EVENT_PRIORITY_BEFORE);
             installed = true;
         }
     }
