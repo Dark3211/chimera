@@ -73,7 +73,7 @@ namespace Chimera {
                 const void *original_draw_vertices = nullptr;
                 write_function_override(rasterizer_transparent_geometry_group_draw_vertices_func,
                                         transparent_geometry_draw_vertices_guard_hook,
-                                        rasterizer_transparent_geometry_group_draw_vertices_guarded,
+                                        reinterpret_cast<const void *>(rasterizer_transparent_geometry_group_draw_vertices_guarded),
                                         &original_draw_vertices);
                 if(original_draw_vertices) {
                     rasterizer_transparent_geometry_group_draw_vertices_original_func = const_cast<void *>(original_draw_vertices);
