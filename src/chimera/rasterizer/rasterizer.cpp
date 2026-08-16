@@ -1,11 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+#include <cctype>
+#include <cstring>
+
 #include "rasterizer.hpp"
 #include "../chimera.hpp"
 #include "../signature/hook.hpp"
 #include "../halo_data/game_variables.hpp"
 #include "../halo_data/shaders/shader_blob.hpp"
 #include "../output/error_box.hpp"
+#include "../output/output.hpp"
+#include "../event/command.hpp"
 #include "../event/game_loop.hpp"
 
 
@@ -16,6 +21,203 @@ namespace Chimera {
     bool chimera_rasterizer_enabled = false;
 
     IDirect3DPixelShader9 *chimera_pixel_shaders[NUMBER_OF_CHIMERA_PIXEL_SHADERS] = { nullptr };
+
+    namespace {
+        enum class RenderPathDiagnosticMode {
+            NORMAL,
+            ENVIRONMENT_TRANSPARENT,
+            MODEL_TRANSPARENT,
+            DECALS,
+            WATER,
+            LENS_FLARES,
+            DETAIL_OBJECTS,
+            FOG
+        };
+
+        struct RenderPathDiagnosticSnapshot {
+            bool draw_environment_transparent_geometry;
+            bool draw_model_transparent_geometry;
+            bool draw_environment_decals;
+            bool draw_water;
+            bool draw_lens_flares;
+            bool draw_detail_objects;
+            bool draw_environment_fog;
+            bool draw_environment_fog_screen;
+        };
+
+        static RenderPathDiagnosticMode render_path_diagnostic_mode = RenderPathDiagnosticMode::NORMAL;
+        static RenderPathDiagnosticSnapshot render_path_diagnostic_snapshot = {};
+        static bool render_path_diagnostic_snapshot_valid = false;
+
+        static const char *render_path_diagnostic_mode_name(RenderPathDiagnosticMode mode) noexcept {
+            switch(mode) {
+                case RenderPathDiagnosticMode::ENVIRONMENT_TRANSPARENT:
+                    return "environment_transparent";
+                case RenderPathDiagnosticMode::MODEL_TRANSPARENT:
+                    return "model_transparent";
+                case RenderPathDiagnosticMode::DECALS:
+                    return "decals";
+                case RenderPathDiagnosticMode::WATER:
+                    return "water";
+                case RenderPathDiagnosticMode::LENS_FLARES:
+                    return "lens_flares";
+                case RenderPathDiagnosticMode::DETAIL_OBJECTS:
+                    return "detail_objects";
+                case RenderPathDiagnosticMode::FOG:
+                    return "fog";
+                default:
+                    return "normal";
+            }
+        }
+
+        static void capture_render_path_diagnostic_snapshot() noexcept {
+            if(render_path_diagnostic_snapshot_valid || !rasterizer_debug_options) {
+                return;
+            }
+
+            render_path_diagnostic_snapshot.draw_environment_transparent_geometry = rasterizer_debug_options->draw_environment_transparent_geometry;
+            render_path_diagnostic_snapshot.draw_model_transparent_geometry = rasterizer_debug_options->draw_model_transparent_geometry;
+            render_path_diagnostic_snapshot.draw_environment_decals = rasterizer_debug_options->draw_environment_decals;
+            render_path_diagnostic_snapshot.draw_water = rasterizer_debug_options->draw_water;
+            render_path_diagnostic_snapshot.draw_lens_flares = rasterizer_debug_options->draw_lens_flares;
+            render_path_diagnostic_snapshot.draw_detail_objects = rasterizer_debug_options->draw_detail_objects;
+            render_path_diagnostic_snapshot.draw_environment_fog = rasterizer_debug_options->draw_environment_fog;
+            render_path_diagnostic_snapshot.draw_environment_fog_screen = rasterizer_debug_options->draw_environment_fog_screen;
+            render_path_diagnostic_snapshot_valid = true;
+        }
+
+        static void restore_render_path_diagnostic_snapshot() noexcept {
+            if(!render_path_diagnostic_snapshot_valid || !rasterizer_debug_options) {
+                return;
+            }
+
+            rasterizer_debug_options->draw_environment_transparent_geometry = render_path_diagnostic_snapshot.draw_environment_transparent_geometry;
+            rasterizer_debug_options->draw_model_transparent_geometry = render_path_diagnostic_snapshot.draw_model_transparent_geometry;
+            rasterizer_debug_options->draw_environment_decals = render_path_diagnostic_snapshot.draw_environment_decals;
+            rasterizer_debug_options->draw_water = render_path_diagnostic_snapshot.draw_water;
+            rasterizer_debug_options->draw_lens_flares = render_path_diagnostic_snapshot.draw_lens_flares;
+            rasterizer_debug_options->draw_detail_objects = render_path_diagnostic_snapshot.draw_detail_objects;
+            rasterizer_debug_options->draw_environment_fog = render_path_diagnostic_snapshot.draw_environment_fog;
+            rasterizer_debug_options->draw_environment_fog_screen = render_path_diagnostic_snapshot.draw_environment_fog_screen;
+        }
+
+        static bool render_path_diagnostic_command(const char *command) noexcept {
+            if(!command) {
+                return true;
+            }
+
+            static constexpr char command_name[] = "chimera_debug_render_path";
+            static constexpr std::size_t command_name_length = sizeof(command_name) - 1;
+
+            if(std::strncmp(command, command_name, command_name_length) != 0) {
+                return true;
+            }
+
+            const char *argument = command + command_name_length;
+            if(*argument != '\0' && !std::isspace(static_cast<unsigned char>(*argument))) {
+                return true;
+            }
+
+            while(std::isspace(static_cast<unsigned char>(*argument))) {
+                argument++;
+            }
+
+            if(*argument == '\0') {
+                console_output("chimera_debug_render_path: %s", render_path_diagnostic_mode_name(render_path_diagnostic_mode));
+                console_output("modes: normal environment_transparent model_transparent decals water lens_flares detail_objects fog");
+                return false;
+            }
+
+            const char *argument_end = argument;
+            while(*argument_end != '\0' && !std::isspace(static_cast<unsigned char>(*argument_end))) {
+                argument_end++;
+            }
+
+            const std::size_t argument_length = static_cast<std::size_t>(argument_end - argument);
+            while(std::isspace(static_cast<unsigned char>(*argument_end))) {
+                argument_end++;
+            }
+
+            if(*argument_end != '\0') {
+                console_error("chimera_debug_render_path: expected one mode");
+                return false;
+            }
+
+            auto matches = [&](const char *value) noexcept {
+                return std::strlen(value) == argument_length && std::strncmp(argument, value, argument_length) == 0;
+            };
+
+            RenderPathDiagnosticMode new_mode;
+            if(matches("normal")) {
+                new_mode = RenderPathDiagnosticMode::NORMAL;
+            }
+            else if(matches("environment_transparent")) {
+                new_mode = RenderPathDiagnosticMode::ENVIRONMENT_TRANSPARENT;
+            }
+            else if(matches("model_transparent")) {
+                new_mode = RenderPathDiagnosticMode::MODEL_TRANSPARENT;
+            }
+            else if(matches("decals")) {
+                new_mode = RenderPathDiagnosticMode::DECALS;
+            }
+            else if(matches("water")) {
+                new_mode = RenderPathDiagnosticMode::WATER;
+            }
+            else if(matches("lens_flares")) {
+                new_mode = RenderPathDiagnosticMode::LENS_FLARES;
+            }
+            else if(matches("detail_objects")) {
+                new_mode = RenderPathDiagnosticMode::DETAIL_OBJECTS;
+            }
+            else if(matches("fog")) {
+                new_mode = RenderPathDiagnosticMode::FOG;
+            }
+            else {
+                console_error("chimera_debug_render_path: unknown mode");
+                console_output("modes: normal environment_transparent model_transparent decals water lens_flares detail_objects fog");
+                return false;
+            }
+
+            if(!rasterizer_debug_options) {
+                console_error("chimera_debug_render_path: rasterizer debug options unavailable");
+                return false;
+            }
+
+            capture_render_path_diagnostic_snapshot();
+            restore_render_path_diagnostic_snapshot();
+
+            switch(new_mode) {
+                case RenderPathDiagnosticMode::ENVIRONMENT_TRANSPARENT:
+                    rasterizer_debug_options->draw_environment_transparent_geometry = false;
+                    break;
+                case RenderPathDiagnosticMode::MODEL_TRANSPARENT:
+                    rasterizer_debug_options->draw_model_transparent_geometry = false;
+                    break;
+                case RenderPathDiagnosticMode::DECALS:
+                    rasterizer_debug_options->draw_environment_decals = false;
+                    break;
+                case RenderPathDiagnosticMode::WATER:
+                    rasterizer_debug_options->draw_water = false;
+                    break;
+                case RenderPathDiagnosticMode::LENS_FLARES:
+                    rasterizer_debug_options->draw_lens_flares = false;
+                    break;
+                case RenderPathDiagnosticMode::DETAIL_OBJECTS:
+                    rasterizer_debug_options->draw_detail_objects = false;
+                    break;
+                case RenderPathDiagnosticMode::FOG:
+                    rasterizer_debug_options->draw_environment_fog = false;
+                    rasterizer_debug_options->draw_environment_fog_screen = false;
+                    break;
+                default:
+                    break;
+            }
+
+            render_path_diagnostic_mode = new_mode;
+            console_output("chimera_debug_render_path: %s", render_path_diagnostic_mode_name(render_path_diagnostic_mode));
+            return false;
+        }
+    }
 
     void rasterizer_set_render_state(D3DRENDERSTATETYPE state, DWORD value) noexcept {
         throw_error(global_d3d9_device, "d3d device missing");
@@ -94,6 +296,7 @@ namespace Chimera {
     void set_up_rasterizer() noexcept {
         global_d3d9_device = reinterpret_cast<IDirect3DDevice9 **>(*reinterpret_cast<std::byte **>(get_chimera().get_signature("model_af_set_sampler_states_sig").data() + 1));
         d3d9_device_caps = reinterpret_cast<D3DCAPS9 *>(*reinterpret_cast<std::byte **>(get_chimera().get_signature("d3d9_device_caps_sig").data() + 1));
+        add_command_event(render_path_diagnostic_command, EVENT_PRIORITY_BEFORE);
         add_game_exit_event(rasterizer_release_vertex_shaders_3_0);
         add_game_exit_event(rasterizer_release_pixel_shaders);
         add_game_start_event(rasterizer_create_pixel_shaders);
