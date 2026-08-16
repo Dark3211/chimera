@@ -97,7 +97,7 @@ _set_psh_constant_for_alternate_bump_retail_asm:
     add esp, 8
     pushfd
     pushad
-    call _apply_environment_bump_af
+    call _restore_environment_detail_af
     popad
     popfd
     ret
@@ -110,7 +110,7 @@ _set_psh_constant_for_alternate_bump_custom_asm:
     add esp, 8
     pushfd
     pushad
-    call _apply_environment_bump_af
+    call _restore_environment_detail_af
     popad
     popfd
     ret
