@@ -11,6 +11,7 @@
 namespace Chimera {
 
     extern DynamicVertices *dynamic_vertices;
+    extern "C" void *rasterizer_transparent_geometry_group_draw_vertices_original_func;
 
     enum TransparentGeometryRejectReason : std::uint8_t {
         TRANSPARENT_GEOMETRY_REJECT_NONE,
@@ -155,7 +156,8 @@ namespace Chimera {
             return true;
         }
 
-        console_output("chimera_debug_geometry_guard: checked=%lu rejected=%lu",
+        console_output("chimera_debug_geometry_guard: installed=%s checked=%lu rejected=%lu",
+                       rasterizer_transparent_geometry_group_draw_vertices_original_func ? "true" : "false",
                        static_cast<unsigned long>(geometry_guard_stats.checked),
                        static_cast<unsigned long>(geometry_guard_stats.rejected));
         console_output("triangle_range=%lu vertex_index=%lu vertex_range=%lu vertex_type=%lu",

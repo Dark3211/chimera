@@ -498,7 +498,7 @@ namespace Chimera {
                         at += 2;
                         break;
                     }
-                    else if(a == 0x50 || a == 0x40) {
+                    else if(a == 0x50 || a == 0x40 || a == 0x79) {
                         offsets.push_back(at - at_start);
                         bytes.insert(bytes.end(), at, at + 3);
                         at += 3;
