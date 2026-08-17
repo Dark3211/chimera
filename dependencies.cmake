@@ -94,7 +94,6 @@ FetchContent_Declare(
     chimera_miniz
     URL "https://github.com/richgel999/miniz/releases/download/3.1.2/miniz-3.1.2.zip"
     URL_HASH SHA256=f0446d863f9c19926ad9483c523fdc42e42b8d4a6a431d27e09d49c79a140d9a
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 FetchContent_MakeAvailable(chimera_miniz)
 
