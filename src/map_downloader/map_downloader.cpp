@@ -402,6 +402,7 @@ void MapDownloader::download(const char *map, const char *output_file, const cha
         setopt(CURLOPT_FOLLOWLOCATION, 1L) &&
         setopt(CURLOPT_MAXREDIRS, 10L) &&
         setopt(CURLOPT_CONNECTTIMEOUT, 10L) &&
+        setopt(CURLOPT_TIMEOUT, 90L) &&
         setopt(CURLOPT_USERAGENT, "Chimera MapDownloader/1.0");
 
     if(!options_ok) {
