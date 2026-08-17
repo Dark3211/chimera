@@ -5,7 +5,6 @@
 #include "rasterizer_transparent_geometry.hpp"
 #include "../signature/hook.hpp"
 #include "../halo_data/game_variables.hpp"
-#include "../halo_data/shader_defs.hpp"
 #include "../event/map_load.hpp"
 #include "../event/d3d9_reset.hpp"
 
@@ -19,6 +18,8 @@ namespace Chimera {
         constexpr std::size_t INDEX_BUFFER_LOCK_VTABLE_INDEX = 11;
         constexpr std::size_t MAX_DEVICE_VTABLE_HOOKS = 4;
         constexpr std::size_t MAX_INDEX_VTABLE_HOOKS = 4;
+        constexpr std::size_t MAX_TARGET_INDEX_BUFFERS = 64;
+        constexpr std::size_t MAX_DISCOVERED_DYNAMIC_TRIANGLE_BUFFERS = 64;
 
         using DrawIndexedPrimitiveFunction = HRESULT (STDMETHODCALLTYPE *)(
             IDirect3DDevice9 *, D3DPRIMITIVETYPE, INT, UINT, UINT, UINT, UINT
@@ -27,8 +28,9 @@ namespace Chimera {
             IDirect3DIndexBuffer9 *, UINT, UINT, void **, DWORD
         );
 
-        struct SuspectGroupContext {
+        struct EnvironmentGroupContext {
             bool active = false;
+            long dynamic_triangle_buffer_index = -1;
         };
 
         struct DeviceVtableHook {
@@ -47,8 +49,11 @@ namespace Chimera {
             bool previous_lock_valid = false;
         };
 
-        static SuspectGroupContext suspect_context = {};
-        static TargetIndexBuffer target_index_buffer = {};
+        static EnvironmentGroupContext environment_group_context = {};
+        static TargetIndexBuffer target_index_buffers[MAX_TARGET_INDEX_BUFFERS] = {};
+        static std::size_t target_index_buffer_count = 0;
+        static long discovered_dynamic_triangle_buffers[MAX_DISCOVERED_DYNAMIC_TRIANGLE_BUFFERS] = {};
+        static std::size_t discovered_dynamic_triangle_buffer_count = 0;
         static DeviceVtableHook device_vtable_hooks[MAX_DEVICE_VTABLE_HOOKS] = {};
         static std::size_t device_vtable_hook_count = 0;
         static IndexVtableHook index_vtable_hooks[MAX_INDEX_VTABLE_HOOKS] = {};
@@ -57,15 +62,29 @@ namespace Chimera {
         static Hook group_draw_hook;
         static const void *group_draw_original = nullptr;
 
-        static bool is_environment_chicago_dynamic_group(TransparentGeometryGroup *group) noexcept {
-            if(!group || group->dynamic_triangle_buffer_index == -1 || !group->shader) {
-                return false;
-            }
-            if(reinterpret_cast<_shader *>(group->shader)->type != SHADER_TYPE_TRANSPARENT_CHICAGO) {
+        static bool is_environment_dynamic_group(TransparentGeometryGroup *group) noexcept {
+            if(!group || group->dynamic_triangle_buffer_index == -1) {
                 return false;
             }
             return rasterizer_transparent_geometry_get_primary_vertex_type(group)
                 == RASTERIZER_VERTEX_TYPE_ENVIRONMENT_UNCOMPRESSED;
+        }
+
+        static bool dynamic_triangle_buffer_is_discovered(long index) noexcept {
+            for(std::size_t i = 0; i < discovered_dynamic_triangle_buffer_count; i++) {
+                if(discovered_dynamic_triangle_buffers[i] == index) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        static void mark_dynamic_triangle_buffer_discovered(long index) noexcept {
+            if(index == -1 || dynamic_triangle_buffer_is_discovered(index)
+                || discovered_dynamic_triangle_buffer_count >= MAX_DISCOVERED_DYNAMIC_TRIANGLE_BUFFERS) {
+                return;
+            }
+            discovered_dynamic_triangle_buffers[discovered_dynamic_triangle_buffer_count++] = index;
         }
 
         static DeviceVtableHook *find_device_vtable_hook(IDirect3DDevice9 *device) noexcept {
@@ -89,6 +108,18 @@ namespace Chimera {
             for(std::size_t i = 0; i < index_vtable_hook_count; i++) {
                 if(index_vtable_hooks[i].vtable == vtable) {
                     return &index_vtable_hooks[i];
+                }
+            }
+            return nullptr;
+        }
+
+        static TargetIndexBuffer *find_target_index_buffer(IDirect3DIndexBuffer9 *buffer) noexcept {
+            if(!buffer) {
+                return nullptr;
+            }
+            for(std::size_t i = 0; i < target_index_buffer_count; i++) {
+                if(target_index_buffers[i].buffer == buffer) {
+                    return &target_index_buffers[i];
                 }
             }
             return nullptr;
@@ -221,8 +252,8 @@ namespace Chimera {
                 return false;
             }
 
-            if(target_index_buffer.buffer == buffer) {
-                return ensure_index_buffer_lock_hook(buffer);
+            if(auto *existing = find_target_index_buffer(buffer)) {
+                return ensure_index_buffer_lock_hook(existing->buffer);
             }
 
             D3DINDEXBUFFER_DESC desc = {};
@@ -230,13 +261,19 @@ namespace Chimera {
                 return false;
             }
 
-            if(!ensure_index_buffer_lock_hook(buffer)) {
+            if((desc.Usage & D3DUSAGE_DYNAMIC) == 0) {
+                return true;
+            }
+
+            if(target_index_buffer_count >= MAX_TARGET_INDEX_BUFFERS
+                || !ensure_index_buffer_lock_hook(buffer)) {
                 return false;
             }
 
-            target_index_buffer.buffer = buffer;
-            target_index_buffer.dynamic = (desc.Usage & D3DUSAGE_DYNAMIC) != 0;
-            target_index_buffer.previous_lock_valid = false;
+            auto &target = target_index_buffers[target_index_buffer_count++];
+            target.buffer = buffer;
+            target.dynamic = true;
+            target.previous_lock_valid = false;
             return true;
         }
 
@@ -254,12 +291,15 @@ namespace Chimera {
                 return D3DERR_INVALIDCALL;
             }
 
-            if(suspect_context.active && !target_index_buffer.buffer) {
+            if(environment_group_context.active) {
                 IDirect3DIndexBuffer9 *bound_buffer = nullptr;
                 if(SUCCEEDED(device->GetIndices(&bound_buffer)) && bound_buffer) {
-                    const bool registered = register_target_index_buffer(bound_buffer);
+                    const bool handled = register_target_index_buffer(bound_buffer);
                     bound_buffer->Release();
-                    if(registered) {
+                    if(handled) {
+                        mark_dynamic_triangle_buffer_discovered(
+                            environment_group_context.dynamic_triangle_buffer_index
+                        );
                         restore_device_draw_hook(device);
                     }
                 }
@@ -288,7 +328,8 @@ namespace Chimera {
                 return D3DERR_INVALIDCALL;
             }
 
-            if(buffer != target_index_buffer.buffer) {
+            auto *target = find_target_index_buffer(buffer);
+            if(!target) {
                 return hook->original(buffer, offset_to_lock, size_to_lock, data, flags);
             }
 
@@ -296,8 +337,12 @@ namespace Chimera {
             const bool discard = (flags & D3DLOCK_DISCARD) != 0;
             const bool nooverwrite = (flags & D3DLOCK_NOOVERWRITE) != 0;
 
-            if(target_index_buffer.dynamic
-                && target_index_buffer.previous_lock_valid
+            // Preserve the proven Chicago correction exactly, but apply it to every
+            // dynamic environment-uncompressed transparent index buffer regardless
+            // of shader family. A NOOVERWRITE lock that wraps back to offset zero
+            // cannot safely promise that previously streamed GPU data is untouched.
+            if(target->dynamic
+                && target->previous_lock_valid
                 && offset_to_lock == 0
                 && nooverwrite
                 && !discard) {
@@ -314,21 +359,22 @@ namespace Chimera {
             );
 
             if(SUCCEEDED(result)) {
-                target_index_buffer.previous_lock_valid = true;
+                target->previous_lock_valid = true;
             }
             return result;
         }
 
-        static void clear_target_index_buffer() noexcept {
-            target_index_buffer = {};
-            suspect_context = {};
+        static void clear_target_index_buffers() noexcept {
+            target_index_buffer_count = 0;
+            discovered_dynamic_triangle_buffer_count = 0;
+            environment_group_context = {};
         }
 
-        static void clear_target_index_buffer_on_reset(
+        static void clear_target_index_buffers_on_reset(
             LPDIRECT3DDEVICE9,
             D3DPRESENT_PARAMETERS *
         ) noexcept {
-            clear_target_index_buffer();
+            clear_target_index_buffers();
         }
 
         static void group_draw_index_buffer_fix(TransparentGeometryGroup *group, bool is_dirty) noexcept {
@@ -338,7 +384,8 @@ namespace Chimera {
                 return;
             }
 
-            if(target_index_buffer.buffer || !is_environment_chicago_dynamic_group(group)) {
+            if(!is_environment_dynamic_group(group)
+                || dynamic_triangle_buffer_is_discovered(group->dynamic_triangle_buffer_index)) {
                 original(group, is_dirty);
                 return;
             }
@@ -348,10 +395,11 @@ namespace Chimera {
                 return;
             }
 
-            const auto previous_context = suspect_context;
-            suspect_context.active = true;
+            const auto previous_context = environment_group_context;
+            environment_group_context.active = true;
+            environment_group_context.dynamic_triangle_buffer_index = group->dynamic_triangle_buffer_index;
             original(group, is_dirty);
-            suspect_context = previous_context;
+            environment_group_context = previous_context;
         }
     }
 
@@ -389,8 +437,8 @@ namespace Chimera {
         );
 
         if(group_draw_original) {
-            add_map_load_event(clear_target_index_buffer, EVENT_PRIORITY_BEFORE);
-            add_d3d9_reset_event(clear_target_index_buffer_on_reset, EVENT_PRIORITY_BEFORE);
+            add_map_load_event(clear_target_index_buffers, EVENT_PRIORITY_BEFORE);
+            add_d3d9_reset_event(clear_target_index_buffers_on_reset, EVENT_PRIORITY_BEFORE);
             installed = true;
         }
     }
