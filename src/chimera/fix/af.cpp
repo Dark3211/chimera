@@ -27,6 +27,8 @@ namespace Chimera {
 
     struct EnvironmentSamplerState {
         bool valid = false;
+        bool mip_filter_changed = false;
+        bool mip_lod_bias_changed = false;
         DWORD mip_filter = 0;
         DWORD mip_lod_bias = 0;
     };
@@ -70,8 +72,12 @@ namespace Chimera {
                     continue;
                 }
 
-                IDirect3DDevice9_SetSamplerState(*global_d3d9_device, sampler, D3DSAMP_MIPFILTER, state.mip_filter);
-                IDirect3DDevice9_SetSamplerState(*global_d3d9_device, sampler, D3DSAMP_MIPMAPLODBIAS, state.mip_lod_bias);
+                if(state.mip_filter_changed) {
+                    IDirect3DDevice9_SetSamplerState(*global_d3d9_device, sampler, D3DSAMP_MIPFILTER, state.mip_filter);
+                }
+                if(state.mip_lod_bias_changed) {
+                    IDirect3DDevice9_SetSamplerState(*global_d3d9_device, sampler, D3DSAMP_MIPMAPLODBIAS, state.mip_lod_bias);
+                }
             }
         }
 
@@ -84,18 +90,22 @@ namespace Chimera {
         }
 
         if(global_d3d9_device && *global_d3d9_device && environment_bump_sampler_state.valid) {
-            IDirect3DDevice9_SetSamplerState(
-                *global_d3d9_device,
-                0,
-                D3DSAMP_MIPFILTER,
-                environment_bump_sampler_state.mip_filter
-            );
-            IDirect3DDevice9_SetSamplerState(
-                *global_d3d9_device,
-                0,
-                D3DSAMP_MIPMAPLODBIAS,
-                environment_bump_sampler_state.mip_lod_bias
-            );
+            if(environment_bump_sampler_state.mip_filter_changed) {
+                IDirect3DDevice9_SetSamplerState(
+                    *global_d3d9_device,
+                    0,
+                    D3DSAMP_MIPFILTER,
+                    environment_bump_sampler_state.mip_filter
+                );
+            }
+            if(environment_bump_sampler_state.mip_lod_bias_changed) {
+                IDirect3DDevice9_SetSamplerState(
+                    *global_d3d9_device,
+                    0,
+                    D3DSAMP_MIPMAPLODBIAS,
+                    environment_bump_sampler_state.mip_lod_bias
+                );
+            }
         }
 
         clear_environment_bump_sampler_state();
@@ -135,6 +145,7 @@ namespace Chimera {
         // the normal AF sampling profile.
         const std::uint32_t highest_sampler =
             d3d9_device_caps->PixelShaderVersion > 0xffff0100 ? 3U : 1U;
+        const DWORD target_lod_bias = std::bit_cast<DWORD>(environment_detail_mip_lod_bias);
 
         bool saved_any_state = false;
         for(std::uint32_t sampler = 1; sampler <= highest_sampler; sampler++) {
@@ -159,13 +170,21 @@ namespace Chimera {
                 continue;
             }
 
+            const bool mip_filter_changed = linear_mips_supported && mip_filter != D3DTEXF_LINEAR;
+            const bool mip_lod_bias_changed = lod_bias_supported && mip_lod_bias != target_lod_bias;
+            if(!mip_filter_changed && !mip_lod_bias_changed) {
+                continue;
+            }
+
             auto &saved = environment_detail_sampler_states[sampler - 1];
             saved.valid = true;
+            saved.mip_filter_changed = mip_filter_changed;
+            saved.mip_lod_bias_changed = mip_lod_bias_changed;
             saved.mip_filter = mip_filter;
             saved.mip_lod_bias = mip_lod_bias;
             saved_any_state = true;
 
-            if(linear_mips_supported) {
+            if(mip_filter_changed) {
                 IDirect3DDevice9_SetSamplerState(
                     *global_d3d9_device,
                     sampler,
@@ -173,12 +192,12 @@ namespace Chimera {
                     D3DTEXF_LINEAR
                 );
             }
-            if(lod_bias_supported) {
+            if(mip_lod_bias_changed) {
                 IDirect3DDevice9_SetSamplerState(
                     *global_d3d9_device,
                     sampler,
                     D3DSAMP_MIPMAPLODBIAS,
-                    std::bit_cast<DWORD>(environment_detail_mip_lod_bias)
+                    target_lod_bias
                 );
             }
         }
@@ -223,12 +242,21 @@ namespace Chimera {
             return;
         }
 
+        const DWORD target_lod_bias = std::bit_cast<DWORD>(environment_bump_mip_lod_bias);
+        const bool mip_filter_changed = linear_mips_supported && mip_filter != D3DTEXF_LINEAR;
+        const bool mip_lod_bias_changed = lod_bias_supported && mip_lod_bias != target_lod_bias;
+        if(!mip_filter_changed && !mip_lod_bias_changed) {
+            return;
+        }
+
         environment_bump_sampler_state.valid = true;
+        environment_bump_sampler_state.mip_filter_changed = mip_filter_changed;
+        environment_bump_sampler_state.mip_lod_bias_changed = mip_lod_bias_changed;
         environment_bump_sampler_state.mip_filter = mip_filter;
         environment_bump_sampler_state.mip_lod_bias = mip_lod_bias;
         environment_bump_sampler_state_saved = true;
 
-        if(linear_mips_supported) {
+        if(mip_filter_changed) {
             IDirect3DDevice9_SetSamplerState(
                 *global_d3d9_device,
                 0,
@@ -236,12 +264,12 @@ namespace Chimera {
                 D3DTEXF_LINEAR
             );
         }
-        if(lod_bias_supported) {
+        if(mip_lod_bias_changed) {
             IDirect3DDevice9_SetSamplerState(
                 *global_d3d9_device,
                 0,
                 D3DSAMP_MIPMAPLODBIAS,
-                std::bit_cast<DWORD>(environment_bump_mip_lod_bias)
+                target_lod_bias
             );
         }
     }
