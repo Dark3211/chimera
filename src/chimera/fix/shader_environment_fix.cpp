@@ -68,11 +68,6 @@ namespace Chimera {
             {2.10F, 1.62F, 1.80F, 1.48F, 1.64F, 1.55F, 1.40F}
         }};
 
-        // Temporary A/B diagnostic for shader_model self-illumination. These values
-        // are intentionally aggressive so a working render path is visually obvious.
-        constexpr float MODEL_EMISSIVE_DIAGNOSTIC_SCALE = 4.00F;
-        constexpr float MODEL_EMISSIVE_DIAGNOSTIC_BRIGHT_SCALE = 3.00F;
-
         constexpr std::size_t MAX_MATERIAL_QUALITY_SNAPSHOTS = 4096;
         constexpr std::size_t MAX_MODEL_MATERIAL_QUALITY_SNAPSHOTS = 4096;
         constexpr std::size_t MAX_EMISSIVE_QUALITY_SNAPSHOTS = 4096;
@@ -88,8 +83,6 @@ namespace Chimera {
             TagID id;
             ColorARGB reflection_view_perpendicular_color;
             ColorARGB reflection_view_parallel_color;
-            ColorRGB self_illumination_color_lower_bound;
-            ColorRGB self_illumination_color_upper_bound;
         };
 
         struct EmissiveQualitySnapshot {
@@ -115,7 +108,6 @@ namespace Chimera {
         std::size_t material_quality_models_scanned = 0;
         std::size_t material_quality_models_modified = 0;
         std::uint8_t material_quality_level = 0;
-        bool model_emissive_diagnostic_enabled = false;
 
         void clear_material_quality_diagnostics() noexcept {
             material_quality_environment_scanned = 0;
@@ -174,21 +166,6 @@ namespace Chimera {
             return color;
         }
 
-        ColorRGB scale_model_emissive_diagnostic(ColorRGB color) noexcept {
-            float maximum = 0.0F;
-            if(std::isfinite(color.red) && color.red > maximum) maximum = color.red;
-            if(std::isfinite(color.green) && color.green > maximum) maximum = color.green;
-            if(std::isfinite(color.blue) && color.blue > maximum) maximum = color.blue;
-
-            const float scale = maximum >= 1.0F
-                ? MODEL_EMISSIVE_DIAGNOSTIC_BRIGHT_SCALE
-                : MODEL_EMISSIVE_DIAGNOSTIC_SCALE;
-            color.red = scale_material_value(color.red, scale);
-            color.green = scale_material_value(color.green, scale);
-            color.blue = scale_material_value(color.blue, scale);
-            return color;
-        }
-
         bool emissive_color_changed(const ColorRGB &a, const ColorRGB &b) noexcept {
             return a.red != b.red || a.green != b.green || a.blue != b.blue;
         }
@@ -236,8 +213,6 @@ namespace Chimera {
                 auto *shader = reinterpret_cast<ShaderModel *>(tag->data);
                 shader->model.reflection_view_perpendicular_color = snapshot.reflection_view_perpendicular_color;
                 shader->model.reflection_view_parallel_color = snapshot.reflection_view_parallel_color;
-                shader->model.self_illumination_animation_color_lower_bound = snapshot.self_illumination_color_lower_bound;
-                shader->model.self_illumination_animation_color_upper_bound = snapshot.self_illumination_color_upper_bound;
             }
 
             for(std::size_t i = 0; i < emissive_quality_snapshot_count; i++) {
@@ -371,33 +346,17 @@ namespace Chimera {
                 material_quality_models_scanned++;
 
                 auto *shader = reinterpret_cast<ShaderModel *>(tag->data);
-                const bool has_reflection = !shader->model.reflection_map.tag_id.is_null();
+                if(shader->model.reflection_map.tag_id.is_null()) {
+                    continue;
+                }
 
                 const auto old_perpendicular = shader->model.reflection_view_perpendicular_color;
                 const auto old_parallel = shader->model.reflection_view_parallel_color;
-                const auto new_perpendicular = has_reflection
-                    ? scale_model_reflection_color(old_perpendicular, profile.model_reflection_perpendicular_scale)
-                    : old_perpendicular;
-                const auto new_parallel = has_reflection
-                    ? scale_model_reflection_color(old_parallel, profile.model_reflection_parallel_scale)
-                    : old_parallel;
-                const bool reflection_changed = has_reflection &&
-                    (model_reflection_color_changed(old_perpendicular, new_perpendicular) ||
-                     model_reflection_color_changed(old_parallel, new_parallel));
+                const auto new_perpendicular = scale_model_reflection_color(old_perpendicular, profile.model_reflection_perpendicular_scale);
+                const auto new_parallel = scale_model_reflection_color(old_parallel, profile.model_reflection_parallel_scale);
 
-                const auto old_emissive_lower = shader->model.self_illumination_animation_color_lower_bound;
-                const auto old_emissive_upper = shader->model.self_illumination_animation_color_upper_bound;
-                const auto new_emissive_lower = model_emissive_diagnostic_enabled
-                    ? scale_model_emissive_diagnostic(old_emissive_lower)
-                    : old_emissive_lower;
-                const auto new_emissive_upper = model_emissive_diagnostic_enabled
-                    ? scale_model_emissive_diagnostic(old_emissive_upper)
-                    : old_emissive_upper;
-                const bool emissive_changed = model_emissive_diagnostic_enabled &&
-                    (emissive_color_changed(old_emissive_lower, new_emissive_lower) ||
-                     emissive_color_changed(old_emissive_upper, new_emissive_upper));
-
-                if(!reflection_changed && !emissive_changed) {
+                if(!model_reflection_color_changed(old_perpendicular, new_perpendicular) &&
+                   !model_reflection_color_changed(old_parallel, new_parallel)) {
                     continue;
                 }
 
@@ -408,20 +367,12 @@ namespace Chimera {
                 model_material_quality_snapshots[model_material_quality_snapshot_count++] = ModelMaterialQualitySnapshot {
                     tag->id,
                     old_perpendicular,
-                    old_parallel,
-                    old_emissive_lower,
-                    old_emissive_upper
+                    old_parallel
                 };
 
                 material_quality_models_modified++;
-                if(reflection_changed) {
-                    shader->model.reflection_view_perpendicular_color = new_perpendicular;
-                    shader->model.reflection_view_parallel_color = new_parallel;
-                }
-                if(emissive_changed) {
-                    shader->model.self_illumination_animation_color_lower_bound = new_emissive_lower;
-                    shader->model.self_illumination_animation_color_upper_bound = new_emissive_upper;
-                }
+                shader->model.reflection_view_perpendicular_color = new_perpendicular;
+                shader->model.reflection_view_parallel_color = new_parallel;
             }
         }
 
@@ -439,29 +390,6 @@ namespace Chimera {
             }
 
             const auto *value = argv[0];
-
-            // Temporary shader_model emissive A/B diagnostic. This does not change
-            // material_quality_level; it restores the original tags and reapplies the
-            // same level with only model emissive toggled between original and a very
-            // strong diagnostic multiplier.
-            if(std::strcmp(value, "sm_off") == 0 || std::strcmp(value, "sm_on") == 0) {
-                const bool new_state = std::strcmp(value, "sm_on") == 0;
-                if(new_state != model_emissive_diagnostic_enabled) {
-                    if(material_quality_level != 0 || material_quality_snapshot_count != 0 ||
-                       model_material_quality_snapshot_count != 0 || emissive_quality_snapshot_count != 0) {
-                        restore_material_quality();
-                    }
-
-                    model_emissive_diagnostic_enabled = new_state;
-                    if(material_quality_level != 0) {
-                        apply_material_quality();
-                    }
-                }
-
-                console_output("sm %s", model_emissive_diagnostic_enabled ? "true" : "false");
-                return true;
-            }
-
             std::uint8_t new_level = 0;
 
             if(std::strcmp(value, "false") == 0 || std::strcmp(value, "0") == 0) {
@@ -477,7 +405,7 @@ namespace Chimera {
                 new_level = 3;
             }
             else {
-                console_error("chimera_material_quality: expected false, true, 0, 1, 2, 3, sm_off, or sm_on");
+                console_error("chimera_material_quality: expected false, true, 0, 1, 2, or 3");
                 return false;
             }
 
