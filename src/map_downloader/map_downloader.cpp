@@ -3,9 +3,13 @@
 #include <cstdio>
 #include <cstring>
 #include <thread>
+#include <memory>
+#include <array>
+#include <locale>
 
 #define CURL_STATICLIB
 #include <curl/curl.h>
+#include <miniz.h>
 #include <filesystem>
 #include <regex>
 #include <stdexcept>
@@ -14,6 +18,211 @@
 #include <cstdint>
 
 #include "map_downloader.hpp"
+
+namespace {
+    constexpr std::size_t MAP_HEADER_SIZE = 0x800;
+
+    std::uint32_t read_u32(const std::byte *at) noexcept {
+        std::uint32_t value = 0;
+        std::memcpy(&value, at, sizeof(value));
+        return value;
+    }
+
+    bool valid_map_header(const std::byte *header_data) noexcept {
+        if(!header_data) {
+            return false;
+        }
+        if(read_u32(header_data) == 0x68656164 && read_u32(header_data + 0x7FC) == 0x666F6F74) {
+            return true;
+        }
+        return read_u32(header_data + 0x2C0) == 0x45686564 && read_u32(header_data + 0x5F0) == 0x47666F74;
+    }
+
+    bool validate_map_file(const std::filesystem::path &path, std::size_t &file_size_out) {
+        file_size_out = 0;
+
+        std::error_code size_error;
+        const auto file_size = std::filesystem::file_size(path, size_error);
+        if(size_error || file_size < MAP_HEADER_SIZE || file_size > std::numeric_limits<std::size_t>::max()) {
+            return false;
+        }
+
+        std::FILE *file = std::fopen(path.string().c_str(), "rb");
+        if(!file) {
+            return false;
+        }
+
+        std::array<std::byte, MAP_HEADER_SIZE> header{};
+        const bool read_ok = std::fread(header.data(), 1, header.size(), file) == header.size();
+        const bool close_ok = std::fclose(file) == 0;
+        if(!read_ok || !close_ok || !valid_map_header(header.data())) {
+            return false;
+        }
+
+        file_size_out = static_cast<std::size_t>(file_size);
+        return true;
+    }
+
+    std::string lowercase_classic(std::string value) {
+        const auto &locale = std::locale::classic();
+        for(char &c : value) {
+            c = std::tolower(c, locale);
+        }
+        return value;
+    }
+
+    bool query_parameter_is_inv(const std::string &url, std::size_t position) noexcept {
+        constexpr std::size_t FORMAT_LENGTH = 10; // "format=inv"
+        if(position == std::string::npos) {
+            return false;
+        }
+        const bool valid_start = position == 0 || url[position - 1] == '?' || url[position - 1] == '&';
+        const std::size_t end = position + FORMAT_LENGTH;
+        const bool valid_end = end == url.size() || url[end] == '&' || url[end] == '#';
+        return valid_start && valid_end;
+    }
+
+    bool halonet_inv_url(const std::string &url_template) {
+        const std::string lower = lowercase_classic(url_template);
+        const auto scheme = lower.find("://");
+        if(scheme == std::string::npos) {
+            return false;
+        }
+
+        const auto host_start = scheme + 3;
+        const auto path_start = lower.find('/', host_start);
+        if(path_start == std::string::npos) {
+            return false;
+        }
+
+        const std::string host = lower.substr(host_start, path_start - host_start);
+        if(host.size() < 16 || !host.starts_with("maps") || !host.ends_with(".halonet.net")) {
+            return false;
+        }
+        for(std::size_t i = 4; i + 12 < host.size(); ++i) {
+            if(host[i] < '0' || host[i] > '9') {
+                return false;
+            }
+        }
+
+        if(lower.compare(path_start, sizeof("/halonet/locator.php") - 1, "/halonet/locator.php") != 0) {
+            return false;
+        }
+
+        const auto format = lower.find("format=inv", path_start + sizeof("/halonet/locator.php") - 1);
+        return query_parameter_is_inv(lower, format);
+    }
+
+    bool replace_halonet_inv_format_with_zip(std::string &url) {
+        const std::string lower = lowercase_classic(url);
+        std::size_t position = lower.find("format=inv");
+        while(position != std::string::npos) {
+            if(query_parameter_is_inv(lower, position)) {
+                url.replace(position, 10, "format=zip");
+                return true;
+            }
+            position = lower.find("format=inv", position + 1);
+        }
+        return false;
+    }
+
+    bool extract_halonet_zip_map(const std::filesystem::path &zip_path,
+                                 const std::filesystem::path &output_path,
+                                 const std::string &map,
+                                 std::size_t &extracted_size) {
+        extracted_size = 0;
+
+        mz_zip_archive archive{};
+        if(!mz_zip_reader_init_file(&archive, zip_path.string().c_str(), 0)) {
+            return false;
+        }
+
+        bool success = false;
+        do {
+            const mz_uint file_count = mz_zip_reader_get_num_files(&archive);
+            if(file_count == 0) {
+                break;
+            }
+
+            const std::string expected_name = map + ".map";
+            const int located_index = mz_zip_reader_locate_file(&archive, expected_name.c_str(), nullptr, MZ_ZIP_FLAG_IGNORE_PATH);
+            if(located_index < 0) {
+                break;
+            }
+
+            mz_uint regular_files = 0;
+            for(mz_uint i = 0; i < file_count; ++i) {
+                if(!mz_zip_reader_is_file_a_directory(&archive, i)) {
+                    ++regular_files;
+                    if(i != static_cast<mz_uint>(located_index)) {
+                        regular_files = 2;
+                        break;
+                    }
+                }
+            }
+            if(regular_files != 1) {
+                break;
+            }
+
+            mz_zip_archive_file_stat stat{};
+            if(!mz_zip_reader_file_stat(&archive, static_cast<mz_uint>(located_index), &stat) ||
+               stat.m_is_directory || stat.m_is_encrypted || !stat.m_is_supported ||
+               stat.m_uncomp_size < MAP_HEADER_SIZE ||
+               stat.m_uncomp_size > static_cast<mz_uint64>(std::numeric_limits<std::size_t>::max())) {
+                break;
+            }
+
+            std::error_code remove_error;
+            std::filesystem::remove(output_path, remove_error);
+            if(!mz_zip_reader_extract_to_file(&archive, static_cast<mz_uint>(located_index), output_path.string().c_str(), 0)) {
+                std::filesystem::remove(output_path, remove_error);
+                break;
+            }
+
+            std::size_t validated_size = 0;
+            if(!validate_map_file(output_path, validated_size) ||
+               validated_size != static_cast<std::size_t>(stat.m_uncomp_size)) {
+                std::filesystem::remove(output_path, remove_error);
+                break;
+            }
+
+            extracted_size = validated_size;
+            success = true;
+        } while(false);
+
+        if(!mz_zip_reader_end(&archive)) {
+            success = false;
+        }
+
+        if(!success) {
+            std::error_code remove_error;
+            std::filesystem::remove(output_path, remove_error);
+            extracted_size = 0;
+        }
+        return success;
+    }
+
+    struct ZipDownloadContext {
+        std::FILE *file = nullptr;
+    };
+
+    size_t zip_write_callback(char *ptr, std::size_t size, std::size_t nmemb, void *userdata) noexcept {
+        if(!userdata || (!ptr && size != 0 && nmemb != 0) || (size != 0 && nmemb > std::numeric_limits<std::size_t>::max() / size)) {
+            return 0;
+        }
+
+        const std::size_t bytes = size * nmemb;
+        if(bytes == 0) {
+            return 0;
+        }
+
+        auto *context = static_cast<ZipDownloadContext *>(userdata);
+        if(!context->file) {
+            return 0;
+        }
+        return std::fwrite(ptr, 1, bytes, context->file);
+    }
+}
 
 /**
  * Split a string on a delimiter
@@ -42,6 +251,7 @@ std::vector<std::string> split(std::string str, std::string delim) {
 
 void MapDownloader::dispatch_thread_function(MapDownloader *downloader) {
     CURLcode result = CURLcode::CURLE_FAILED_INIT;
+    std::filesystem::path zip_temp_file;
 
     try {
         // Take a snapshot of immutable download configuration before entering the worker.
@@ -100,6 +310,8 @@ void MapDownloader::dispatch_thread_function(MapDownloader *downloader) {
             mirrors.emplace_back("");
         }
 
+        long http_response_code = 0;
+        bool output_open_failed = false;
         for(const auto &mirror : mirrors) {
             std::string url = partial_url;
             if(has_mirror_placeholder) {
@@ -125,6 +337,7 @@ void MapDownloader::dispatch_thread_function(MapDownloader *downloader) {
                 if(!downloader->output_file_handle) {
                     downloader->status = DOWNLOAD_STAGE_FAILED;
                     result = CURLcode::CURLE_WRITE_ERROR;
+                    output_open_failed = true;
                     break;
                 }
                 downloader->download_started = Clock::now();
@@ -136,6 +349,8 @@ void MapDownloader::dispatch_thread_function(MapDownloader *downloader) {
                 break;
             }
             result = curl_easy_perform(downloader->curl);
+            http_response_code = 0;
+            curl_easy_getinfo(downloader->curl, CURLINFO_RESPONSE_CODE, &http_response_code);
 
             bool canceled = false;
             {
@@ -151,51 +366,165 @@ void MapDownloader::dispatch_thread_function(MapDownloader *downloader) {
             }
         }
 
-        std::lock_guard lock(downloader->mutex);
-        if(downloader->curl) {
-            curl_easy_cleanup(downloader->curl);
-            downloader->curl = nullptr;
-        }
+        bool inv_succeeded = false;
+        bool inv_write_ok = false;
+        std::size_t inv_written_size = 0;
+        bool canceled = false;
+        {
+            std::lock_guard lock(downloader->mutex);
+            canceled = downloader->status == DownloadStage::DOWNLOAD_STAGE_CANCELING;
 
-        if(result == CURLcode::CURLE_OK && downloader->output_file_handle) {
-            bool write_ok = true;
-            if(downloader->buffer_used != 0) {
-                write_ok = std::fwrite(downloader->buffer.data(), downloader->buffer_used, 1, downloader->output_file_handle) == 1;
-            }
-            if(write_ok) {
-                if(downloader->buffer_used > std::numeric_limits<std::size_t>::max() - downloader->written_size) {
-                    write_ok = false;
+            if(result == CURLcode::CURLE_OK && downloader->output_file_handle) {
+                inv_write_ok = true;
+                if(downloader->buffer_used != 0) {
+                    inv_write_ok = std::fwrite(downloader->buffer.data(), downloader->buffer_used, 1, downloader->output_file_handle) == 1;
                 }
-                else {
-                    downloader->written_size += downloader->buffer_used;
+                if(inv_write_ok) {
+                    if(downloader->buffer_used > std::numeric_limits<std::size_t>::max() - downloader->written_size) {
+                        inv_write_ok = false;
+                    }
+                    else {
+                        downloader->written_size += downloader->buffer_used;
+                    }
                 }
-            }
-            downloader->buffer_used = 0;
-            downloader->buffer.clear();
+                downloader->buffer_used = 0;
 
-            if(std::fclose(downloader->output_file_handle) != 0) {
-                write_ok = false;
-            }
-            downloader->output_file_handle = nullptr;
-
-            downloader->status = write_ok && downloader->written_size >= 0x800
-                ? DownloadStage::DOWNLOAD_STAGE_COMPLETE
-                : DownloadStage::DOWNLOAD_STAGE_FAILED;
-        }
-        else {
-            if(downloader->output_file_handle) {
-                std::fclose(downloader->output_file_handle);
+                if(std::fclose(downloader->output_file_handle) != 0) {
+                    inv_write_ok = false;
+                }
                 downloader->output_file_handle = nullptr;
+                inv_written_size = downloader->written_size;
+                inv_succeeded = inv_write_ok && inv_written_size >= MAP_HEADER_SIZE;
+            }
+            else {
+                if(downloader->output_file_handle) {
+                    std::fclose(downloader->output_file_handle);
+                    downloader->output_file_handle = nullptr;
+                }
+                downloader->buffer_used = 0;
+                downloader->written_size = 0;
+            }
+        }
+
+        const bool protocol_failure = result == CURLcode::CURLE_HTTP_RETURNED_ERROR && http_response_code != 0;
+        const bool unavailable_inv_body = result == CURLcode::CURLE_OK && inv_write_ok && inv_written_size < MAP_HEADER_SIZE;
+        const bool can_try_zip = !inv_succeeded && !canceled && !output_open_failed &&
+                                 halonet_inv_url(url_template) && (protocol_failure || unavailable_inv_body);
+
+        if(!inv_succeeded) {
+            std::error_code remove_error;
+            std::filesystem::remove(output_file, remove_error);
+        }
+
+        bool zip_succeeded = false;
+        std::size_t zip_extracted_size = 0;
+        if(can_try_zip) {
+            {
+                std::lock_guard lock(downloader->mutex);
+                downloader->status = DOWNLOAD_STAGE_STARTING;
+                downloader->buffer_used = 0;
+                downloader->written_size = 0;
+                downloader->downloaded_size = 0;
+                downloader->total_size = 0;
+            }
+
+            zip_temp_file = output_file;
+            zip_temp_file += ".zip";
+            std::error_code remove_error;
+            std::filesystem::remove(zip_temp_file, remove_error);
+
+            const CURLcode set_write_result = curl_easy_setopt(downloader->curl, CURLOPT_WRITEFUNCTION, zip_write_callback);
+            if(set_write_result == CURLcode::CURLE_OK) {
+                for(const auto &mirror : mirrors) {
+                    std::string zip_url = partial_url;
+                    if(has_mirror_placeholder) {
+                        zip_url = replace_all_literal(std::move(zip_url), match[0].str(), mirror);
+                    }
+                    if(!replace_halonet_inv_format_with_zip(zip_url)) {
+                        result = CURLcode::CURLE_URL_MALFORMAT;
+                        break;
+                    }
+
+                    using FilePtr = std::unique_ptr<std::FILE, int (*)(std::FILE *)>;
+                    FilePtr zip_file(std::fopen(zip_temp_file.string().c_str(), "wb"), &std::fclose);
+                    if(!zip_file) {
+                        result = CURLcode::CURLE_WRITE_ERROR;
+                        break;
+                    }
+
+                    ZipDownloadContext context{zip_file.get()};
+                    const CURLcode set_data_result = curl_easy_setopt(downloader->curl, CURLOPT_WRITEDATA, &context);
+                    const CURLcode set_url_result = curl_easy_setopt(downloader->curl, CURLOPT_URL, zip_url.c_str());
+                    if(set_data_result != CURLcode::CURLE_OK || set_url_result != CURLcode::CURLE_OK) {
+                        result = set_data_result != CURLcode::CURLE_OK ? set_data_result : set_url_result;
+                        break;
+                    }
+
+                    {
+                        std::lock_guard lock(downloader->mutex);
+                        if(downloader->status == DOWNLOAD_STAGE_CANCELING) {
+                            result = CURLcode::CURLE_ABORTED_BY_CALLBACK;
+                            canceled = true;
+                            break;
+                        }
+                        downloader->download_started = Clock::now();
+                        downloader->downloaded_size = 0;
+                        downloader->total_size = 0;
+                        downloader->status = DOWNLOAD_STAGE_DOWNLOADING;
+                    }
+
+                    result = curl_easy_perform(downloader->curl);
+                    zip_file.reset();
+
+                    {
+                        std::lock_guard lock(downloader->mutex);
+                        canceled = downloader->status == DownloadStage::DOWNLOAD_STAGE_CANCELING;
+                    }
+                    if(canceled) {
+                        break;
+                    }
+
+                    if(result == CURLcode::CURLE_OK && extract_halonet_zip_map(zip_temp_file, output_file, map, zip_extracted_size)) {
+                        zip_succeeded = true;
+                        break;
+                    }
+
+                    std::filesystem::remove(zip_temp_file, remove_error);
+                    std::filesystem::remove(output_file, remove_error);
+                }
+            }
+            else {
+                result = set_write_result;
+            }
+
+            std::filesystem::remove(zip_temp_file, remove_error);
+        }
+
+        {
+            std::lock_guard lock(downloader->mutex);
+            if(downloader->curl) {
+                curl_easy_cleanup(downloader->curl);
+                downloader->curl = nullptr;
             }
             downloader->buffer_used = 0;
             downloader->buffer.clear();
-            downloader->written_size = 0;
-            downloader->status = DownloadStage::DOWNLOAD_STAGE_FAILED;
+
+            if(inv_succeeded) {
+                downloader->status = DownloadStage::DOWNLOAD_STAGE_COMPLETE;
+            }
+            else if(zip_succeeded) {
+                downloader->written_size = zip_extracted_size;
+                downloader->status = DownloadStage::DOWNLOAD_STAGE_COMPLETE;
+            }
+            else {
+                downloader->written_size = 0;
+                downloader->status = DownloadStage::DOWNLOAD_STAGE_FAILED;
+            }
         }
 
-        if(downloader->status == DownloadStage::DOWNLOAD_STAGE_FAILED && !output_file.empty()) {
-            std::error_code ec;
-            std::filesystem::remove(output_file, ec);
+        if(!inv_succeeded && !zip_succeeded && !output_file.empty()) {
+            std::error_code remove_error;
+            std::filesystem::remove(output_file, remove_error);
         }
     }
     catch(...) {
@@ -213,6 +542,9 @@ void MapDownloader::dispatch_thread_function(MapDownloader *downloader) {
         downloader->status = DownloadStage::DOWNLOAD_STAGE_FAILED;
         std::error_code ec;
         std::filesystem::remove(downloader->output_file, ec);
+        if(!zip_temp_file.empty()) {
+            std::filesystem::remove(zip_temp_file, ec);
+        }
     }
 }
 
@@ -260,25 +592,12 @@ public:
         }
 
         // Check if this is a bad download once we have enough bytes for a map header.
-        std::byte header_data[0x800] = {};
-        if(userdata->written_size == 0 && userdata->buffer_used < sizeof(header_data) && bytes >= sizeof(header_data) - userdata->buffer_used) {
-            std::memcpy(header_data, userdata->buffer.data(), userdata->buffer_used);
-            std::memcpy(header_data + userdata->buffer_used, ptr, sizeof(header_data) - userdata->buffer_used);
+        std::array<std::byte, MAP_HEADER_SIZE> header_data{};
+        if(userdata->written_size == 0 && userdata->buffer_used < header_data.size() && bytes >= header_data.size() - userdata->buffer_used) {
+            std::memcpy(header_data.data(), userdata->buffer.data(), userdata->buffer_used);
+            std::memcpy(header_data.data() + userdata->buffer_used, ptr, header_data.size() - userdata->buffer_used);
 
-            const auto read_u32 = [](const std::byte *at) noexcept {
-                std::uint32_t value = 0;
-                std::memcpy(&value, at, sizeof(value));
-                return value;
-            };
-
-            bool bad_header = true;
-            if(read_u32(header_data) == 0x68656164 && read_u32(header_data + 0x7FC) == 0x666F6F74) {
-                bad_header = false;
-            }
-            else if(read_u32(header_data + 0x2C0) == 0x45686564 && read_u32(header_data + 0x5F0) == 0x47666F74) {
-                bad_header = false;
-            }
-            if(bad_header) {
+            if(!valid_map_header(header_data.data())) {
                 userdata->status = MapDownloader::DOWNLOAD_STAGE_FAILED;
                 return 0;
             }
