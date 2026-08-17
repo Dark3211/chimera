@@ -257,89 +257,99 @@ namespace Chimera {
                 return;
             }
 
+            // Process environment and model shaders in one tag-table traversal. The
+            // previous implementation walked the complete table twice even though the
+            // two tag classes are independent.
+            bool model_snapshot_capacity_exhausted = false;
             for(std::size_t i = 0; i < tag_count; i++) {
                 auto *tag = get_tag(i);
-                if(!valid_shader_environment_tag(tag)) {
+                if(!tag) {
                     continue;
                 }
 
-                material_quality_environment_scanned++;
+                if(tag->primary_class == TagClassInt::TAG_CLASS_SHADER_ENVIRONMENT) {
+                    if(!valid_shader_environment_tag(tag)) {
+                        continue;
+                    }
 
-                auto *shader = reinterpret_cast<ShaderEnvironment *>(tag->data);
-                const auto old_specular = shader->environment.specular.brightness;
-                const auto old_reflection_perpendicular = shader->environment.reflection.view_perpendicular_brightness;
-                const auto old_reflection_parallel = shader->environment.reflection.view_parallel_brightness;
+                    material_quality_environment_scanned++;
 
-                const auto new_specular = scale_material_value(old_specular, profile.environment_specular_scale);
-                const auto new_reflection_perpendicular = scale_material_value(old_reflection_perpendicular, profile.environment_reflection_perpendicular_scale);
-                const auto new_reflection_parallel = scale_material_value(old_reflection_parallel, profile.environment_reflection_parallel_scale);
+                    auto *shader = reinterpret_cast<ShaderEnvironment *>(tag->data);
+                    const auto old_specular = shader->environment.specular.brightness;
+                    const auto old_reflection_perpendicular = shader->environment.reflection.view_perpendicular_brightness;
+                    const auto old_reflection_parallel = shader->environment.reflection.view_parallel_brightness;
 
-                const bool specular_changed = new_specular != old_specular;
-                const bool reflection_changed = new_reflection_perpendicular != old_reflection_perpendicular ||
-                                                new_reflection_parallel != old_reflection_parallel;
+                    const auto new_specular = scale_material_value(old_specular, profile.environment_specular_scale);
+                    const auto new_reflection_perpendicular = scale_material_value(old_reflection_perpendicular, profile.environment_reflection_perpendicular_scale);
+                    const auto new_reflection_parallel = scale_material_value(old_reflection_parallel, profile.environment_reflection_parallel_scale);
 
-                auto &self_illumination = shader->environment.self_illumination;
-                const auto primary_on = scale_emissive_color(self_illumination.primary_on_color, profile);
-                const auto primary_off = scale_emissive_color(self_illumination.primary_off_color, profile);
-                const auto secondary_on = scale_emissive_color(self_illumination.secondary_on_color, profile);
-                const auto secondary_off = scale_emissive_color(self_illumination.secondary_off_color, profile);
-                const auto plasma_on = scale_emissive_color(self_illumination.plasma_on_color, profile);
-                const auto plasma_off = scale_emissive_color(self_illumination.plasma_off_color, profile);
+                    const bool specular_changed = new_specular != old_specular;
+                    const bool reflection_changed = new_reflection_perpendicular != old_reflection_perpendicular ||
+                                                    new_reflection_parallel != old_reflection_parallel;
 
-                const bool emissive_changed =
-                    emissive_color_changed(self_illumination.primary_on_color, primary_on) ||
-                    emissive_color_changed(self_illumination.primary_off_color, primary_off) ||
-                    emissive_color_changed(self_illumination.secondary_on_color, secondary_on) ||
-                    emissive_color_changed(self_illumination.secondary_off_color, secondary_off) ||
-                    emissive_color_changed(self_illumination.plasma_on_color, plasma_on) ||
-                    emissive_color_changed(self_illumination.plasma_off_color, plasma_off);
+                    auto &self_illumination = shader->environment.self_illumination;
+                    const auto primary_on = scale_emissive_color(self_illumination.primary_on_color, profile);
+                    const auto primary_off = scale_emissive_color(self_illumination.primary_off_color, profile);
+                    const auto secondary_on = scale_emissive_color(self_illumination.secondary_on_color, profile);
+                    const auto secondary_off = scale_emissive_color(self_illumination.secondary_off_color, profile);
+                    const auto plasma_on = scale_emissive_color(self_illumination.plasma_on_color, profile);
+                    const auto plasma_off = scale_emissive_color(self_illumination.plasma_off_color, profile);
 
-                if(specular_changed || reflection_changed) {
-                    if(material_quality_snapshot_count < material_quality_snapshots.size()) {
-                        material_quality_snapshots[material_quality_snapshot_count++] = MaterialQualitySnapshot {
+                    const bool emissive_changed =
+                        emissive_color_changed(self_illumination.primary_on_color, primary_on) ||
+                        emissive_color_changed(self_illumination.primary_off_color, primary_off) ||
+                        emissive_color_changed(self_illumination.secondary_on_color, secondary_on) ||
+                        emissive_color_changed(self_illumination.secondary_off_color, secondary_off) ||
+                        emissive_color_changed(self_illumination.plasma_on_color, plasma_on) ||
+                        emissive_color_changed(self_illumination.plasma_off_color, plasma_off);
+
+                    if(specular_changed || reflection_changed) {
+                        if(material_quality_snapshot_count < material_quality_snapshots.size()) {
+                            material_quality_snapshots[material_quality_snapshot_count++] = MaterialQualitySnapshot {
+                                tag->id,
+                                old_specular,
+                                old_reflection_perpendicular,
+                                old_reflection_parallel
+                            };
+
+                            material_quality_materials_modified++;
+                            if(specular_changed) {
+                                material_quality_specular_modified++;
+                            }
+                            if(reflection_changed) {
+                                material_quality_reflection_modified++;
+                            }
+
+                            shader->environment.specular.brightness = new_specular;
+                            shader->environment.reflection.view_perpendicular_brightness = new_reflection_perpendicular;
+                            shader->environment.reflection.view_parallel_brightness = new_reflection_parallel;
+                        }
+                    }
+
+                    if(emissive_changed && emissive_quality_snapshot_count < emissive_quality_snapshots.size()) {
+                        emissive_quality_snapshots[emissive_quality_snapshot_count++] = EmissiveQualitySnapshot {
                             tag->id,
-                            old_specular,
-                            old_reflection_perpendicular,
-                            old_reflection_parallel
+                            self_illumination.primary_on_color,
+                            self_illumination.primary_off_color,
+                            self_illumination.secondary_on_color,
+                            self_illumination.secondary_off_color,
+                            self_illumination.plasma_on_color,
+                            self_illumination.plasma_off_color
                         };
 
-                        material_quality_materials_modified++;
-                        if(specular_changed) {
-                            material_quality_specular_modified++;
-                        }
-                        if(reflection_changed) {
-                            material_quality_reflection_modified++;
-                        }
-
-                        shader->environment.specular.brightness = new_specular;
-                        shader->environment.reflection.view_perpendicular_brightness = new_reflection_perpendicular;
-                        shader->environment.reflection.view_parallel_brightness = new_reflection_parallel;
+                        self_illumination.primary_on_color = primary_on;
+                        self_illumination.primary_off_color = primary_off;
+                        self_illumination.secondary_on_color = secondary_on;
+                        self_illumination.secondary_off_color = secondary_off;
+                        self_illumination.plasma_on_color = plasma_on;
+                        self_illumination.plasma_off_color = plasma_off;
                     }
+
+                    continue;
                 }
 
-                if(emissive_changed && emissive_quality_snapshot_count < emissive_quality_snapshots.size()) {
-                    emissive_quality_snapshots[emissive_quality_snapshot_count++] = EmissiveQualitySnapshot {
-                        tag->id,
-                        self_illumination.primary_on_color,
-                        self_illumination.primary_off_color,
-                        self_illumination.secondary_on_color,
-                        self_illumination.secondary_off_color,
-                        self_illumination.plasma_on_color,
-                        self_illumination.plasma_off_color
-                    };
-
-                    self_illumination.primary_on_color = primary_on;
-                    self_illumination.primary_off_color = primary_off;
-                    self_illumination.secondary_on_color = secondary_on;
-                    self_illumination.secondary_off_color = secondary_off;
-                    self_illumination.plasma_on_color = plasma_on;
-                    self_illumination.plasma_off_color = plasma_off;
-                }
-            }
-
-            for(std::size_t i = 0; i < tag_count; i++) {
-                auto *tag = get_tag(i);
-                if(!valid_shader_model_tag(tag)) {
+                if(tag->primary_class != TagClassInt::TAG_CLASS_SHADER_MODEL ||
+                   model_snapshot_capacity_exhausted || !valid_shader_model_tag(tag)) {
                     continue;
                 }
 
@@ -361,7 +371,10 @@ namespace Chimera {
                 }
 
                 if(model_material_quality_snapshot_count >= model_material_quality_snapshots.size()) {
-                    break;
+                    // Equivalent to the old model-only loop's break, while still
+                    // allowing later environment shaders in this unified traversal.
+                    model_snapshot_capacity_exhausted = true;
+                    continue;
                 }
 
                 model_material_quality_snapshots[model_material_quality_snapshot_count++] = ModelMaterialQualitySnapshot {
