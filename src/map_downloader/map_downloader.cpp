@@ -72,6 +72,43 @@ namespace {
         return value;
     }
 
+    char ascii_lower(char c) noexcept {
+        if(c >= 'A' && c <= 'Z') {
+            return static_cast<char>(c + ('a' - 'A'));
+        }
+        return c;
+    }
+
+    std::size_t find_ascii_case_insensitive(const std::string &value,
+                                            const char *needle,
+                                            std::size_t start = 0) noexcept {
+        if(!needle) {
+            return std::string::npos;
+        }
+        const std::size_t needle_length = std::strlen(needle);
+        if(needle_length == 0) {
+            return std::min(start, value.size());
+        }
+        if(start > value.size() || needle_length > value.size() - start) {
+            return std::string::npos;
+        }
+
+        const std::size_t last = value.size() - needle_length;
+        for(std::size_t i = start; i <= last; ++i) {
+            bool matches = true;
+            for(std::size_t j = 0; j < needle_length; ++j) {
+                if(ascii_lower(value[i + j]) != ascii_lower(needle[j])) {
+                    matches = false;
+                    break;
+                }
+            }
+            if(matches) {
+                return i;
+            }
+        }
+        return std::string::npos;
+    }
+
     bool query_parameter_is_inv(const std::string &url, std::size_t position) noexcept {
         constexpr std::size_t FORMAT_LENGTH = 10; // "format=inv"
         if(position == std::string::npos) {
@@ -95,8 +132,8 @@ namespace {
         return true;
     }
 
-    bool halonet_inv_url(const std::string &url_template) {
-        const std::string lower = lowercase_classic(url_template);
+    bool halonet_inv_url(const std::string &url) {
+        const std::string lower = lowercase_classic(url);
         const auto scheme = lower.find("://");
         if(scheme == std::string::npos) {
             return false;
@@ -113,11 +150,16 @@ namespace {
             return false;
         }
 
-        if(lower.compare(path_start, sizeof("/halonet/locator.php") - 1, "/halonet/locator.php") != 0) {
+        constexpr std::size_t LOCATOR_PATH_LENGTH = sizeof("/halonet/locator.php") - 1;
+        if(lower.compare(path_start, LOCATOR_PATH_LENGTH, "/halonet/locator.php") != 0) {
+            return false;
+        }
+        const std::size_t locator_path_end = path_start + LOCATOR_PATH_LENGTH;
+        if(locator_path_end < lower.size() && lower[locator_path_end] != '?' && lower[locator_path_end] != '#') {
             return false;
         }
 
-        const auto format = lower.find("format=inv", path_start + sizeof("/halonet/locator.php") - 1);
+        const auto format = lower.find("format=inv", locator_path_end);
         return query_parameter_is_inv(lower, format);
     }
 
@@ -253,11 +295,10 @@ namespace {
         }
 
         const std::string wanted = lowercase_classic(requested_map);
-        const std::string lower_html = lowercase_classic(context.data);
         std::size_t path_start = 0;
-        while((path_start = lower_html.find("/maps/", path_start)) != std::string::npos) {
+        while((path_start = find_ascii_case_insensitive(context.data, "/maps/", path_start)) != std::string::npos) {
             const std::size_t name_start = path_start + sizeof("/maps/") - 1;
-            const std::size_t extension = lower_html.find(".zip", name_start);
+            const std::size_t extension = find_ascii_case_insensitive(context.data, ".zip", name_start);
             if(extension == std::string::npos) {
                 break;
             }
@@ -469,11 +510,13 @@ void MapDownloader::dispatch_thread_function(MapDownloader *downloader) {
 
         long http_response_code = 0;
         bool output_open_failed = false;
+        bool halonet_inv_source = false;
         for(const auto &mirror : mirrors) {
             std::string url = partial_url;
             if(has_mirror_placeholder) {
                 url = replace_all_literal(std::move(url), match[0].str(), mirror);
             }
+            halonet_inv_source = halonet_inv_source || halonet_inv_url(url);
 
             {
                 std::lock_guard lock(downloader->mutex);
@@ -509,12 +552,12 @@ void MapDownloader::dispatch_thread_function(MapDownloader *downloader) {
             http_response_code = 0;
             curl_easy_getinfo(downloader->curl, CURLINFO_RESPONSE_CODE, &http_response_code);
 
-            bool canceled = false;
+            bool canceled_now = false;
             {
                 std::lock_guard lock(downloader->mutex);
-                canceled = downloader->status == DownloadStage::DOWNLOAD_STAGE_CANCELING;
+                canceled_now = downloader->status == DownloadStage::DOWNLOAD_STAGE_CANCELING;
             }
-            if(canceled) {
+            if(canceled_now) {
                 break;
             }
 
@@ -566,7 +609,7 @@ void MapDownloader::dispatch_thread_function(MapDownloader *downloader) {
         const bool protocol_failure = result == CURLcode::CURLE_HTTP_RETURNED_ERROR && http_response_code != 0;
         const bool unavailable_inv_body = result == CURLcode::CURLE_OK && inv_write_ok && inv_written_size < MAP_HEADER_SIZE;
         const bool can_try_zip = !inv_succeeded && !canceled && !output_open_failed &&
-                                 halonet_inv_url(url_template) && (protocol_failure || unavailable_inv_body);
+                                 halonet_inv_source && (protocol_failure || unavailable_inv_body);
 
         if(!inv_succeeded) {
             std::error_code remove_error;
@@ -578,131 +621,146 @@ void MapDownloader::dispatch_thread_function(MapDownloader *downloader) {
         if(can_try_zip) {
             {
                 std::lock_guard lock(downloader->mutex);
-                downloader->status = DOWNLOAD_STAGE_STARTING;
-                downloader->buffer_used = 0;
-                downloader->written_size = 0;
-                downloader->downloaded_size = 0;
-                downloader->total_size = 0;
+                if(downloader->status == DOWNLOAD_STAGE_CANCELING) {
+                    canceled = true;
+                }
+                else {
+                    downloader->status = DOWNLOAD_STAGE_STARTING;
+                    downloader->buffer_used = 0;
+                    downloader->written_size = 0;
+                    downloader->downloaded_size = 0;
+                    downloader->total_size = 0;
+                }
             }
 
-            zip_temp_file = output_file;
-            zip_temp_file += ".zip";
-            std::error_code remove_error;
-            std::filesystem::remove(zip_temp_file, remove_error);
-
-            auto try_zip_url = [&](const std::string &candidate_url) -> bool {
+            if(!canceled) {
+                zip_temp_file = output_file;
+                zip_temp_file += ".zip";
+                std::error_code remove_error;
                 std::filesystem::remove(zip_temp_file, remove_error);
-                std::filesystem::remove(output_file, remove_error);
 
-                using FilePtr = std::unique_ptr<std::FILE, int (*)(std::FILE *)>;
-                FilePtr zip_file(std::fopen(zip_temp_file.string().c_str(), "wb"), &std::fclose);
-                if(!zip_file) {
-                    result = CURLcode::CURLE_WRITE_ERROR;
-                    return false;
-                }
+                auto try_zip_url = [&](const std::string &candidate_url) -> bool {
+                    std::filesystem::remove(zip_temp_file, remove_error);
+                    std::filesystem::remove(output_file, remove_error);
 
-                ZipDownloadContext context{zip_file.get()};
-                const CURLcode set_write_result = curl_easy_setopt(downloader->curl, CURLOPT_WRITEFUNCTION, zip_write_callback);
-                const CURLcode set_data_result = curl_easy_setopt(downloader->curl, CURLOPT_WRITEDATA, &context);
-                const CURLcode set_url_result = curl_easy_setopt(downloader->curl, CURLOPT_URL, candidate_url.c_str());
-                if(set_write_result != CURLcode::CURLE_OK || set_data_result != CURLcode::CURLE_OK || set_url_result != CURLcode::CURLE_OK) {
-                    if(set_write_result != CURLcode::CURLE_OK) {
-                        result = set_write_result;
-                    }
-                    else {
-                        result = set_data_result != CURLcode::CURLE_OK ? set_data_result : set_url_result;
-                    }
-                    return false;
-                }
-
-                {
-                    std::lock_guard lock(downloader->mutex);
-                    if(downloader->status == DOWNLOAD_STAGE_CANCELING) {
-                        result = CURLcode::CURLE_ABORTED_BY_CALLBACK;
-                        canceled = true;
+                    using FilePtr = std::unique_ptr<std::FILE, int (*)(std::FILE *)>;
+                    FilePtr zip_file(std::fopen(zip_temp_file.string().c_str(), "wb"), &std::fclose);
+                    if(!zip_file) {
+                        result = CURLcode::CURLE_WRITE_ERROR;
                         return false;
                     }
-                    downloader->download_started = Clock::now();
-                    downloader->downloaded_size = 0;
-                    downloader->total_size = 0;
-                    downloader->status = DOWNLOAD_STAGE_DOWNLOADING;
-                }
 
-                result = curl_easy_perform(downloader->curl);
-                zip_file.reset();
+                    ZipDownloadContext context{zip_file.get()};
+                    const CURLcode set_write_result = curl_easy_setopt(downloader->curl, CURLOPT_WRITEFUNCTION, zip_write_callback);
+                    const CURLcode set_data_result = curl_easy_setopt(downloader->curl, CURLOPT_WRITEDATA, &context);
+                    const CURLcode set_url_result = curl_easy_setopt(downloader->curl, CURLOPT_URL, candidate_url.c_str());
+                    if(set_write_result != CURLcode::CURLE_OK || set_data_result != CURLcode::CURLE_OK || set_url_result != CURLcode::CURLE_OK) {
+                        if(set_write_result != CURLcode::CURLE_OK) {
+                            result = set_write_result;
+                        }
+                        else {
+                            result = set_data_result != CURLcode::CURLE_OK ? set_data_result : set_url_result;
+                        }
+                        return false;
+                    }
 
-                {
-                    std::lock_guard lock(downloader->mutex);
-                    canceled = downloader->status == DownloadStage::DOWNLOAD_STAGE_CANCELING;
-                }
-                if(canceled) {
+                    {
+                        std::lock_guard lock(downloader->mutex);
+                        if(downloader->status == DOWNLOAD_STAGE_CANCELING) {
+                            result = CURLcode::CURLE_ABORTED_BY_CALLBACK;
+                            canceled = true;
+                            return false;
+                        }
+                        downloader->download_started = Clock::now();
+                        downloader->downloaded_size = 0;
+                        downloader->total_size = 0;
+                        downloader->status = DOWNLOAD_STAGE_DOWNLOADING;
+                    }
+
+                    result = curl_easy_perform(downloader->curl);
+                    zip_file.reset();
+
+                    {
+                        std::lock_guard lock(downloader->mutex);
+                        canceled = downloader->status == DownloadStage::DOWNLOAD_STAGE_CANCELING;
+                    }
+                    if(canceled) {
+                        return false;
+                    }
+
+                    if(result == CURLcode::CURLE_OK && extract_halonet_zip_map(zip_temp_file, output_file, map, zip_extracted_size)) {
+                        return true;
+                    }
+
+                    std::filesystem::remove(zip_temp_file, remove_error);
+                    std::filesystem::remove(output_file, remove_error);
                     return false;
-                }
+                };
 
-                if(result == CURLcode::CURLE_OK && extract_halonet_zip_map(zip_temp_file, output_file, map, zip_extracted_size)) {
-                    return true;
+                for(const auto &mirror : mirrors) {
+                    std::string zip_url = partial_url;
+                    if(has_mirror_placeholder) {
+                        zip_url = replace_all_literal(std::move(zip_url), match[0].str(), mirror);
+                    }
+                    if(!replace_halonet_inv_format_with_zip(zip_url)) {
+                        result = CURLcode::CURLE_URL_MALFORMAT;
+                        break;
+                    }
+
+                    if(try_zip_url(zip_url)) {
+                        zip_succeeded = true;
+                        break;
+                    }
+                    if(canceled) {
+                        break;
+                    }
+
+                    std::string direct_zip_url;
+                    if(build_halonet_direct_zip_url(zip_url, requested_map_urlencoded_string, direct_zip_url) &&
+                       try_zip_url(direct_zip_url)) {
+                        zip_succeeded = true;
+                        break;
+                    }
+                    if(canceled) {
+                        break;
+                    }
+
+                    {
+                        std::lock_guard lock(downloader->mutex);
+                        if(downloader->status == DOWNLOAD_STAGE_CANCELING) {
+                            canceled = true;
+                        }
+                        else {
+                            downloader->downloaded_size = 0;
+                            downloader->total_size = 0;
+                            downloader->status = DOWNLOAD_STAGE_STARTING;
+                        }
+                    }
+                    if(canceled) {
+                        break;
+                    }
+
+                    std::string canonical_zip_url;
+                    if(resolve_halonet_canonical_zip_url(static_cast<CURL *>(downloader->curl),
+                                                         zip_url,
+                                                         requested_map,
+                                                         canonical_zip_url) &&
+                       try_zip_url(canonical_zip_url)) {
+                        zip_succeeded = true;
+                        break;
+                    }
+
+                    {
+                        std::lock_guard lock(downloader->mutex);
+                        canceled = downloader->status == DownloadStage::DOWNLOAD_STAGE_CANCELING;
+                    }
+                    if(canceled) {
+                        break;
+                    }
                 }
 
                 std::filesystem::remove(zip_temp_file, remove_error);
-                std::filesystem::remove(output_file, remove_error);
-                return false;
-            };
-
-            for(const auto &mirror : mirrors) {
-                std::string zip_url = partial_url;
-                if(has_mirror_placeholder) {
-                    zip_url = replace_all_literal(std::move(zip_url), match[0].str(), mirror);
-                }
-                if(!replace_halonet_inv_format_with_zip(zip_url)) {
-                    result = CURLcode::CURLE_URL_MALFORMAT;
-                    break;
-                }
-
-                if(try_zip_url(zip_url)) {
-                    zip_succeeded = true;
-                    break;
-                }
-                if(canceled) {
-                    break;
-                }
-
-                std::string direct_zip_url;
-                if(build_halonet_direct_zip_url(zip_url, requested_map_urlencoded_string, direct_zip_url) &&
-                   try_zip_url(direct_zip_url)) {
-                    zip_succeeded = true;
-                    break;
-                }
-                if(canceled) {
-                    break;
-                }
-
-                {
-                    std::lock_guard lock(downloader->mutex);
-                    downloader->downloaded_size = 0;
-                    downloader->total_size = 0;
-                    downloader->status = DOWNLOAD_STAGE_STARTING;
-                }
-
-                std::string canonical_zip_url;
-                if(resolve_halonet_canonical_zip_url(static_cast<CURL *>(downloader->curl),
-                                                     zip_url,
-                                                     requested_map,
-                                                     canonical_zip_url) &&
-                   try_zip_url(canonical_zip_url)) {
-                    zip_succeeded = true;
-                    break;
-                }
-
-                {
-                    std::lock_guard lock(downloader->mutex);
-                    canceled = downloader->status == DownloadStage::DOWNLOAD_STAGE_CANCELING;
-                }
-                if(canceled) {
-                    break;
-                }
             }
-
-            std::filesystem::remove(zip_temp_file, remove_error);
         }
 
         {
@@ -714,16 +772,18 @@ void MapDownloader::dispatch_thread_function(MapDownloader *downloader) {
             downloader->buffer_used = 0;
             downloader->buffer.clear();
 
-            if(inv_succeeded) {
-                downloader->status = DownloadStage::DOWNLOAD_STAGE_COMPLETE;
-            }
-            else if(zip_succeeded) {
-                downloader->written_size = zip_extracted_size;
-                downloader->status = DownloadStage::DOWNLOAD_STAGE_COMPLETE;
-            }
-            else {
-                downloader->written_size = 0;
-                downloader->status = DownloadStage::DOWNLOAD_STAGE_FAILED;
+            if(downloader->status != DownloadStage::DOWNLOAD_STAGE_CANCELING) {
+                if(inv_succeeded) {
+                    downloader->status = DownloadStage::DOWNLOAD_STAGE_COMPLETE;
+                }
+                else if(zip_succeeded) {
+                    downloader->written_size = zip_extracted_size;
+                    downloader->status = DownloadStage::DOWNLOAD_STAGE_COMPLETE;
+                }
+                else {
+                    downloader->written_size = 0;
+                    downloader->status = DownloadStage::DOWNLOAD_STAGE_FAILED;
+                }
             }
         }
 
@@ -797,8 +857,8 @@ public:
         }
 
         // Check if this is a bad download once we have enough bytes for a map header.
-        std::array<std::byte, MAP_HEADER_SIZE> header_data{};
-        if(userdata->written_size == 0 && userdata->buffer_used < header_data.size() && bytes >= header_data.size() - userdata->buffer_used) {
+        if(userdata->written_size == 0 && userdata->buffer_used < MAP_HEADER_SIZE && bytes >= MAP_HEADER_SIZE - userdata->buffer_used) {
+            std::array<std::byte, MAP_HEADER_SIZE> header_data{};
             std::memcpy(header_data.data(), userdata->buffer.data(), userdata->buffer_used);
             std::memcpy(header_data.data() + userdata->buffer_used, ptr, header_data.size() - userdata->buffer_used);
 
