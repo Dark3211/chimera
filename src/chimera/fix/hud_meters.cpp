@@ -25,8 +25,27 @@ namespace Chimera {
     }
 
     extern "C" bool hud_meter_shader_draw(RasterizerMeterParams *meter, const void *vertices) noexcept {
+        if(!meter || !vertices || !d3d9_device_caps || !global_d3d9_device || !*global_d3d9_device) {
+            return false;
+        }
+
         // Use fixed function draw if we don't have ps_2_0 support
         if(d3d9_device_caps->PixelShaderVersion < 0xffff0200 || !chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_HUD_METERS] || global_fix_flags.gearbox_meters) {
+            return false;
+        }
+
+        // The pixel-shader path mirrors sampler 0 into sampler 1. If the source
+        // texture is unavailable, leave all render state untouched and let the
+        // existing fixed-function path handle the meter instead.
+        IDirect3DBaseTexture9 *sampler0_texture = nullptr;
+        const HRESULT get_texture_result = IDirect3DDevice9_GetTexture(*global_d3d9_device, 0, &sampler0_texture);
+        if(FAILED(get_texture_result) || !sampler0_texture) {
+            return false;
+        }
+
+        const HRESULT set_texture_result = IDirect3DDevice9_SetTexture(*global_d3d9_device, 1, sampler0_texture);
+        IDirect3DBaseTexture9_Release(sampler0_texture);
+        if(FAILED(set_texture_result)) {
             return false;
         }
 
@@ -68,11 +87,6 @@ namespace Chimera {
         rasterizer_set_render_state(D3DRS_DESTBLEND, D3DBLEND_SRCALPHA);
         rasterizer_set_render_state(D3DRS_BLENDOP, D3DBLENDOP_ADD);
 
-        IDirect3DBaseTexture9 *sampler0_texture = NULL;
-        IDirect3DDevice9_GetTexture(*global_d3d9_device, 0, &sampler0_texture);
-        IDirect3DDevice9_SetTexture(*global_d3d9_device, 1, sampler0_texture);
-        IDirect3DBaseTexture9_Release(sampler0_texture);
-
         rasterizer_set_sampler_state(1, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
         rasterizer_set_sampler_state(1, D3DSAMP_MINFILTER, D3DTEXF_POINT);
 
@@ -84,6 +98,10 @@ namespace Chimera {
     }
 
     extern "C" void hud_meter_set_xbox_channel_order(RasterizerMeterParams *meter, HUDMeterElement *element) noexcept {
+        if(!meter || !element) {
+            return;
+        }
+
         if(TEST_FLAG(element->meter_flags, HUD_METER_FLAGS_USE_XBOX_SHADING_BIT)) {
             meter->tint_mode_2 = 0;
         }

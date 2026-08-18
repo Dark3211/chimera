@@ -14,10 +14,20 @@ namespace Chimera {
     }
 
     extern "C" void check_for_invalid_bitmap_format(BitmapData *bitmap) noexcept {
-        // Convert invalid formats
+        if(!bitmap) {
+            return;
+        }
+
+        // Convert invalid formats. Keep the original pixels and format untouched if
+        // conversion/allocation fails so a recoverable allocation failure cannot turn
+        // a valid bitmap into a null/inconsistent texture.
         if(bitmap->format == BITMAP_DATA_FORMAT_A8 || bitmap->format == BITMAP_DATA_FORMAT_AY8 || bitmap->format == BITMAP_DATA_FORMAT_P8_BUMP) {
             void *new_bitmap = bitmap_covert_format(bitmap);
-            GlobalFree(bitmap->base_address);
+            if(!new_bitmap) {
+                return;
+            }
+
+            auto *old_bitmap = bitmap->base_address;
             bitmap->base_address = new_bitmap;
 
             // Tell the game to treat this bitmap data block as either A8Y8 or A8R8G8B8.
@@ -33,6 +43,10 @@ namespace Chimera {
 
                 default:
                     break;
+            }
+
+            if(old_bitmap) {
+                GlobalFree(old_bitmap);
             }
         }
     }
