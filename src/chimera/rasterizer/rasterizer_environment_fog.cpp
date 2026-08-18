@@ -108,6 +108,10 @@ namespace Chimera {
     static bool rasterizer_environment_fog_screen_is_active() noexcept {
         if(!d3d9_device_caps || !rasterizer_debug_options || !global_window_parameters || !rasterizer_globals ||
            !global_d3d9_device || !*global_d3d9_device ||
+           !chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_BLACK] ||
+           !chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_FOG] ||
+           !chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_FOG_ALPHA_KILL] ||
+           !chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_FOG_SCREEN] ||
            d3d9_device_caps->PixelShaderVersion < 0xffff0200 || !rasterizer_debug_options->draw_environment_fog_screen) {
             return false;
         }
@@ -530,8 +534,8 @@ namespace Chimera {
                             skinning.node_matrices = &identity;
                         }
                         else {
-							skinning.node_matrix_count = group->node_matrix_count;
-							skinning.node_matrices = group->node_matrices;
+                            skinning.node_matrix_count = group->node_matrix_count;
+                            skinning.node_matrices = group->node_matrices;
                         }
 
                         rasterizer_set_model_skinning(&skinning, !TEST_FLAG(group->geometry_flags, RASTERIZER_GEOMETRY_FLAGS_PARTS_DEFINE_LOCAL_NODES_BIT));
@@ -705,12 +709,12 @@ namespace Chimera {
                 group->triangle_count = triangle_count;
                 group->dynamic_vertex_buffer_index = dynamic_vertex_buffer_index;
                 group->vertex_buffers = vertex_buffer;
-			    group->model_base_map_scale = local_params->base_map_scale;
+                group->model_base_map_scale = local_params->base_map_scale;
 
                 static Matrix4x3 *local_node_matrices;
-				static short local_node_matrix_count;
-				static RenderLighting *local_lighting = nullptr;
-				static RenderAnimation *local_animation = nullptr;
+                static short local_node_matrix_count;
+                static RenderLighting *local_lighting = nullptr;
+                static RenderAnimation *local_animation = nullptr;
 
                 if(!local_params_queued_flag) {
                     local_node_matrices = reinterpret_cast<Matrix4x3 *>(rasterizer_memory_alloc(local_params->skinning.node_matrices, sizeof(Matrix4x3) * local_params->skinning.node_matrix_count));
@@ -727,10 +731,10 @@ namespace Chimera {
                     group->local_node_remap_table_size = 0;
                 }
 
-				group->node_matrices = local_node_matrices;
-				group->node_matrix_count= local_node_matrix_count;
-				group->lighting = local_lighting;
-				group->animation = local_animation;
+                group->node_matrices = local_node_matrices;
+                group->node_matrix_count= local_node_matrix_count;
+                group->lighting = local_lighting;
+                group->animation = local_animation;
             }
         }
     }
