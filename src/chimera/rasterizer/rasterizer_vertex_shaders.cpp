@@ -23,6 +23,7 @@ namespace Chimera {
 
     static IDirect3DVertexShader9 *generic_vertex_shaders_3_0[NUMBER_OF_GENERIC_VERTEX_SHADERS] = {nullptr};
     static bool vsh_initialized = false;
+    static bool vsh_creation_failed = false;
 
     // Realistically this function only ever returns generic vertex shaders. The built-in one does the rest.
     IDirect3DVertexShader9 *rasterizer_get_vertex_shader(std::uint16_t index) noexcept {
@@ -57,19 +58,36 @@ namespace Chimera {
     }
 
     void rasterizer_create_vertex_shaders_3_0() noexcept {
-        if(!vsh_initialized && d3d9_device_caps && global_d3d9_device && *global_d3d9_device) {
+        if(!vsh_initialized && !vsh_creation_failed && d3d9_device_caps && global_d3d9_device && *global_d3d9_device) {
             if(!(d3d9_device_caps->VertexShaderVersion < 0xfffe0300)) {
-                IDirect3DDevice9_CreateVertexShader(*global_d3d9_device, reinterpret_cast<DWORD *>(vsh_transparent_generic), &generic_vertex_shaders_3_0[0]);
-                IDirect3DDevice9_CreateVertexShader(*global_d3d9_device, reinterpret_cast<DWORD *>(vsh_transparent_generic_lit_m), &generic_vertex_shaders_3_0[1]);
-                IDirect3DDevice9_CreateVertexShader(*global_d3d9_device, reinterpret_cast<DWORD *>(vsh_transparent_generic_m), &generic_vertex_shaders_3_0[2]);
-                IDirect3DDevice9_CreateVertexShader(*global_d3d9_device, reinterpret_cast<DWORD *>(vsh_transparent_generic_object_centered), &generic_vertex_shaders_3_0[3]);
-                IDirect3DDevice9_CreateVertexShader(*global_d3d9_device, reinterpret_cast<DWORD *>(vsh_transparent_generic_object_centered_m), &generic_vertex_shaders_3_0[4]);
-                IDirect3DDevice9_CreateVertexShader(*global_d3d9_device, reinterpret_cast<DWORD *>(vsh_transparent_generic_reflection), &generic_vertex_shaders_3_0[5]);
-                IDirect3DDevice9_CreateVertexShader(*global_d3d9_device, reinterpret_cast<DWORD *>(vsh_transparent_generic_reflection_m), &generic_vertex_shaders_3_0[6]);
-                IDirect3DDevice9_CreateVertexShader(*global_d3d9_device, reinterpret_cast<DWORD *>(vsh_transparent_generic_screenspace), &generic_vertex_shaders_3_0[7]);
-                IDirect3DDevice9_CreateVertexShader(*global_d3d9_device, reinterpret_cast<DWORD *>(vsh_transparent_generic_screenspace_m), &generic_vertex_shaders_3_0[8]);
-                IDirect3DDevice9_CreateVertexShader(*global_d3d9_device, reinterpret_cast<DWORD *>(vsh_transparent_generic_viewer_centered), &generic_vertex_shaders_3_0[9]);
-                IDirect3DDevice9_CreateVertexShader(*global_d3d9_device, reinterpret_cast<DWORD *>(vsh_transparent_generic_viewer_centered_m), &generic_vertex_shaders_3_0[10]);
+                auto create_shader = [](IDirect3DDevice9 *device, const void *shader_bytecode, IDirect3DVertexShader9 **shader) noexcept {
+                    const auto result = IDirect3DDevice9_CreateVertexShader(device, reinterpret_cast<const DWORD *>(shader_bytecode), shader);
+                    return SUCCEEDED(result) && *shader;
+                };
+
+                const bool created_all =
+                    create_shader(*global_d3d9_device, vsh_transparent_generic, &generic_vertex_shaders_3_0[0]) &&
+                    create_shader(*global_d3d9_device, vsh_transparent_generic_lit_m, &generic_vertex_shaders_3_0[1]) &&
+                    create_shader(*global_d3d9_device, vsh_transparent_generic_m, &generic_vertex_shaders_3_0[2]) &&
+                    create_shader(*global_d3d9_device, vsh_transparent_generic_object_centered, &generic_vertex_shaders_3_0[3]) &&
+                    create_shader(*global_d3d9_device, vsh_transparent_generic_object_centered_m, &generic_vertex_shaders_3_0[4]) &&
+                    create_shader(*global_d3d9_device, vsh_transparent_generic_reflection, &generic_vertex_shaders_3_0[5]) &&
+                    create_shader(*global_d3d9_device, vsh_transparent_generic_reflection_m, &generic_vertex_shaders_3_0[6]) &&
+                    create_shader(*global_d3d9_device, vsh_transparent_generic_screenspace, &generic_vertex_shaders_3_0[7]) &&
+                    create_shader(*global_d3d9_device, vsh_transparent_generic_screenspace_m, &generic_vertex_shaders_3_0[8]) &&
+                    create_shader(*global_d3d9_device, vsh_transparent_generic_viewer_centered, &generic_vertex_shaders_3_0[9]) &&
+                    create_shader(*global_d3d9_device, vsh_transparent_generic_viewer_centered_m, &generic_vertex_shaders_3_0[10]);
+
+                if(!created_all) {
+                    for(auto &shader : generic_vertex_shaders_3_0) {
+                        if(shader) {
+                            IDirect3DVertexShader9_Release(shader);
+                            shader = nullptr;
+                        }
+                    }
+                    vsh_creation_failed = true;
+                    return;
+                }
 
                 vsh_initialized = true;
             }
@@ -77,13 +95,14 @@ namespace Chimera {
     }
 
     void rasterizer_release_vertex_shaders_3_0() noexcept {
-        for(int i = 0; i < NUMBER_OF_GENERIC_VERTEX_SHADERS; i++) {
-            if(generic_vertex_shaders_3_0[i]) {
-                IDirect3DVertexShader9_Release(generic_vertex_shaders_3_0[i]);
-                generic_vertex_shaders_3_0[i] = nullptr;
+        for(auto &shader : generic_vertex_shaders_3_0) {
+            if(shader) {
+                IDirect3DVertexShader9_Release(shader);
+                shader = nullptr;
             }
         }
         vsh_initialized = false;
+        vsh_creation_failed = false;
     }
 
 }
