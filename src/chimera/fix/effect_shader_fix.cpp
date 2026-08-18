@@ -88,7 +88,7 @@ namespace Chimera {
     }
 
     extern "C" void set_up_zsprites(TransparentGeometryGroup *group) noexcept {
-        if(d3d9_device_caps->PixelShaderVersion < 0xffff0200) {
+        if(!group || !group->shader || !d3d9_device_caps || !global_d3d9_device || !*global_d3d9_device || !aux_buffer || !*aux_buffer || d3d9_device_caps->PixelShaderVersion < 0xffff0200) {
             return;
         }
 
@@ -110,12 +110,22 @@ namespace Chimera {
 
             int shader_index = game_engine() == GameEngine::GAME_ENGINE_CUSTOM_EDITION ? effect_shader_permutation_index : effect_shader_permutation_index - 1;
             shader_index = CHIMERA_PIXEL_SHADER_EFF_NLIN_TINT_Z + (shader_index - SHADER_EFFECT_EFFECT_NONLINEAR_TINT);
+            if(shader_index < CHIMERA_PIXEL_SHADER_EFF_NLIN_TINT_Z || shader_index > CHIMERA_PIXEL_SHADER_EFF_NORMAL_TINT_MUL_ADD_Z) {
+                return;
+            }
+
+            auto *pixel_shader = chimera_pixel_shaders[shader_index];
+            auto *vertex_shader = rasterizer_get_vertex_shader(VSH_EFFECT_ZSPRITE);
+            auto *vertex_declaration = rasterizer_get_vertex_declaration(VERTEX_DECLARATION_UNLIT_ZSPRITE);
+            if(!pixel_shader || !vertex_shader || !vertex_declaration) {
+                return;
+            }
 
             IDirect3DDevice9_SetVertexShaderConstantF(*global_d3d9_device, 18, vsh_constants_zspite, 2);
-            IDirect3DDevice9_SetVertexShader(*global_d3d9_device, rasterizer_get_vertex_shader(VSH_EFFECT_ZSPRITE));
-            IDirect3DDevice9_SetVertexDeclaration(*global_d3d9_device, rasterizer_get_vertex_declaration(VERTEX_DECLARATION_UNLIT_ZSPRITE));
+            IDirect3DDevice9_SetVertexShader(*global_d3d9_device, vertex_shader);
+            IDirect3DDevice9_SetVertexDeclaration(*global_d3d9_device, vertex_declaration);
             IDirect3DDevice9_SetStreamSource(*global_d3d9_device, 1, *aux_buffer, 0, 8);
-            IDirect3DDevice9_SetPixelShader(*global_d3d9_device, chimera_pixel_shaders[shader_index]);
+            IDirect3DDevice9_SetPixelShader(*global_d3d9_device, pixel_shader);
 
             rasterizer_set_texture(1, BITMAP_DATA_TYPE_2D, BITMAP_USAGE_ADDITIVE, group->shader_permutation_index, shader->effect.secondary_map.tag_id);
             rasterizer_set_sampler_state(1, D3DSAMP_ADDRESSU, D3DTADDRESS_WRAP);
