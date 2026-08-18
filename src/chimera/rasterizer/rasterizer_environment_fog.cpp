@@ -256,24 +256,21 @@ namespace Chimera {
                 Matrix4x3 transform;
 
                 static Matrix4x3 previous_cameras[MAXIMUM_WINDOWS];
-                static bool first_frame = true;
-                const Matrix4x3 *previous_camera = &previous_cameras[global_window_parameters->window_index];
+                static bool camera_initialized[MAXIMUM_WINDOWS] = {false, false, false, false};
+                const std::int16_t window_index = global_window_parameters->window_index;
+                const Matrix4x3 *previous_camera = &previous_cameras[window_index];
                 const Matrix4x3 *current_camera = &global_window_parameters->frustum.world_to_view;
 
-                if(first_frame) {
-                    for(std::int16_t window_index = 0; window_index < MAXIMUM_WINDOWS; window_index++) {
-                        memset(&local_fog_screen_data[window_index], 0, sizeof(FogScreenData));
+                if(!camera_initialized[window_index]) {
+                    memset(layer_data, 0, sizeof(FogScreenData));
 
-                        for(std::int16_t index = 0; index < MAXIMUM_NUMBER_OF_FOG_LAYERS; index++) {
-                            local_fog_screen_data[window_index].offsets[index].x = real_local_random();
-                            local_fog_screen_data[window_index].offsets[index].y = real_local_random();
-                        }
-
-                        //Why the hell are we copying what's not a Matrix4x3 into a Matrix4x3 bungo?
-                        memcpy(&previous_cameras[window_index], &global_window_parameters->camera, sizeof(Matrix4x3));
+                    for(std::int16_t index = 0; index < MAXIMUM_NUMBER_OF_FOG_LAYERS; index++) {
+                        layer_data->offsets[index].x = real_local_random();
+                        layer_data->offsets[index].y = real_local_random();
                     }
 
-                    first_frame = false;
+                    memcpy(&previous_cameras[window_index], current_camera, sizeof(Matrix4x3));
+                    camera_initialized[window_index] = true;
                 }
 
                 // Update wind
