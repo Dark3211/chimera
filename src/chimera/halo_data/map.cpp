@@ -59,6 +59,15 @@ namespace Chimera {
         auto tag_count = tag_data_header.tag_count;
         auto *base_address = reinterpret_cast<const char *>(&tag_data_header);
         auto *base_address_end = base_address + 0x1700000; // a little shorter, but we know that this region is safe and that tag paths almost certainly cannot appear here
+        const auto safe_region_start = reinterpret_cast<std::uintptr_t>(base_address);
+        const auto safe_region_end = reinterpret_cast<std::uintptr_t>(base_address_end);
+        const auto range_is_safe = [safe_region_start, safe_region_end](const void *address, std::size_t size) noexcept {
+            if(!address) {
+                return false;
+            }
+            const auto start = reinterpret_cast<std::uintptr_t>(address);
+            return start >= safe_region_start && start < safe_region_end && size <= safe_region_end - start;
+        };
 
         for(std::size_t t = 0; t < tag_count; t++) {
             auto *tag = get_tag(t);
@@ -88,12 +97,29 @@ namespace Chimera {
 
             // If it says it's a BSP, check if it's really a BSP
             if(tag->primary_class == TagClassInt::TAG_CLASS_SCENARIO_STRUCTURE_BSP) {
+                static constexpr std::size_t SCENARIO_BSP_BLOCK_OFFSET = 0x5A4;
+                static constexpr std::size_t SCENARIO_BSP_BLOCK_HEADER_SIZE = 0x8;
+                static constexpr std::size_t SCENARIO_BSP_ENTRY_SIZE = 0x20;
+                static constexpr std::size_t SCENARIO_BSP_TAG_INDEX_OFFSET = 0x1C;
+                static constexpr std::uint32_t MAXIMUM_SCENARIO_BSPS = 16;
+
                 auto *scenario_struct = scenario_tag->data;
-                auto scenario_bsp_count = *reinterpret_cast<const std::uint32_t *>(scenario_struct + 0x5A4);
-                auto *scenario_bsp_data = *reinterpret_cast<const std::byte * const *>(scenario_struct + 0x5A4 + 4);
+                if(!range_is_safe(scenario_struct, SCENARIO_BSP_BLOCK_OFFSET + SCENARIO_BSP_BLOCK_HEADER_SIZE)) {
+                    return true;
+                }
+
+                auto scenario_bsp_count = *reinterpret_cast<const std::uint32_t *>(scenario_struct + SCENARIO_BSP_BLOCK_OFFSET);
+                auto *scenario_bsp_data = *reinterpret_cast<const std::byte * const *>(scenario_struct + SCENARIO_BSP_BLOCK_OFFSET + sizeof(std::uint32_t));
+                if(scenario_bsp_count > MAXIMUM_SCENARIO_BSPS) {
+                    return true;
+                }
+                if(scenario_bsp_count > 0 && !range_is_safe(scenario_bsp_data, static_cast<std::size_t>(scenario_bsp_count) * SCENARIO_BSP_ENTRY_SIZE)) {
+                    return true;
+                }
+
                 bool actually_a_bsp = false;
                 for(std::uint32_t i = 0; i < scenario_bsp_count && !actually_a_bsp; i++) {
-                    actually_a_bsp = *reinterpret_cast<const std::uint16_t *>(scenario_bsp_data + i * 0x20 + 0x10 + 0xC) == t;
+                    actually_a_bsp = *reinterpret_cast<const std::uint16_t *>(scenario_bsp_data + static_cast<std::size_t>(i) * SCENARIO_BSP_ENTRY_SIZE + SCENARIO_BSP_TAG_INDEX_OFFSET) == t;
                 }
                 if(!actually_a_bsp) {
                     return true;
