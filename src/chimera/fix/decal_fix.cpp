@@ -68,6 +68,12 @@ namespace Chimera {
             default:
                 break;
         }
+
+        // If Chimera could not create the replacement pixel shader, leave the
+        // game's existing fixed-function decal path untouched.
+        if(!pixel_shader) {
+            return;
+        }
         
         ps_constants[3] = fog_hack && *fog_hack ? (1.0f / 255.0f) : 0.0f;
 
