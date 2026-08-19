@@ -82,7 +82,7 @@ namespace Chimera {
         std::uint32_t refresh_rate = 0;
         parse_uint32_setting(ini->get_value("video_mode.refresh_rate"), refresh_rate);
         params->FullScreen_RefreshRateInHz = params->Windowed ? 0 : refresh_rate;
-        params->PresentationInterval = vsync ? D3DPRESENT_DONOTWAIT : 0x80000000;
+        params->PresentationInterval = vsync ? D3DPRESENT_INTERVAL_ONE : D3DPRESENT_INTERVAL_IMMEDIATE;
 
         if(params->Windowed) {
             add_preframe_event(set_borderless_window);
