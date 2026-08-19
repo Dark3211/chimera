@@ -118,7 +118,7 @@ namespace Chimera {
         d3d9_device_caps = reinterpret_cast<D3DCAPS9 *>(*reinterpret_cast<std::byte **>(get_chimera().get_signature("d3d9_device_caps_sig").data() + 1));
         set_up_environment_transparent_index_buffer_fix();
         add_game_exit_event(rasterizer_release_vertex_shaders_3_0);
-        add_game_exit_event(rasterizer_release_pixel_shaders);
+        add_game_exit_event(rasterizer_release_pixel_shaders, EVENT_PRIORITY_AFTER);
         add_game_start_event(rasterizer_create_pixel_shaders);
 
         chimera_rasterizer_enabled = true;
