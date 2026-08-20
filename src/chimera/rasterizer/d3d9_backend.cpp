@@ -116,8 +116,16 @@ namespace Chimera {
         }
 
         bool should_use_software_vertex_processing(IDirect3DVertexShader9 *shader) noexcept {
-            // Full SWVP fixed every corrupt vehicle/weapon/model draw. Keep the
-            // known-good heavy world/screen paths on HWVP and use SWVP elsewhere.
+            // game_variables.cpp now marks only the model/preprocessing regions
+            // that need Halo's software-compatible path. Everything outside those
+            // scopes stays on HWVP, including particles, effects, HUD and other
+            // legacy passes that were unnecessarily paying the SWVP cost before.
+            if(!rasterizer_globals || !rasterizer_globals->using_software_vertex_processing) {
+                return false;
+            }
+
+            // Inside a compatibility scope, fixed-function/unknown shaders must
+            // remain conservative because full SWVP is the known-good geometry path.
             if(!shader || !vertex_shaders) {
                 return true;
             }
@@ -131,7 +139,7 @@ namespace Chimera {
             }
 
             // Full-screen/HUD passes do not exhibit the exploding-vertex issue and
-            // are safe to leave on hardware processing.
+            // are safe to leave on hardware processing even if nested in a model pass.
             for(std::size_t index = VSH_SCREEN; index <= VSH_SCREEN2; index++) {
                 if(vertex_shaders[index].shader == shader) {
                     return false;
@@ -347,11 +355,30 @@ namespace Chimera {
                 return false;
             }
 
+            // Fast path: outside the model/preprocessing compatibility scopes,
+            // keep the mixed device in HWVP and avoid GetVertexShader/AddRef/Release
+            // on every draw. This is the normal path for BSP, particles, effects,
+            // HUD and the majority of Halo's draw calls.
+            if(!rasterizer_globals || !rasterizer_globals->using_software_vertex_processing) {
+                if(!selective_software_vertex_processing_active) {
+                    return true;
+                }
+
+                auto mode_result = device->SetSoftwareVertexProcessing(FALSE);
+                if(FAILED(mode_result)) {
+                    selective_software_vertex_processing_ready = false;
+                    return false;
+                }
+
+                selective_software_vertex_processing_active = false;
+                return true;
+            }
+
             // Halo uses D3D9 state blocks. Applying a state block can restore a
             // vertex shader without passing through IDirect3DDevice9::SetVertexShader,
             // while SetSoftwareVertexProcessing is explicitly not state-block state.
-            // Query the shader at the actual draw boundary so the processing mode
-            // always matches the state that D3D9On12 is about to consume.
+            // Query the shader only inside compatibility scopes so the processing
+            // mode matches the state that D3D9On12 is about to consume.
             IDirect3DVertexShader9 *shader = nullptr;
             auto shader_result = device->GetVertexShader(&shader);
             if(FAILED(shader_result)) {
