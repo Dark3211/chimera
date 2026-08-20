@@ -54,6 +54,7 @@ namespace Chimera {
         std::size_t vertex_buffer_vtable_count = 0;
         std::size_t index_buffer_vtable_count = 0;
         bool buffer_lock_compat_ready = false;
+        bool software_vertex_processing_forced = false;
 
         enum class D3D9BackendStatus {
             DISABLED,
@@ -415,10 +416,23 @@ namespace Chimera {
                                                    DWORD behavior_flags,
                                                    D3DPRESENT_PARAMETERS *presentation_parameters,
                                                    IDirect3DDevice9 **device) override {
+                DWORD create_behavior_flags = behavior_flags;
+                if(this->active == this->on_12) {
+                    // Diagnostic compatibility path: keep D3D9On12/D3D12 for
+                    // rasterization, but force D3D9 software vertex processing.
+                    // This isolates Halo's dynamic model corruption from the
+                    // D3D9On12 vertex-processing/shader translation path.
+                    create_behavior_flags &= ~(D3DCREATE_HARDWARE_VERTEXPROCESSING |
+                                               D3DCREATE_MIXED_VERTEXPROCESSING |
+                                               D3DCREATE_PUREDEVICE);
+                    create_behavior_flags |= D3DCREATE_SOFTWARE_VERTEXPROCESSING;
+                    software_vertex_processing_forced = true;
+                }
+
                 auto result = this->active->CreateDevice(adapter,
                                                          device_type,
                                                          focus_window,
-                                                         behavior_flags,
+                                                         create_behavior_flags,
                                                          presentation_parameters,
                                                          device);
 
@@ -440,6 +454,7 @@ namespace Chimera {
                         *device = nullptr;
                     }
                     this->active = this->native;
+                    software_vertex_processing_forced = false;
                     result = this->active->CreateDevice(adapter,
                                                         device_type,
                                                         focus_window,
@@ -678,8 +693,14 @@ namespace Chimera {
                 console_warning("D3D9 backend: 9On12 was selected, but device activation was not observed.");
                 break;
             case D3D9BackendStatus::ON_12_ACTIVE:
-                if(buffer_lock_compat_ready) {
+                if(buffer_lock_compat_ready && software_vertex_processing_forced) {
+                    console_output("D3D9 backend: D3D9On12 is active with Halo buffer-lock compatibility and forced software vertex processing.");
+                }
+                else if(buffer_lock_compat_ready) {
                     console_output("D3D9 backend: D3D9On12 is active with Halo buffer-lock compatibility.");
+                }
+                else if(software_vertex_processing_forced) {
+                    console_warning("D3D9 backend: D3D9On12 is active with forced software vertex processing, but Halo buffer-lock compatibility could not be installed.");
                 }
                 else {
                     console_warning("D3D9 backend: D3D9On12 is active, but Halo buffer-lock compatibility could not be installed.");
