@@ -93,7 +93,7 @@ namespace Chimera {
             halo_software_vp_scope_depth++;
 
             if(!halo_vertex_mode_reported) {
-                console_output("D3D9 backend: selective Halo software vertex preprocessing enabled for model paths.");
+                console_output("D3D9 backend: Halo software-compatible model preprocessing is active while D3D9 stays on HWVP.");
                 halo_vertex_mode_reported = true;
             }
 
@@ -134,18 +134,29 @@ namespace Chimera {
                 return;
             }
 
-            bool needs_software_vertex_processing = false;
+            bool needs_software_compatible_preprocessing = false;
             if(group) {
                 constexpr std::uint32_t dont_skin_mask = 1u << RASTERIZER_GEOMETRY_FLAGS_DONT_SKIN;
                 constexpr std::uint32_t local_nodes_mask = 1u << RASTERIZER_GEOMETRY_FLAGS_PARTS_DEFINE_LOCAL_NODES_BIT;
 
-                needs_software_vertex_processing =
+                const bool uses_skinning =
                     !(group->geometry_flags & dont_skin_mask) &&
                     (group->node_matrix_count > 0 || (group->geometry_flags & local_nodes_mask));
+                const bool object_linked =
+                    !group->object_index.is_null() ||
+                    !group->source_object_index.is_null();
+                const bool uses_model_effect = group->effect.type != RENDER_MODEL_EFFECT_TYPE_NONE;
+
+                // Vehicle glass, equipment/powerup layers and other transparent
+                // object pieces can be rigid while still sharing the legacy model
+                // preparation assumptions that break under 9On12. Restrict the
+                // compatibility scope to object/model groups; world transparency
+                // remains on the normal hardware path.
+                needs_software_compatible_preprocessing = uses_skinning || object_linked || uses_model_effect;
             }
 
             bool entered = false;
-            if(needs_software_vertex_processing) {
+            if(needs_software_compatible_preprocessing) {
                 entered = enter_halo_software_vertex_processing_scope();
             }
 
@@ -163,8 +174,10 @@ namespace Chimera {
             }
             enabled = true;
 
-            // These brackets cover Halo's opaque model preprocessing. They are
-            // installed before the fog/FP hooks and safely chain with those hooks.
+            // Cover Halo's full opaque model path with its software-compatible
+            // preprocessing semantics. The D3D9 device itself is no longer switched
+            // to SWVP; d3d9_backend.cpp keeps all actual draws on Halo's original
+            // hardware vertex-processing device.
             static Hook model_begin_hook;
             static Hook model_end_hook;
             write_jmp_call(
@@ -180,8 +193,8 @@ namespace Chimera {
                 nullptr
             );
 
-            // First-person models have their own renderer path, so scope that path
-            // separately in case it does not pass through the generic model bracket.
+            // First-person models have their own renderer path, so bracket that path
+            // independently as well.
             static Hook fp_model_begin_hook;
             static Hook fp_model_end_hook;
             write_jmp_call(
@@ -212,9 +225,9 @@ namespace Chimera {
                 nullptr
             );
 
-            // Queued transparent model geometry is rendered later, outside the
-            // opaque model bracket. Only groups that actually need skinning/local
-            // node remapping take Halo's software-compatible preprocessing path.
+            // Queued transparent model/object geometry is rendered later, outside
+            // the opaque model bracket. Apply only Halo's preprocessing compatibility
+            // state around groups associated with objects, skinning or model effects.
             static Hook transparent_geometry_draw_hook;
             write_function_override(
                 get_chimera().get_signature("transparent_geometry_group_draw_sig").data(),
