@@ -139,7 +139,19 @@ namespace Chimera {
             }
 
             HRESULT STDMETHODCALLTYPE GetAdapterIdentifier(UINT adapter, DWORD flags, D3DADAPTER_IDENTIFIER9 *identifier) override {
-                return this->active->GetAdapterIdentifier(adapter, flags, identifier);
+                auto result = this->active->GetAdapterIdentifier(adapter, flags, identifier);
+
+                // Halo's renderer contains GPU-specific compatibility paths and
+                // does not handle every modern adapter identity consistently.
+                // DXVK's Halo profile uses this period-correct Radeon identity to
+                // keep Halo on its known-good rendering path. Apply the same
+                // compatibility identity only while the 9On12 enumerator is active.
+                if(SUCCEEDED(result) && identifier && this->active == this->on_12) {
+                    identifier->VendorId = 0x1002;
+                    identifier->DeviceId = 0x4172;
+                }
+
+                return result;
             }
 
             UINT STDMETHODCALLTYPE GetAdapterModeCount(UINT adapter, D3DFORMAT format) override {
