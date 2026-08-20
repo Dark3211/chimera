@@ -28,9 +28,11 @@ namespace Chimera {
 
         using Direct3DCreate9Function = IDirect3D9 *(WINAPI *)(UINT);
         using Direct3DCreate9On12Function = IDirect3D9 *(WINAPI *)(UINT, D3D9On12Args *, UINT);
+        using GetProcAddressFunction = FARPROC (WINAPI *)(HMODULE, LPCSTR);
 
         Direct3DCreate9Function native_direct3d_create9 = nullptr;
         Direct3DCreate9On12Function direct3d_create9_on_12 = nullptr;
+        GetProcAddressFunction native_get_proc_address = nullptr;
 
         enum class D3D9BackendStatus {
             DISABLED,
@@ -269,7 +271,10 @@ namespace Chimera {
             return fallback;
         }
 
-        bool patch_direct3d_create9_import() noexcept {
+        bool patch_imported_function(const char *module_name,
+                                     const char *function_name,
+                                     ULONG_PTR replacement,
+                                     ULONG_PTR &original) noexcept {
             auto *image = reinterpret_cast<std::byte *>(GetModuleHandleW(nullptr));
             if(!image) {
                 return false;
@@ -290,10 +295,16 @@ namespace Chimera {
                 return false;
             }
 
+            FARPROC resolved_function = nullptr;
+            if(auto imported_module = GetModuleHandleA(module_name)) {
+                resolved_function = GetProcAddress(imported_module, function_name);
+            }
+            const auto resolved_address = reinterpret_cast<ULONG_PTR>(resolved_function);
+
             auto *descriptor = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR *>(image + import_directory.VirtualAddress);
             for(; descriptor->Name != 0; descriptor++) {
-                auto *module_name = reinterpret_cast<const char *>(image + descriptor->Name);
-                if(_stricmp(module_name, "d3d9.dll") != 0 || descriptor->FirstThunk == 0) {
+                auto *imported_module_name = reinterpret_cast<const char *>(image + descriptor->Name);
+                if(_stricmp(imported_module_name, module_name) != 0 || descriptor->FirstThunk == 0) {
                     continue;
                 }
 
@@ -304,13 +315,15 @@ namespace Chimera {
                 }
 
                 for(std::size_t index = 0; function_thunk[index].u1.Function != 0; index++) {
-                    bool is_direct3d_create9 = false;
+                    bool matches_name = false;
                     if(name_thunk && !IMAGE_SNAP_BY_ORDINAL(name_thunk[index].u1.Ordinal)) {
                         auto *import = reinterpret_cast<IMAGE_IMPORT_BY_NAME *>(image + name_thunk[index].u1.AddressOfData);
-                        is_direct3d_create9 = std::strcmp(reinterpret_cast<const char *>(import->Name), "Direct3DCreate9") == 0;
+                        matches_name = std::strcmp(reinterpret_cast<const char *>(import->Name), function_name) == 0;
                     }
 
-                    if(!is_direct3d_create9) {
+                    const bool matches_address = resolved_address != 0 &&
+                                                 function_thunk[index].u1.Function == resolved_address;
+                    if(!matches_name && !matches_address) {
                         continue;
                     }
 
@@ -320,16 +333,73 @@ namespace Chimera {
                         return false;
                     }
 
-                    native_direct3d_create9 = reinterpret_cast<Direct3DCreate9Function>(function_thunk[index].u1.Function);
-                    function_thunk[index].u1.Function = reinterpret_cast<ULONG_PTR>(direct3d_create9_hook);
+                    original = function_thunk[index].u1.Function;
+                    function_thunk[index].u1.Function = replacement;
 
                     DWORD restored_protection;
                     VirtualProtect(import_address, sizeof(*import_address), old_protection, &restored_protection);
                     FlushInstructionCache(GetCurrentProcess(), import_address, sizeof(*import_address));
-                    return native_direct3d_create9 != nullptr;
+                    return original != 0;
                 }
             }
             return false;
+        }
+
+        bool patch_direct3d_create9_import() noexcept {
+            ULONG_PTR original = 0;
+            if(!patch_imported_function("d3d9.dll",
+                                        "Direct3DCreate9",
+                                        reinterpret_cast<ULONG_PTR>(direct3d_create9_hook),
+                                        original)) {
+                return false;
+            }
+
+            native_direct3d_create9 = reinterpret_cast<Direct3DCreate9Function>(original);
+            return native_direct3d_create9 != nullptr;
+        }
+
+        FARPROC WINAPI get_proc_address_hook(HMODULE module, LPCSTR procedure_name) noexcept {
+            if(!native_get_proc_address) {
+                return nullptr;
+            }
+
+            auto resolved = native_get_proc_address(module, procedure_name);
+            if(!resolved || !procedure_name || (reinterpret_cast<ULONG_PTR>(procedure_name) >> 16) == 0) {
+                return resolved;
+            }
+
+            if(std::strcmp(procedure_name, "Direct3DCreate9") != 0) {
+                return resolved;
+            }
+
+            auto d3d9_module = GetModuleHandleA("d3d9.dll");
+            if(!d3d9_module || module != d3d9_module) {
+                return resolved;
+            }
+
+            static_assert(sizeof(resolved) == sizeof(native_direct3d_create9));
+            std::memcpy(&native_direct3d_create9, &resolved, sizeof(native_direct3d_create9));
+
+            auto hook = &direct3d_create9_hook;
+            FARPROC replacement = nullptr;
+            static_assert(sizeof(hook) == sizeof(replacement));
+            std::memcpy(&replacement, &hook, sizeof(replacement));
+            return replacement;
+        }
+
+        bool patch_get_proc_address_import() noexcept {
+            ULONG_PTR original = 0;
+            auto hook = &get_proc_address_hook;
+            static_assert(sizeof(hook) == sizeof(ULONG_PTR));
+
+            ULONG_PTR replacement = 0;
+            std::memcpy(&replacement, &hook, sizeof(replacement));
+            if(!patch_imported_function("kernel32.dll", "GetProcAddress", replacement, original)) {
+                return false;
+            }
+
+            native_get_proc_address = reinterpret_cast<GetProcAddressFunction>(original);
+            return native_get_proc_address != nullptr;
         }
     }
 
@@ -339,16 +409,22 @@ namespace Chimera {
             return;
         }
 
-        // Install the import hook before Halo creates its D3D9 object. The
-        // optional Windows entrypoint is resolved lazily by the hook because
-        // d3d9.dll may not be loaded yet while strings.dll is initializing.
+        // Halo builds and wrappers do not all reach Direct3DCreate9 through the
+        // same import-table shape. Prefer the direct D3D9 IAT entry, but if it is
+        // absent also intercept Halo's dynamic GetProcAddress resolution path.
         if(patch_direct3d_create9_import()) {
             backend_status = D3D9BackendStatus::HOOK_INSTALLED;
+            return;
         }
-        else {
-            native_direct3d_create9 = nullptr;
-            backend_status = D3D9BackendStatus::HOOK_INSTALL_FAILED;
+
+        native_direct3d_create9 = nullptr;
+        if(patch_get_proc_address_import()) {
+            backend_status = D3D9BackendStatus::HOOK_INSTALLED;
+            return;
         }
+
+        native_get_proc_address = nullptr;
+        backend_status = D3D9BackendStatus::HOOK_INSTALL_FAILED;
     }
 
     void report_d3d9_backend_status() noexcept {
