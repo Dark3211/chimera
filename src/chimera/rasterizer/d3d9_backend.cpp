@@ -11,12 +11,15 @@
 #include "../chimera.hpp"
 #include "../config/ini.hpp"
 #include "../output/output.hpp"
+#include "../halo_data/game_variables.hpp"
+#include "../halo_data/shader_effects.hpp"
 
 namespace Chimera {
     namespace {
         constexpr UINT MAX_D3D9ON12_QUEUES = 2;
         constexpr std::size_t DEVICE_CREATE_VERTEX_BUFFER_INDEX = 26;
         constexpr std::size_t DEVICE_CREATE_INDEX_BUFFER_INDEX = 27;
+        constexpr std::size_t DEVICE_SET_VERTEX_SHADER_INDEX = 92;
         constexpr std::size_t BUFFER_LOCK_INDEX = 11;
         constexpr std::size_t MAX_BUFFER_VTABLES = 16;
 
@@ -35,6 +38,7 @@ namespace Chimera {
         using GetProcAddressFunction = FARPROC (WINAPI *)(HMODULE, LPCSTR);
         using CreateVertexBufferFunction = HRESULT (STDMETHODCALLTYPE *)(IDirect3DDevice9 *, UINT, DWORD, DWORD, D3DPOOL, IDirect3DVertexBuffer9 **, HANDLE *);
         using CreateIndexBufferFunction = HRESULT (STDMETHODCALLTYPE *)(IDirect3DDevice9 *, UINT, DWORD, D3DFORMAT, D3DPOOL, IDirect3DIndexBuffer9 **, HANDLE *);
+        using SetVertexShaderFunction = HRESULT (STDMETHODCALLTYPE *)(IDirect3DDevice9 *, IDirect3DVertexShader9 *);
         using VertexBufferLockFunction = HRESULT (STDMETHODCALLTYPE *)(IDirect3DVertexBuffer9 *, UINT, UINT, void **, DWORD);
         using IndexBufferLockFunction = HRESULT (STDMETHODCALLTYPE *)(IDirect3DIndexBuffer9 *, UINT, UINT, void **, DWORD);
 
@@ -43,6 +47,7 @@ namespace Chimera {
         GetProcAddressFunction native_get_proc_address = nullptr;
         CreateVertexBufferFunction native_create_vertex_buffer = nullptr;
         CreateIndexBufferFunction native_create_index_buffer = nullptr;
+        SetVertexShaderFunction native_set_vertex_shader = nullptr;
 
         struct BufferVtablePatch {
             ULONG_PTR *vtable = nullptr;
@@ -54,7 +59,9 @@ namespace Chimera {
         std::size_t vertex_buffer_vtable_count = 0;
         std::size_t index_buffer_vtable_count = 0;
         bool buffer_lock_compat_ready = false;
-        bool software_vertex_processing_forced = false;
+        bool selective_software_vertex_processing_ready = false;
+        bool selective_software_vertex_processing_active = false;
+        bool mixed_vertex_processing_forced = false;
 
         enum class D3D9BackendStatus {
             DISABLED,
@@ -95,6 +102,19 @@ namespace Chimera {
             if(SUCCEEDED(result) && on_12_interface) {
                 on_12_interface->Release();
                 return true;
+            }
+            return false;
+        }
+
+        bool is_model_vertex_shader(IDirect3DVertexShader9 *shader) noexcept {
+            if(!shader || !vertex_shaders) {
+                return false;
+            }
+
+            for(std::size_t index = VSH_MODEL_FOGGED; index <= VSH_MODEL_ZBUFFER; index++) {
+                if(vertex_shaders[index].shader == shader) {
+                    return true;
+                }
             }
             return false;
         }
@@ -261,7 +281,10 @@ namespace Chimera {
                 return D3DERR_INVALIDCALL;
             }
 
-            auto result = native_create_vertex_buffer(device, length, usage, fvf, pool, buffer, shared_handle);
+            // Mixed vertex processing requires buffers that may ever be consumed
+            // by software vertex processing to opt in at creation time.
+            auto compatible_usage = usage | D3DUSAGE_SOFTWAREPROCESSING;
+            auto result = native_create_vertex_buffer(device, length, compatible_usage, fvf, pool, buffer, shared_handle);
             if(SUCCEEDED(result) && buffer && *buffer) {
                 patch_buffer_lock(*buffer,
                                   reinterpret_cast<ULONG_PTR>(vertex_buffer_lock_hook),
@@ -282,7 +305,8 @@ namespace Chimera {
                 return D3DERR_INVALIDCALL;
             }
 
-            auto result = native_create_index_buffer(device, length, usage, format, pool, buffer, shared_handle);
+            auto compatible_usage = usage | D3DUSAGE_SOFTWAREPROCESSING;
+            auto result = native_create_index_buffer(device, length, compatible_usage, format, pool, buffer, shared_handle);
             if(SUCCEEDED(result) && buffer && *buffer) {
                 patch_buffer_lock(*buffer,
                                   reinterpret_cast<ULONG_PTR>(index_buffer_lock_hook),
@@ -290,6 +314,26 @@ namespace Chimera {
                                   index_buffer_vtable_count);
             }
             return result;
+        }
+
+        HRESULT STDMETHODCALLTYPE set_vertex_shader_hook(IDirect3DDevice9 *device,
+                                                         IDirect3DVertexShader9 *shader) noexcept {
+            if(!native_set_vertex_shader) {
+                return D3DERR_INVALIDCALL;
+            }
+
+            const bool use_software = is_model_vertex_shader(shader);
+            if(selective_software_vertex_processing_ready && use_software != selective_software_vertex_processing_active) {
+                auto mode_result = device->SetSoftwareVertexProcessing(use_software ? TRUE : FALSE);
+                if(SUCCEEDED(mode_result)) {
+                    selective_software_vertex_processing_active = use_software;
+                }
+                else {
+                    selective_software_vertex_processing_ready = false;
+                }
+            }
+
+            return native_set_vertex_shader(device, shader);
         }
 
         bool install_buffer_lock_compat(IDirect3DDevice9 *device) noexcept {
@@ -304,9 +348,11 @@ namespace Chimera {
 
             ULONG_PTR original_vertex = reinterpret_cast<ULONG_PTR>(native_create_vertex_buffer);
             ULONG_PTR original_index = reinterpret_cast<ULONG_PTR>(native_create_index_buffer);
+            ULONG_PTR original_set_vertex_shader = reinterpret_cast<ULONG_PTR>(native_set_vertex_shader);
 
             auto vertex_replacement = reinterpret_cast<ULONG_PTR>(create_vertex_buffer_hook);
             auto index_replacement = reinterpret_cast<ULONG_PTR>(create_index_buffer_hook);
+            auto set_vertex_shader_replacement = reinterpret_cast<ULONG_PTR>(set_vertex_shader_hook);
 
             bool vertex_ok = false;
             if(vtable[DEVICE_CREATE_VERTEX_BUFFER_INDEX] == vertex_replacement && native_create_vertex_buffer) {
@@ -326,7 +372,17 @@ namespace Chimera {
                 index_ok = native_create_index_buffer != nullptr;
             }
 
-            return vertex_ok && index_ok;
+            bool shader_ok = false;
+            if(vtable[DEVICE_SET_VERTEX_SHADER_INDEX] == set_vertex_shader_replacement && native_set_vertex_shader) {
+                shader_ok = true;
+            }
+            else if(write_vtable_entry(&vtable[DEVICE_SET_VERTEX_SHADER_INDEX], set_vertex_shader_replacement, original_set_vertex_shader)) {
+                native_set_vertex_shader = reinterpret_cast<SetVertexShaderFunction>(original_set_vertex_shader);
+                shader_ok = native_set_vertex_shader != nullptr;
+            }
+
+            selective_software_vertex_processing_ready = shader_ok;
+            return vertex_ok && index_ok && shader_ok;
         }
 
         class Direct3D9On12Fallback final : public IDirect3D9 {
@@ -418,15 +474,18 @@ namespace Chimera {
                                                    IDirect3DDevice9 **device) override {
                 DWORD create_behavior_flags = behavior_flags;
                 if(this->active == this->on_12) {
-                    // Diagnostic compatibility path: keep D3D9On12/D3D12 for
-                    // rasterization, but force D3D9 software vertex processing.
-                    // This isolates Halo's dynamic model corruption from the
-                    // D3D9On12 vertex-processing/shader translation path.
+                    // Full software vertex processing proved that the D3D9On12
+                    // corruption is in Halo's model vertex-processing path, but
+                    // forcing every draw through the CPU is far too slow. Create
+                    // a mixed device instead and switch to software only while
+                    // Halo's model vertex shaders are bound.
                     create_behavior_flags &= ~(D3DCREATE_HARDWARE_VERTEXPROCESSING |
                                                D3DCREATE_MIXED_VERTEXPROCESSING |
+                                               D3DCREATE_SOFTWARE_VERTEXPROCESSING |
                                                D3DCREATE_PUREDEVICE);
-                    create_behavior_flags |= D3DCREATE_SOFTWARE_VERTEXPROCESSING;
-                    software_vertex_processing_forced = true;
+                    create_behavior_flags |= D3DCREATE_MIXED_VERTEXPROCESSING;
+                    mixed_vertex_processing_forced = true;
+                    selective_software_vertex_processing_active = false;
                 }
 
                 auto result = this->active->CreateDevice(adapter,
@@ -442,6 +501,9 @@ namespace Chimera {
                                          ? D3D9BackendStatus::ON_12_ACTIVE
                                          : D3D9BackendStatus::NATIVE_FALLBACK;
                     if(on_12_active && device && *device) {
+                        // Mixed mode starts in hardware processing by default.
+                        (*device)->SetSoftwareVertexProcessing(FALSE);
+                        selective_software_vertex_processing_active = false;
                         buffer_lock_compat_ready = install_buffer_lock_compat(*device);
                     }
                 }
@@ -454,7 +516,9 @@ namespace Chimera {
                         *device = nullptr;
                     }
                     this->active = this->native;
-                    software_vertex_processing_forced = false;
+                    mixed_vertex_processing_forced = false;
+                    selective_software_vertex_processing_ready = false;
+                    selective_software_vertex_processing_active = false;
                     result = this->active->CreateDevice(adapter,
                                                         device_type,
                                                         focus_window,
@@ -693,17 +757,14 @@ namespace Chimera {
                 console_warning("D3D9 backend: 9On12 was selected, but device activation was not observed.");
                 break;
             case D3D9BackendStatus::ON_12_ACTIVE:
-                if(buffer_lock_compat_ready && software_vertex_processing_forced) {
-                    console_output("D3D9 backend: D3D9On12 is active with Halo buffer-lock compatibility and forced software vertex processing.");
+                if(buffer_lock_compat_ready && selective_software_vertex_processing_ready && mixed_vertex_processing_forced) {
+                    console_output("D3D9 backend: D3D9On12 is active with Halo buffer-lock compatibility and selective model software vertex processing.");
                 }
                 else if(buffer_lock_compat_ready) {
                     console_output("D3D9 backend: D3D9On12 is active with Halo buffer-lock compatibility.");
                 }
-                else if(software_vertex_processing_forced) {
-                    console_warning("D3D9 backend: D3D9On12 is active with forced software vertex processing, but Halo buffer-lock compatibility could not be installed.");
-                }
                 else {
-                    console_warning("D3D9 backend: D3D9On12 is active, but Halo buffer-lock compatibility could not be installed.");
+                    console_warning("D3D9 backend: D3D9On12 is active, but the selective Halo compatibility path could not be installed.");
                 }
                 break;
             case D3D9BackendStatus::NATIVE_FALLBACK:
