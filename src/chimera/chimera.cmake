@@ -252,6 +252,7 @@ add_library(chimera STATIC
     src/chimera/output/output.S
     src/chimera/rasterizer/shader_transparent_generic.cpp
     src/chimera/rasterizer/shader_transparent_generic.S
+    src/chimera/rasterizer/d3d9_backend.cpp
     src/chimera/rasterizer/rasterizer_transparent_geometry.cpp
     src/chimera/rasterizer/rasterizer_environment_fog.cpp
     src/chimera/rasterizer/rasterizer_environment_fog.S

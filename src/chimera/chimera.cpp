@@ -96,6 +96,7 @@
 #include "fix/jason_jones_hacks.hpp"
 #include "fix/pas_crash_fix.hpp"
 #include "rasterizer/rasterizer.hpp"
+#include "rasterizer/d3d9_backend.hpp"
 #include "rasterizer/rasterizer_environment_fog.hpp"
 #include "rasterizer/shader_transparent_generic.hpp"
 #include "halo_data/game_functions.hpp"
@@ -165,6 +166,10 @@ namespace Chimera {
             set_up_remove_exception_dialog();
 
             if(this->feature_present("client")) {
+                // Optional and disabled by default. This must be installed before
+                // Halo creates its Direct3D9 object.
+                set_up_d3d9_backend();
+
                 // Fix the camo by default
                 extern bool camo_fix_command(int argc, const char **argv);
                 const char *value_true = "true";
