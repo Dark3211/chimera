@@ -19,7 +19,10 @@ namespace Chimera {
         constexpr UINT MAX_D3D9ON12_QUEUES = 2;
         constexpr std::size_t DEVICE_CREATE_VERTEX_BUFFER_INDEX = 26;
         constexpr std::size_t DEVICE_CREATE_INDEX_BUFFER_INDEX = 27;
-        constexpr std::size_t DEVICE_SET_VERTEX_SHADER_INDEX = 92;
+        constexpr std::size_t DEVICE_DRAW_PRIMITIVE_INDEX = 81;
+        constexpr std::size_t DEVICE_DRAW_INDEXED_PRIMITIVE_INDEX = 82;
+        constexpr std::size_t DEVICE_DRAW_PRIMITIVE_UP_INDEX = 83;
+        constexpr std::size_t DEVICE_DRAW_INDEXED_PRIMITIVE_UP_INDEX = 84;
         constexpr std::size_t BUFFER_LOCK_INDEX = 11;
         constexpr std::size_t MAX_BUFFER_VTABLES = 16;
 
@@ -38,7 +41,10 @@ namespace Chimera {
         using GetProcAddressFunction = FARPROC (WINAPI *)(HMODULE, LPCSTR);
         using CreateVertexBufferFunction = HRESULT (STDMETHODCALLTYPE *)(IDirect3DDevice9 *, UINT, DWORD, DWORD, D3DPOOL, IDirect3DVertexBuffer9 **, HANDLE *);
         using CreateIndexBufferFunction = HRESULT (STDMETHODCALLTYPE *)(IDirect3DDevice9 *, UINT, DWORD, D3DFORMAT, D3DPOOL, IDirect3DIndexBuffer9 **, HANDLE *);
-        using SetVertexShaderFunction = HRESULT (STDMETHODCALLTYPE *)(IDirect3DDevice9 *, IDirect3DVertexShader9 *);
+        using DrawPrimitiveFunction = HRESULT (STDMETHODCALLTYPE *)(IDirect3DDevice9 *, D3DPRIMITIVETYPE, UINT, UINT);
+        using DrawIndexedPrimitiveFunction = HRESULT (STDMETHODCALLTYPE *)(IDirect3DDevice9 *, D3DPRIMITIVETYPE, INT, UINT, UINT, UINT, UINT);
+        using DrawPrimitiveUPFunction = HRESULT (STDMETHODCALLTYPE *)(IDirect3DDevice9 *, D3DPRIMITIVETYPE, UINT, const void *, UINT);
+        using DrawIndexedPrimitiveUPFunction = HRESULT (STDMETHODCALLTYPE *)(IDirect3DDevice9 *, D3DPRIMITIVETYPE, UINT, UINT, UINT, const void *, D3DFORMAT, const void *, UINT);
         using VertexBufferLockFunction = HRESULT (STDMETHODCALLTYPE *)(IDirect3DVertexBuffer9 *, UINT, UINT, void **, DWORD);
         using IndexBufferLockFunction = HRESULT (STDMETHODCALLTYPE *)(IDirect3DIndexBuffer9 *, UINT, UINT, void **, DWORD);
 
@@ -47,7 +53,10 @@ namespace Chimera {
         GetProcAddressFunction native_get_proc_address = nullptr;
         CreateVertexBufferFunction native_create_vertex_buffer = nullptr;
         CreateIndexBufferFunction native_create_index_buffer = nullptr;
-        SetVertexShaderFunction native_set_vertex_shader = nullptr;
+        DrawPrimitiveFunction native_draw_primitive = nullptr;
+        DrawIndexedPrimitiveFunction native_draw_indexed_primitive = nullptr;
+        DrawPrimitiveUPFunction native_draw_primitive_up = nullptr;
+        DrawIndexedPrimitiveUPFunction native_draw_indexed_primitive_up = nullptr;
 
         struct BufferVtablePatch {
             ULONG_PTR *vtable = nullptr;
@@ -107,11 +116,8 @@ namespace Chimera {
         }
 
         bool should_use_software_vertex_processing(IDirect3DVertexShader9 *shader) noexcept {
-            // Full SWVP fixed every corrupt vehicle/weapon/model draw, while the
-            // first selective pass (model shaders only) restored performance but
-            // missed several Halo draw paths, including fixed-function/null-shader
-            // geometry. Keep only the known-good heavy world/screen paths on HWVP
-            // and run every other path through SWVP.
+            // Full SWVP fixed every corrupt vehicle/weapon/model draw. Keep the
+            // known-good heavy world/screen paths on HWVP and use SWVP elsewhere.
             if(!shader || !vertex_shaders) {
                 return true;
             }
@@ -336,24 +342,106 @@ namespace Chimera {
             return result;
         }
 
-        HRESULT STDMETHODCALLTYPE set_vertex_shader_hook(IDirect3DDevice9 *device,
-                                                         IDirect3DVertexShader9 *shader) noexcept {
-            if(!native_set_vertex_shader) {
-                return D3DERR_INVALIDCALL;
+        bool prepare_vertex_processing_for_draw(IDirect3DDevice9 *device) noexcept {
+            if(!device || !selective_software_vertex_processing_ready) {
+                return false;
+            }
+
+            // Halo uses D3D9 state blocks. Applying a state block can restore a
+            // vertex shader without passing through IDirect3DDevice9::SetVertexShader,
+            // while SetSoftwareVertexProcessing is explicitly not state-block state.
+            // Query the shader at the actual draw boundary so the processing mode
+            // always matches the state that D3D9On12 is about to consume.
+            IDirect3DVertexShader9 *shader = nullptr;
+            auto shader_result = device->GetVertexShader(&shader);
+            if(FAILED(shader_result)) {
+                return false;
             }
 
             const bool use_software = should_use_software_vertex_processing(shader);
-            if(selective_software_vertex_processing_ready && use_software != selective_software_vertex_processing_active) {
-                auto mode_result = device->SetSoftwareVertexProcessing(use_software ? TRUE : FALSE);
-                if(SUCCEEDED(mode_result)) {
-                    selective_software_vertex_processing_active = use_software;
-                }
-                else {
-                    selective_software_vertex_processing_ready = false;
-                }
+            if(shader) {
+                shader->Release();
             }
 
-            return native_set_vertex_shader(device, shader);
+            if(use_software == selective_software_vertex_processing_active) {
+                return true;
+            }
+
+            auto mode_result = device->SetSoftwareVertexProcessing(use_software ? TRUE : FALSE);
+            if(FAILED(mode_result)) {
+                selective_software_vertex_processing_ready = false;
+                return false;
+            }
+
+            selective_software_vertex_processing_active = use_software;
+            return true;
+        }
+
+        HRESULT STDMETHODCALLTYPE draw_primitive_hook(IDirect3DDevice9 *device,
+                                                      D3DPRIMITIVETYPE primitive_type,
+                                                      UINT start_vertex,
+                                                      UINT primitive_count) noexcept {
+            prepare_vertex_processing_for_draw(device);
+            return native_draw_primitive
+                       ? native_draw_primitive(device, primitive_type, start_vertex, primitive_count)
+                       : D3DERR_INVALIDCALL;
+        }
+
+        HRESULT STDMETHODCALLTYPE draw_indexed_primitive_hook(IDirect3DDevice9 *device,
+                                                              D3DPRIMITIVETYPE primitive_type,
+                                                              INT base_vertex_index,
+                                                              UINT min_vertex_index,
+                                                              UINT num_vertices,
+                                                              UINT start_index,
+                                                              UINT primitive_count) noexcept {
+            prepare_vertex_processing_for_draw(device);
+            return native_draw_indexed_primitive
+                       ? native_draw_indexed_primitive(device,
+                                                       primitive_type,
+                                                       base_vertex_index,
+                                                       min_vertex_index,
+                                                       num_vertices,
+                                                       start_index,
+                                                       primitive_count)
+                       : D3DERR_INVALIDCALL;
+        }
+
+        HRESULT STDMETHODCALLTYPE draw_primitive_up_hook(IDirect3DDevice9 *device,
+                                                         D3DPRIMITIVETYPE primitive_type,
+                                                         UINT primitive_count,
+                                                         const void *vertex_stream_zero_data,
+                                                         UINT vertex_stream_zero_stride) noexcept {
+            prepare_vertex_processing_for_draw(device);
+            return native_draw_primitive_up
+                       ? native_draw_primitive_up(device,
+                                                  primitive_type,
+                                                  primitive_count,
+                                                  vertex_stream_zero_data,
+                                                  vertex_stream_zero_stride)
+                       : D3DERR_INVALIDCALL;
+        }
+
+        HRESULT STDMETHODCALLTYPE draw_indexed_primitive_up_hook(IDirect3DDevice9 *device,
+                                                                 D3DPRIMITIVETYPE primitive_type,
+                                                                 UINT min_vertex_index,
+                                                                 UINT num_vertices,
+                                                                 UINT primitive_count,
+                                                                 const void *index_data,
+                                                                 D3DFORMAT index_data_format,
+                                                                 const void *vertex_stream_zero_data,
+                                                                 UINT vertex_stream_zero_stride) noexcept {
+            prepare_vertex_processing_for_draw(device);
+            return native_draw_indexed_primitive_up
+                       ? native_draw_indexed_primitive_up(device,
+                                                          primitive_type,
+                                                          min_vertex_index,
+                                                          num_vertices,
+                                                          primitive_count,
+                                                          index_data,
+                                                          index_data_format,
+                                                          vertex_stream_zero_data,
+                                                          vertex_stream_zero_stride)
+                       : D3DERR_INVALIDCALL;
         }
 
         bool install_buffer_lock_compat(IDirect3DDevice9 *device) noexcept {
@@ -368,11 +456,17 @@ namespace Chimera {
 
             ULONG_PTR original_vertex = reinterpret_cast<ULONG_PTR>(native_create_vertex_buffer);
             ULONG_PTR original_index = reinterpret_cast<ULONG_PTR>(native_create_index_buffer);
-            ULONG_PTR original_set_vertex_shader = reinterpret_cast<ULONG_PTR>(native_set_vertex_shader);
+            ULONG_PTR original_draw_primitive = reinterpret_cast<ULONG_PTR>(native_draw_primitive);
+            ULONG_PTR original_draw_indexed_primitive = reinterpret_cast<ULONG_PTR>(native_draw_indexed_primitive);
+            ULONG_PTR original_draw_primitive_up = reinterpret_cast<ULONG_PTR>(native_draw_primitive_up);
+            ULONG_PTR original_draw_indexed_primitive_up = reinterpret_cast<ULONG_PTR>(native_draw_indexed_primitive_up);
 
             auto vertex_replacement = reinterpret_cast<ULONG_PTR>(create_vertex_buffer_hook);
             auto index_replacement = reinterpret_cast<ULONG_PTR>(create_index_buffer_hook);
-            auto set_vertex_shader_replacement = reinterpret_cast<ULONG_PTR>(set_vertex_shader_hook);
+            auto draw_primitive_replacement = reinterpret_cast<ULONG_PTR>(draw_primitive_hook);
+            auto draw_indexed_primitive_replacement = reinterpret_cast<ULONG_PTR>(draw_indexed_primitive_hook);
+            auto draw_primitive_up_replacement = reinterpret_cast<ULONG_PTR>(draw_primitive_up_hook);
+            auto draw_indexed_primitive_up_replacement = reinterpret_cast<ULONG_PTR>(draw_indexed_primitive_up_hook);
 
             bool vertex_ok = false;
             if(vtable[DEVICE_CREATE_VERTEX_BUFFER_INDEX] == vertex_replacement && native_create_vertex_buffer) {
@@ -392,17 +486,47 @@ namespace Chimera {
                 index_ok = native_create_index_buffer != nullptr;
             }
 
-            bool shader_ok = false;
-            if(vtable[DEVICE_SET_VERTEX_SHADER_INDEX] == set_vertex_shader_replacement && native_set_vertex_shader) {
-                shader_ok = true;
+            bool draw_primitive_ok = false;
+            if(vtable[DEVICE_DRAW_PRIMITIVE_INDEX] == draw_primitive_replacement && native_draw_primitive) {
+                draw_primitive_ok = true;
             }
-            else if(write_vtable_entry(&vtable[DEVICE_SET_VERTEX_SHADER_INDEX], set_vertex_shader_replacement, original_set_vertex_shader)) {
-                native_set_vertex_shader = reinterpret_cast<SetVertexShaderFunction>(original_set_vertex_shader);
-                shader_ok = native_set_vertex_shader != nullptr;
+            else if(write_vtable_entry(&vtable[DEVICE_DRAW_PRIMITIVE_INDEX], draw_primitive_replacement, original_draw_primitive)) {
+                native_draw_primitive = reinterpret_cast<DrawPrimitiveFunction>(original_draw_primitive);
+                draw_primitive_ok = native_draw_primitive != nullptr;
             }
 
-            selective_software_vertex_processing_ready = shader_ok;
-            return vertex_ok && index_ok && shader_ok;
+            bool draw_indexed_ok = false;
+            if(vtable[DEVICE_DRAW_INDEXED_PRIMITIVE_INDEX] == draw_indexed_primitive_replacement && native_draw_indexed_primitive) {
+                draw_indexed_ok = true;
+            }
+            else if(write_vtable_entry(&vtable[DEVICE_DRAW_INDEXED_PRIMITIVE_INDEX], draw_indexed_primitive_replacement, original_draw_indexed_primitive)) {
+                native_draw_indexed_primitive = reinterpret_cast<DrawIndexedPrimitiveFunction>(original_draw_indexed_primitive);
+                draw_indexed_ok = native_draw_indexed_primitive != nullptr;
+            }
+
+            bool draw_up_ok = false;
+            if(vtable[DEVICE_DRAW_PRIMITIVE_UP_INDEX] == draw_primitive_up_replacement && native_draw_primitive_up) {
+                draw_up_ok = true;
+            }
+            else if(write_vtable_entry(&vtable[DEVICE_DRAW_PRIMITIVE_UP_INDEX], draw_primitive_up_replacement, original_draw_primitive_up)) {
+                native_draw_primitive_up = reinterpret_cast<DrawPrimitiveUPFunction>(original_draw_primitive_up);
+                draw_up_ok = native_draw_primitive_up != nullptr;
+            }
+
+            bool draw_indexed_up_ok = false;
+            if(vtable[DEVICE_DRAW_INDEXED_PRIMITIVE_UP_INDEX] == draw_indexed_primitive_up_replacement && native_draw_indexed_primitive_up) {
+                draw_indexed_up_ok = true;
+            }
+            else if(write_vtable_entry(&vtable[DEVICE_DRAW_INDEXED_PRIMITIVE_UP_INDEX], draw_indexed_primitive_up_replacement, original_draw_indexed_primitive_up)) {
+                native_draw_indexed_primitive_up = reinterpret_cast<DrawIndexedPrimitiveUPFunction>(original_draw_indexed_primitive_up);
+                draw_indexed_up_ok = native_draw_indexed_primitive_up != nullptr;
+            }
+
+            selective_software_vertex_processing_ready = draw_primitive_ok &&
+                                                          draw_indexed_ok &&
+                                                          draw_up_ok &&
+                                                          draw_indexed_up_ok;
+            return vertex_ok && index_ok && selective_software_vertex_processing_ready;
         }
 
         class Direct3D9On12Fallback final : public IDirect3D9 {
@@ -494,10 +618,9 @@ namespace Chimera {
                                                    IDirect3DDevice9 **device) override {
                 DWORD create_behavior_flags = behavior_flags;
                 if(this->active == this->on_12) {
-                    // Full software vertex processing proved that the corruption is
-                    // isolated to non-world vertex paths, while moving the BSP to
-                    // the CPU destroys performance. Use a mixed device and keep
-                    // only known-good environment/screen shaders on HWVP.
+                    // Full SWVP proved the geometry itself is sound, but costs too
+                    // much CPU. Use a mixed device and choose SWVP/HWVP at each
+                    // actual draw call, after any Halo state block has been applied.
                     create_behavior_flags &= ~(D3DCREATE_HARDWARE_VERTEXPROCESSING |
                                                D3DCREATE_MIXED_VERTEXPROCESSING |
                                                D3DCREATE_SOFTWARE_VERTEXPROCESSING |
@@ -520,10 +643,8 @@ namespace Chimera {
                                          ? D3D9BackendStatus::ON_12_ACTIVE
                                          : D3D9BackendStatus::NATIVE_FALLBACK;
                     if(on_12_active && device && *device) {
-                        // A new D3D9 device starts with no vertex shader bound. Null
-                        // and fixed-function paths were among those missed by the
-                        // first selective experiment, so start in software mode and
-                        // switch back to HWVP only when a known-safe shader appears.
+                        // Start safe. The draw hooks switch known-good environment
+                        // and screen passes back to HWVP only at their draw boundary.
                         auto mode_result = (*device)->SetSoftwareVertexProcessing(TRUE);
                         selective_software_vertex_processing_active = SUCCEEDED(mode_result);
                         buffer_lock_compat_ready = install_buffer_lock_compat(*device);
@@ -780,7 +901,7 @@ namespace Chimera {
                 break;
             case D3D9BackendStatus::ON_12_ACTIVE:
                 if(buffer_lock_compat_ready && selective_software_vertex_processing_ready && mixed_vertex_processing_forced) {
-                    console_output("D3D9 backend: D3D9On12 is active with Halo buffer-lock compatibility and selective non-environment software vertex processing.");
+                    console_output("D3D9 backend: D3D9On12 is active with Halo buffer-lock compatibility and draw-time selective software vertex processing.");
                 }
                 else if(buffer_lock_compat_ready) {
                     console_output("D3D9 backend: D3D9On12 is active with Halo buffer-lock compatibility.");
