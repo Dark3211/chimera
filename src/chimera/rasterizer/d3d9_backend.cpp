@@ -106,17 +106,37 @@ namespace Chimera {
             return false;
         }
 
-        bool is_model_vertex_shader(IDirect3DVertexShader9 *shader) noexcept {
+        bool should_use_software_vertex_processing(IDirect3DVertexShader9 *shader) noexcept {
+            // Full SWVP fixed every corrupt vehicle/weapon/model draw, while the
+            // first selective pass (model shaders only) restored performance but
+            // missed several Halo draw paths, including fixed-function/null-shader
+            // geometry. Keep only the known-good heavy world/screen paths on HWVP
+            // and run every other path through SWVP.
             if(!shader || !vertex_shaders) {
+                return true;
+            }
+
+            // Halo's BSP/environment geometry was already correct on D3D9On12 and
+            // is by far the most expensive geometry to move to the CPU.
+            for(std::size_t index = VSH_ENVIRONMENT_DIFFUSE_LIGHT; index <= VSH_ENVIRONMENT_TEXTURE; index++) {
+                if(vertex_shaders[index].shader == shader) {
+                    return false;
+                }
+            }
+
+            // Full-screen/HUD passes do not exhibit the exploding-vertex issue and
+            // are safe to leave on hardware processing.
+            for(std::size_t index = VSH_SCREEN; index <= VSH_SCREEN2; index++) {
+                if(vertex_shaders[index].shader == shader) {
+                    return false;
+                }
+            }
+
+            if(vertex_shaders[VSH_CONVOLUTION].shader == shader) {
                 return false;
             }
 
-            for(std::size_t index = VSH_MODEL_FOGGED; index <= VSH_MODEL_ZBUFFER; index++) {
-                if(vertex_shaders[index].shader == shader) {
-                    return true;
-                }
-            }
-            return false;
+            return true;
         }
 
         Direct3DCreate9On12Function resolve_direct3d_create9_on_12() noexcept {
@@ -322,7 +342,7 @@ namespace Chimera {
                 return D3DERR_INVALIDCALL;
             }
 
-            const bool use_software = is_model_vertex_shader(shader);
+            const bool use_software = should_use_software_vertex_processing(shader);
             if(selective_software_vertex_processing_ready && use_software != selective_software_vertex_processing_active) {
                 auto mode_result = device->SetSoftwareVertexProcessing(use_software ? TRUE : FALSE);
                 if(SUCCEEDED(mode_result)) {
@@ -474,18 +494,17 @@ namespace Chimera {
                                                    IDirect3DDevice9 **device) override {
                 DWORD create_behavior_flags = behavior_flags;
                 if(this->active == this->on_12) {
-                    // Full software vertex processing proved that the D3D9On12
-                    // corruption is in Halo's model vertex-processing path, but
-                    // forcing every draw through the CPU is far too slow. Create
-                    // a mixed device instead and switch to software only while
-                    // Halo's model vertex shaders are bound.
+                    // Full software vertex processing proved that the corruption is
+                    // isolated to non-world vertex paths, while moving the BSP to
+                    // the CPU destroys performance. Use a mixed device and keep
+                    // only known-good environment/screen shaders on HWVP.
                     create_behavior_flags &= ~(D3DCREATE_HARDWARE_VERTEXPROCESSING |
                                                D3DCREATE_MIXED_VERTEXPROCESSING |
                                                D3DCREATE_SOFTWARE_VERTEXPROCESSING |
                                                D3DCREATE_PUREDEVICE);
                     create_behavior_flags |= D3DCREATE_MIXED_VERTEXPROCESSING;
                     mixed_vertex_processing_forced = true;
-                    selective_software_vertex_processing_active = false;
+                    selective_software_vertex_processing_active = true;
                 }
 
                 auto result = this->active->CreateDevice(adapter,
@@ -501,9 +520,12 @@ namespace Chimera {
                                          ? D3D9BackendStatus::ON_12_ACTIVE
                                          : D3D9BackendStatus::NATIVE_FALLBACK;
                     if(on_12_active && device && *device) {
-                        // Mixed mode starts in hardware processing by default.
-                        (*device)->SetSoftwareVertexProcessing(FALSE);
-                        selective_software_vertex_processing_active = false;
+                        // A new D3D9 device starts with no vertex shader bound. Null
+                        // and fixed-function paths were among those missed by the
+                        // first selective experiment, so start in software mode and
+                        // switch back to HWVP only when a known-safe shader appears.
+                        auto mode_result = (*device)->SetSoftwareVertexProcessing(TRUE);
+                        selective_software_vertex_processing_active = SUCCEEDED(mode_result);
                         buffer_lock_compat_ready = install_buffer_lock_compat(*device);
                     }
                 }
@@ -758,7 +780,7 @@ namespace Chimera {
                 break;
             case D3D9BackendStatus::ON_12_ACTIVE:
                 if(buffer_lock_compat_ready && selective_software_vertex_processing_ready && mixed_vertex_processing_forced) {
-                    console_output("D3D9 backend: D3D9On12 is active with Halo buffer-lock compatibility and selective model software vertex processing.");
+                    console_output("D3D9 backend: D3D9On12 is active with Halo buffer-lock compatibility and selective non-environment software vertex processing.");
                 }
                 else if(buffer_lock_compat_ready) {
                     console_output("D3D9 backend: D3D9On12 is active with Halo buffer-lock compatibility.");
