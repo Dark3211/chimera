@@ -10,6 +10,7 @@
 #include "d3d9_backend.hpp"
 #include "../chimera.hpp"
 #include "../config/ini.hpp"
+#include "../output/output.hpp"
 
 namespace Chimera {
     namespace {
@@ -31,15 +32,71 @@ namespace Chimera {
         Direct3DCreate9Function native_direct3d_create9 = nullptr;
         Direct3DCreate9On12Function direct3d_create9_on_12 = nullptr;
 
+        enum class D3D9BackendStatus {
+            DISABLED,
+            HOOK_INSTALLED,
+            HOOK_INSTALL_FAILED,
+            ENTRYPOINT_UNAVAILABLE,
+            ENUMERATOR_CREATION_FAILED,
+            ENUMERATOR_CREATED,
+            ON_12_ACTIVE,
+            NATIVE_FALLBACK,
+            DEVICE_CREATION_FAILED
+        };
+
+        D3D9BackendStatus backend_status = D3D9BackendStatus::DISABLED;
+
         constexpr GUID IID_IUNKNOWN_VALUE = {
             0x00000000, 0x0000, 0x0000, {0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}
         };
         constexpr GUID IID_IDIRECT3D9_VALUE = {
             0x81BDCBCA, 0x64D4, 0x426D, {0xAE, 0x8D, 0xAD, 0x01, 0x47, 0xF4, 0x27, 0x5C}
         };
+        constexpr GUID IID_IDIRECT3DDEVICE9ON12_VALUE = {
+            0xE7FDA234, 0xB589, 0x4049, {0x94, 0x0D, 0x88, 0x78, 0x97, 0x75, 0x31, 0xC8}
+        };
 
         bool equal_guid(REFIID first, const GUID &second) noexcept {
             return std::memcmp(&first, &second, sizeof(GUID)) == 0;
+        }
+
+        bool is_d3d9_on_12_device(IDirect3DDevice9 *device) noexcept {
+            if(!device) {
+                return false;
+            }
+
+            IUnknown *on_12_interface = nullptr;
+            auto result = device->QueryInterface(IID_IDIRECT3DDEVICE9ON12_VALUE,
+                                                 reinterpret_cast<void **>(&on_12_interface));
+            if(SUCCEEDED(result) && on_12_interface) {
+                on_12_interface->Release();
+                return true;
+            }
+            return false;
+        }
+
+        Direct3DCreate9On12Function resolve_direct3d_create9_on_12() noexcept {
+            if(direct3d_create9_on_12) {
+                return direct3d_create9_on_12;
+            }
+
+            // Chimera is initialized before Halo loads D3D9 on some systems.
+            // Resolve the optional entrypoint only when Halo calls Direct3DCreate9.
+            auto d3d9_module = GetModuleHandleA("d3d9.dll");
+            if(!d3d9_module) {
+                backend_status = D3D9BackendStatus::ENTRYPOINT_UNAVAILABLE;
+                return nullptr;
+            }
+
+            auto procedure = GetProcAddress(d3d9_module, "Direct3DCreate9On12");
+            if(!procedure) {
+                backend_status = D3D9BackendStatus::ENTRYPOINT_UNAVAILABLE;
+                return nullptr;
+            }
+
+            static_assert(sizeof(procedure) == sizeof(direct3d_create9_on_12));
+            std::memcpy(&direct3d_create9_on_12, &procedure, sizeof(direct3d_create9_on_12));
+            return direct3d_create9_on_12;
         }
 
         class Direct3D9On12Fallback final : public IDirect3D9 {
@@ -136,6 +193,12 @@ namespace Chimera {
                                                          presentation_parameters,
                                                          device);
 
+                if(SUCCEEDED(result) && this->active == this->on_12) {
+                    backend_status = device && is_d3d9_on_12_device(*device)
+                                         ? D3D9BackendStatus::ON_12_ACTIVE
+                                         : D3D9BackendStatus::NATIVE_FALLBACK;
+                }
+
                 // If 9On12 cannot create Halo's device, retry once using the
                 // exact native D3D9 entrypoint that Halo originally imported.
                 if(FAILED(result) && this->active == this->on_12 && this->native) {
@@ -150,6 +213,12 @@ namespace Chimera {
                                                         behavior_flags,
                                                         presentation_parameters,
                                                         device);
+                    backend_status = SUCCEEDED(result)
+                                         ? D3D9BackendStatus::NATIVE_FALLBACK
+                                         : D3D9BackendStatus::DEVICE_CREATION_FAILED;
+                }
+                else if(FAILED(result)) {
+                    backend_status = D3D9BackendStatus::DEVICE_CREATION_FAILED;
                 }
                 return result;
             }
@@ -167,13 +236,25 @@ namespace Chimera {
         };
 
         IDirect3D9 *WINAPI direct3d_create9_hook(UINT sdk_version) noexcept {
+            if(!native_direct3d_create9) {
+                backend_status = D3D9BackendStatus::ENUMERATOR_CREATION_FAILED;
+                return nullptr;
+            }
+
+            auto create_9_on_12 = resolve_direct3d_create9_on_12();
+            if(!create_9_on_12) {
+                return native_direct3d_create9(sdk_version);
+            }
+
             D3D9On12Args arguments = {};
             arguments.enable_9_on_12 = TRUE;
 
-            auto *on_12 = direct3d_create9_on_12(sdk_version, &arguments, 1);
+            auto *on_12 = create_9_on_12(sdk_version, &arguments, 1);
             if(!on_12) {
+                backend_status = D3D9BackendStatus::ENUMERATOR_CREATION_FAILED;
                 return native_direct3d_create9(sdk_version);
             }
+            backend_status = D3D9BackendStatus::ENUMERATOR_CREATED;
 
             auto *native = native_direct3d_create9(sdk_version);
             if(!native) {
@@ -258,24 +339,46 @@ namespace Chimera {
             return;
         }
 
-        // Do not load or bundle a replacement DLL. Use only the implementation
-        // provided by the active Windows D3D9 runtime. If the export is absent
-        // (older Windows, DXVK, or another wrapper), native D3D9 remains intact.
-        auto d3d9_module = GetModuleHandleA("d3d9.dll");
-        if(!d3d9_module) {
-            return;
+        // Install the import hook before Halo creates its D3D9 object. The
+        // optional Windows entrypoint is resolved lazily by the hook because
+        // d3d9.dll may not be loaded yet while strings.dll is initializing.
+        if(patch_direct3d_create9_import()) {
+            backend_status = D3D9BackendStatus::HOOK_INSTALLED;
         }
-
-        direct3d_create9_on_12 = reinterpret_cast<Direct3DCreate9On12Function>(
-            GetProcAddress(d3d9_module, "Direct3DCreate9On12")
-        );
-        if(!direct3d_create9_on_12) {
-            return;
-        }
-
-        if(!patch_direct3d_create9_import()) {
-            direct3d_create9_on_12 = nullptr;
+        else {
             native_direct3d_create9 = nullptr;
+            backend_status = D3D9BackendStatus::HOOK_INSTALL_FAILED;
+        }
+    }
+
+    void report_d3d9_backend_status() noexcept {
+        switch(backend_status) {
+            case D3D9BackendStatus::DISABLED:
+                break;
+            case D3D9BackendStatus::HOOK_INSTALLED:
+                console_warning("D3D9 backend: 9On12 hook was installed but Direct3DCreate9 was not intercepted; native D3D9 is active.");
+                break;
+            case D3D9BackendStatus::HOOK_INSTALL_FAILED:
+                console_warning("D3D9 backend: 9On12 hook installation failed; native D3D9 is active.");
+                break;
+            case D3D9BackendStatus::ENTRYPOINT_UNAVAILABLE:
+                console_warning("D3D9 backend: Direct3DCreate9On12 is unavailable; native D3D9 is active.");
+                break;
+            case D3D9BackendStatus::ENUMERATOR_CREATION_FAILED:
+                console_warning("D3D9 backend: 9On12 initialization failed; native D3D9 is active.");
+                break;
+            case D3D9BackendStatus::ENUMERATOR_CREATED:
+                console_warning("D3D9 backend: 9On12 was selected, but device activation was not observed.");
+                break;
+            case D3D9BackendStatus::ON_12_ACTIVE:
+                console_output("D3D9 backend: D3D9On12 is active.");
+                break;
+            case D3D9BackendStatus::NATIVE_FALLBACK:
+                console_warning("D3D9 backend: 9On12 did not remain active; native D3D9 fallback is active.");
+                break;
+            case D3D9BackendStatus::DEVICE_CREATION_FAILED:
+                console_error("D3D9 backend: both 9On12 and native D3D9 device creation failed.");
+                break;
         }
     }
 }

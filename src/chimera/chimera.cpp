@@ -755,6 +755,7 @@ namespace Chimera {
         setup_lua_scripting();
 
         enable_output(true);
+        report_d3d9_backend_status();
     }
 
     const std::vector<Command> &Chimera::get_commands() const noexcept {

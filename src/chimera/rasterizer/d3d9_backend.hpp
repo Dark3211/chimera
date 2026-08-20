@@ -11,6 +11,12 @@ namespace Chimera {
      * "9on12". If setup fails, Halo keeps using its original D3D9 entrypoint.
      */
     void set_up_d3d9_backend() noexcept;
+
+    /**
+     * Report whether the requested backend activated or fell back to D3D9.
+     * This should be called after Chimera console output has been enabled.
+     */
+    void report_d3d9_backend_status() noexcept;
 }
 
 #endif
