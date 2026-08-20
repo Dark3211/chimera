@@ -41,40 +41,191 @@ namespace Chimera {
             0xE7FDA234, 0xB589, 0x4049, {0x94, 0x0D, 0x88, 0x78, 0x97, 0x75, 0x31, 0xC8}
         };
 
+        bool d3d9_on12_requested = false;
+        bool d3d9_on12_device_checked = false;
         bool d3d9_on12_device_verified = false;
-        bool halo_vertex_mode_reported = false;
+        IDirect3DDevice9 *d3d9_on12_checked_device = nullptr;
 
-        void synchronize_halo_vertex_processing_mode() {
-            if(!rasterizer_globals || !global_d3d9_device || !*global_d3d9_device) {
-                return;
+        bool halo_vertex_mode_reported = false;
+        unsigned int halo_software_vp_scope_depth = 0;
+        bool halo_software_vp_saved_state = false;
+
+        const void *original_transparent_geometry_group_draw = nullptr;
+
+        bool verify_d3d9_on12_device() noexcept {
+            if(!d3d9_on12_requested || !rasterizer_globals || !global_d3d9_device || !*global_d3d9_device) {
+                return false;
             }
 
-            if(!d3d9_on12_device_verified) {
+            auto *device = *global_d3d9_device;
+            if(device != d3d9_on12_checked_device) {
+                d3d9_on12_checked_device = device;
+                d3d9_on12_device_checked = false;
+                d3d9_on12_device_verified = false;
+            }
+
+            if(!d3d9_on12_device_checked) {
+                d3d9_on12_device_checked = true;
+
                 IUnknown *on_12_interface = nullptr;
-                auto result = (*global_d3d9_device)->QueryInterface(
+                auto result = device->QueryInterface(
                     IID_IDIRECT3DDEVICE9ON12_VALUE,
                     reinterpret_cast<void **>(&on_12_interface)
                 );
-                if(FAILED(result) || !on_12_interface) {
-                    return;
+                if(SUCCEEDED(result) && on_12_interface) {
+                    on_12_interface->Release();
+                    d3d9_on12_device_verified = true;
                 }
-
-                on_12_interface->Release();
-                d3d9_on12_device_verified = true;
             }
 
-            // A full D3DCREATE_SOFTWARE_VERTEXPROCESSING device fixed Halo's
-            // corrupted vehicles/weapons, while mixed-mode toggling alone did not.
-            // Halo keeps its own renderer-side copy of the vertex-processing mode
-            // and uses it while preparing model vertices/declarations. Keep that
-            // engine-side state on the software-compatible path before each frame;
-            // d3d9_backend.cpp may still switch known-safe draws back to HWVP.
-            rasterizer_globals->using_software_vertex_processing = true;
+            return d3d9_on12_device_verified;
+        }
+
+        bool enter_halo_software_vertex_processing_scope() noexcept {
+            if(!verify_d3d9_on12_device()) {
+                return false;
+            }
+
+            if(halo_software_vp_scope_depth == 0) {
+                halo_software_vp_saved_state = rasterizer_globals->using_software_vertex_processing;
+                rasterizer_globals->using_software_vertex_processing = true;
+            }
+            halo_software_vp_scope_depth++;
 
             if(!halo_vertex_mode_reported) {
-                console_output("D3D9 backend: Halo renderer preprocessing synchronized to software vertex mode.");
+                console_output("D3D9 backend: selective Halo software vertex preprocessing enabled for model paths.");
                 halo_vertex_mode_reported = true;
             }
+
+            return true;
+        }
+
+        void leave_halo_software_vertex_processing_scope() noexcept {
+            if(halo_software_vp_scope_depth == 0) {
+                return;
+            }
+
+            halo_software_vp_scope_depth--;
+            if(halo_software_vp_scope_depth == 0 && rasterizer_globals) {
+                rasterizer_globals->using_software_vertex_processing = halo_software_vp_saved_state;
+            }
+        }
+
+        void begin_halo_software_vertex_processing_scope() noexcept {
+            enter_halo_software_vertex_processing_scope();
+        }
+
+        void end_halo_software_vertex_processing_scope() noexcept {
+            leave_halo_software_vertex_processing_scope();
+        }
+
+        void reset_halo_software_vertex_processing_scope() noexcept {
+            if(halo_software_vp_scope_depth != 0 && rasterizer_globals) {
+                rasterizer_globals->using_software_vertex_processing = halo_software_vp_saved_state;
+            }
+            halo_software_vp_scope_depth = 0;
+        }
+
+        using TransparentGeometryDrawFunction = void (*)(TransparentGeometryGroup *, bool);
+
+        void selective_transparent_geometry_group_draw(TransparentGeometryGroup *group, bool is_dirty) noexcept {
+            auto original = reinterpret_cast<TransparentGeometryDrawFunction>(original_transparent_geometry_group_draw);
+            if(!original) {
+                return;
+            }
+
+            bool needs_software_vertex_processing = false;
+            if(group) {
+                constexpr std::uint32_t dont_skin_mask = 1u << RASTERIZER_GEOMETRY_FLAGS_DONT_SKIN;
+                constexpr std::uint32_t local_nodes_mask = 1u << RASTERIZER_GEOMETRY_FLAGS_PARTS_DEFINE_LOCAL_NODES_BIT;
+
+                needs_software_vertex_processing =
+                    !(group->geometry_flags & dont_skin_mask) &&
+                    (group->node_matrix_count > 0 || (group->geometry_flags & local_nodes_mask));
+            }
+
+            bool entered = false;
+            if(needs_software_vertex_processing) {
+                entered = enter_halo_software_vertex_processing_scope();
+            }
+
+            original(group, is_dirty);
+
+            if(entered) {
+                leave_halo_software_vertex_processing_scope();
+            }
+        }
+
+        void set_up_selective_halo_vertex_processing() noexcept {
+            static bool enabled = false;
+            if(enabled) {
+                return;
+            }
+            enabled = true;
+
+            // These brackets cover Halo's opaque model preprocessing. They are
+            // installed before the fog/FP hooks and safely chain with those hooks.
+            static Hook model_begin_hook;
+            static Hook model_end_hook;
+            write_jmp_call(
+                get_chimera().get_signature("rasterizer_model_begin_fog_sig").data(),
+                model_begin_hook,
+                reinterpret_cast<const void *>(begin_halo_software_vertex_processing_scope),
+                nullptr
+            );
+            write_jmp_call(
+                get_chimera().get_signature("rasterizer_model_end_fog_sig").data(),
+                model_end_hook,
+                reinterpret_cast<const void *>(end_halo_software_vertex_processing_scope),
+                nullptr
+            );
+
+            // First-person models have their own renderer path, so scope that path
+            // separately in case it does not pass through the generic model bracket.
+            static Hook fp_model_begin_hook;
+            static Hook fp_model_end_hook;
+            write_jmp_call(
+                get_chimera().get_signature("rasterizer_model_begin_fp_sig").data() + 2,
+                fp_model_begin_hook,
+                reinterpret_cast<const void *>(begin_halo_software_vertex_processing_scope),
+                nullptr
+            );
+            write_jmp_call(
+                get_chimera().get_signature("rasterizer_model_end_fp_sig").data() + 4,
+                fp_model_end_hook,
+                reinterpret_cast<const void *>(end_halo_software_vertex_processing_scope),
+                nullptr
+            );
+
+            static Hook fp_transparent_begin_hook;
+            static Hook fp_transparent_end_hook;
+            write_jmp_call(
+                get_chimera().get_signature("rasterizer_transparent_geo_fp_begin_sig").data() + 2,
+                fp_transparent_begin_hook,
+                reinterpret_cast<const void *>(begin_halo_software_vertex_processing_scope),
+                nullptr
+            );
+            write_jmp_call(
+                get_chimera().get_signature("rasterizer_transparent_geo_fp_end_sig").data() + 2,
+                fp_transparent_end_hook,
+                reinterpret_cast<const void *>(end_halo_software_vertex_processing_scope),
+                nullptr
+            );
+
+            // Queued transparent model geometry is rendered later, outside the
+            // opaque model bracket. Only groups that actually need skinning/local
+            // node remapping take Halo's software-compatible preprocessing path.
+            static Hook transparent_geometry_draw_hook;
+            write_function_override(
+                get_chimera().get_signature("transparent_geometry_group_draw_sig").data(),
+                transparent_geometry_draw_hook,
+                reinterpret_cast<const void *>(selective_transparent_geometry_group_draw),
+                &original_transparent_geometry_group_draw
+            );
+
+            // If an unusual early-out ever leaves a model bracket unbalanced,
+            // restore Halo's previous renderer state before the next frame.
+            add_preframe_event(reset_halo_software_vertex_processing_scope, EVENT_PRIORITY_BEFORE);
         }
     }
 
@@ -102,8 +253,9 @@ namespace Chimera {
             wind_globals = *reinterpret_cast<WindGlobals **>(get_chimera().get_signature("wind_globals_sig").data() + 8);
 
             auto *backend = get_chimera().get_ini()->get_value("video_mode.d3d_backend");
-            if(backend && (_stricmp(backend, "9on12") == 0 || _stricmp(backend, "d3d9on12") == 0)) {
-                add_preframe_event(synchronize_halo_vertex_processing_mode, EVENT_PRIORITY_BEFORE);
+            d3d9_on12_requested = backend && (_stricmp(backend, "9on12") == 0 || _stricmp(backend, "d3d9on12") == 0);
+            if(d3d9_on12_requested) {
+                set_up_selective_halo_vertex_processing();
             }
 
             game_variables_enabled = true;
