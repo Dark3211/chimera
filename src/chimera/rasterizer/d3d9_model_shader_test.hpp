@@ -22,18 +22,42 @@ namespace Chimera {
             IDirect3DDevice9 *, IDirect3DVertexShader9 *
         );
 
+        enum class Mode {
+            OFF,
+            FAST_TO_MODEL,
+            FAST_TO_SCENERY
+        };
+
         static SetVertexShaderFunction original_set_vertex_shader = nullptr;
         static IDirect3DDevice9 *installed_device = nullptr;
         static bool announced = false;
 
-        static bool enabled() noexcept {
+        static bool d3d9on12_requested() noexcept {
             auto *backend = get_chimera().get_ini()->get_value("video_mode.d3d_backend");
-            if(!backend || (_stricmp(backend, "9on12") != 0 && _stricmp(backend, "d3d9on12") != 0)) {
-                return false;
+            return backend
+                && (_stricmp(backend, "9on12") == 0 || _stricmp(backend, "d3d9on12") == 0);
+        }
+
+        static Mode mode() noexcept {
+            if(!d3d9on12_requested()) {
+                return Mode::OFF;
             }
 
-            auto *mode = get_chimera().get_ini()->get_value("video_mode.d3d_model_shader_test");
-            return mode && _stricmp(mode, "fast_to_model") == 0;
+            auto *value = get_chimera().get_ini()->get_value("video_mode.d3d_model_shader_test");
+            if(!value) {
+                return Mode::OFF;
+            }
+            if(_stricmp(value, "fast_to_model") == 0) {
+                return Mode::FAST_TO_MODEL;
+            }
+            if(_stricmp(value, "fast_to_scenery") == 0) {
+                return Mode::FAST_TO_SCENERY;
+            }
+            return Mode::OFF;
+        }
+
+        static bool enabled() noexcept {
+            return mode() != Mode::OFF;
         }
 
         static HRESULT STDMETHODCALLTYPE set_vertex_shader_hook(
@@ -44,11 +68,27 @@ namespace Chimera {
                 return D3DERR_INVALIDCALL;
             }
 
-            if(enabled() && vertex_shaders
-                && vertex_shaders[VSH_MODEL_FAST].shader
-                && vertex_shaders[VSH_MODEL].shader
+            if(vertex_shaders && vertex_shaders[VSH_MODEL_FAST].shader
                 && shader == vertex_shaders[VSH_MODEL_FAST].shader) {
-                shader = vertex_shaders[VSH_MODEL].shader;
+                switch(mode()) {
+                    case Mode::FAST_TO_MODEL:
+                        if(vertex_shaders[VSH_MODEL].shader) {
+                            shader = vertex_shaders[VSH_MODEL].shader;
+                        }
+                        break;
+                    case Mode::FAST_TO_SCENERY:
+                        // model_scenery uses the same model input layout and common
+                        // transform code, but compiles ModelVS(true, false): it uses
+                        // c_node_matrices[0] directly instead of BlendIndices-driven
+                        // relative constant addressing. Visual rigidity is expected;
+                        // disappearance of the long spikes would isolate GPU skinning.
+                        if(vertex_shaders[VSH_MODEL_SCENERY].shader) {
+                            shader = vertex_shaders[VSH_MODEL_SCENERY].shader;
+                        }
+                        break;
+                    case Mode::OFF:
+                        break;
+                }
             }
 
             return original_set_vertex_shader(device, shader);
@@ -92,7 +132,12 @@ namespace Chimera {
             installed_device = device;
 
             if(!announced) {
-                console_output("D3D9 backend: testing VSH_MODEL_FAST -> VSH_MODEL substitution on D3D9On12.");
+                if(mode() == Mode::FAST_TO_SCENERY) {
+                    console_output("D3D9 backend: testing VSH_MODEL_FAST -> VSH_MODEL_SCENERY single-bone isolation on D3D9On12.");
+                }
+                else {
+                    console_output("D3D9 backend: testing VSH_MODEL_FAST -> VSH_MODEL substitution on D3D9On12.");
+                }
                 announced = true;
             }
             return true;
