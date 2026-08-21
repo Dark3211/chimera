@@ -15,10 +15,6 @@
 namespace Chimera {
     namespace {
         constexpr UINT MAX_D3D9ON12_QUEUES = 2;
-        constexpr std::size_t DEVICE_CREATE_VERTEX_BUFFER_INDEX = 26;
-        constexpr std::size_t DEVICE_CREATE_INDEX_BUFFER_INDEX = 27;
-        constexpr std::size_t BUFFER_LOCK_INDEX = 11;
-        constexpr std::size_t MAX_BUFFER_VTABLES = 16;
 
         // MinGW releases do not all ship d3d9on12.h yet. Keep the ABI-compatible
         // definition here and resolve the Windows entrypoint dynamically.
@@ -33,27 +29,10 @@ namespace Chimera {
         using Direct3DCreate9Function = IDirect3D9 *(WINAPI *)(UINT);
         using Direct3DCreate9On12Function = IDirect3D9 *(WINAPI *)(UINT, D3D9On12Args *, UINT);
         using GetProcAddressFunction = FARPROC (WINAPI *)(HMODULE, LPCSTR);
-        using CreateVertexBufferFunction = HRESULT (STDMETHODCALLTYPE *)(IDirect3DDevice9 *, UINT, DWORD, DWORD, D3DPOOL, IDirect3DVertexBuffer9 **, HANDLE *);
-        using CreateIndexBufferFunction = HRESULT (STDMETHODCALLTYPE *)(IDirect3DDevice9 *, UINT, DWORD, D3DFORMAT, D3DPOOL, IDirect3DIndexBuffer9 **, HANDLE *);
-        using VertexBufferLockFunction = HRESULT (STDMETHODCALLTYPE *)(IDirect3DVertexBuffer9 *, UINT, UINT, void **, DWORD);
-        using IndexBufferLockFunction = HRESULT (STDMETHODCALLTYPE *)(IDirect3DIndexBuffer9 *, UINT, UINT, void **, DWORD);
 
         Direct3DCreate9Function native_direct3d_create9 = nullptr;
         Direct3DCreate9On12Function direct3d_create9_on_12 = nullptr;
         GetProcAddressFunction native_get_proc_address = nullptr;
-        CreateVertexBufferFunction native_create_vertex_buffer = nullptr;
-        CreateIndexBufferFunction native_create_index_buffer = nullptr;
-
-        struct BufferVtablePatch {
-            ULONG_PTR *vtable = nullptr;
-            ULONG_PTR original_lock = 0;
-        };
-
-        BufferVtablePatch vertex_buffer_vtables[MAX_BUFFER_VTABLES] = {};
-        BufferVtablePatch index_buffer_vtables[MAX_BUFFER_VTABLES] = {};
-        std::size_t vertex_buffer_vtable_count = 0;
-        std::size_t index_buffer_vtable_count = 0;
-        bool buffer_lock_compat_ready = false;
 
         enum class D3D9BackendStatus {
             DISABLED,
@@ -120,227 +99,6 @@ namespace Chimera {
             static_assert(sizeof(procedure) == sizeof(direct3d_create9_on_12));
             std::memcpy(&direct3d_create9_on_12, &procedure, sizeof(direct3d_create9_on_12));
             return direct3d_create9_on_12;
-        }
-
-        bool write_vtable_entry(ULONG_PTR *entry, ULONG_PTR replacement, ULONG_PTR &original) noexcept {
-            if(!entry) {
-                return false;
-            }
-            if(*entry == replacement) {
-                return original != 0;
-            }
-
-            DWORD old_protection;
-            if(!VirtualProtect(entry, sizeof(*entry), PAGE_EXECUTE_READWRITE, &old_protection)) {
-                return false;
-            }
-
-            if(original == 0) {
-                original = *entry;
-            }
-            *entry = replacement;
-
-            DWORD restored_protection;
-            VirtualProtect(entry, sizeof(*entry), old_protection, &restored_protection);
-            FlushInstructionCache(GetCurrentProcess(), entry, sizeof(*entry));
-            return original != 0;
-        }
-
-        ULONG_PTR find_original_lock(void *buffer, BufferVtablePatch *patches, std::size_t patch_count) noexcept {
-            if(!buffer) {
-                return 0;
-            }
-
-            auto *vtable = *reinterpret_cast<ULONG_PTR **>(buffer);
-            if(!vtable) {
-                return 0;
-            }
-
-            for(std::size_t i = 0; i < patch_count; i++) {
-                if(patches[i].vtable == vtable) {
-                    return patches[i].original_lock;
-                }
-            }
-            return 0;
-        }
-
-        bool patch_buffer_lock(void *buffer,
-                               ULONG_PTR replacement,
-                               BufferVtablePatch *patches,
-                               std::size_t &patch_count) noexcept {
-            if(!buffer) {
-                return false;
-            }
-
-            auto *vtable = *reinterpret_cast<ULONG_PTR **>(buffer);
-            if(!vtable) {
-                return false;
-            }
-
-            for(std::size_t i = 0; i < patch_count; i++) {
-                if(patches[i].vtable == vtable) {
-                    return vtable[BUFFER_LOCK_INDEX] == replacement;
-                }
-            }
-
-            if(patch_count >= MAX_BUFFER_VTABLES) {
-                return false;
-            }
-
-            ULONG_PTR original = 0;
-            if(!write_vtable_entry(&vtable[BUFFER_LOCK_INDEX], replacement, original)) {
-                return false;
-            }
-
-            patches[patch_count].vtable = vtable;
-            patches[patch_count].original_lock = original;
-            patch_count++;
-            return true;
-        }
-
-        HRESULT STDMETHODCALLTYPE vertex_buffer_lock_hook(IDirect3DVertexBuffer9 *buffer,
-                                                          UINT offset_to_lock,
-                                                          UINT size_to_lock,
-                                                          void **data,
-                                                          DWORD flags) noexcept {
-            auto original_address = find_original_lock(buffer, vertex_buffer_vtables, vertex_buffer_vtable_count);
-            auto original = reinterpret_cast<VertexBufferLockFunction>(original_address);
-            if(!original) {
-                return D3DERR_INVALIDCALL;
-            }
-
-            // D3DLOCK_DISCARD and SizeToLock == 0 already describe a whole-buffer
-            // update. Passing them through avoids an unnecessary GetDesc and keeps
-            // D3D9On12's fast dynamic-buffer path intact.
-            if(!data || (flags & D3DLOCK_DISCARD) || size_to_lock == 0) {
-                return original(buffer, offset_to_lock, size_to_lock, data, flags);
-            }
-
-            D3DVERTEXBUFFER_DESC desc = {};
-            if(FAILED(buffer->GetDesc(&desc)) || desc.Pool != D3DPOOL_DEFAULT || offset_to_lock > desc.Size) {
-                return original(buffer, offset_to_lock, size_to_lock, data, flags);
-            }
-
-            // Halo uses partial DEFAULT-pool lock ranges that native D3D9 drivers
-            // historically tolerate more broadly than translation layers. Map the
-            // whole backing buffer only for those partial non-discard locks, while
-            // preserving the pointer offset Halo writes through.
-            void *base = nullptr;
-            auto result = original(buffer, 0, 0, &base, flags);
-            if(SUCCEEDED(result) && base) {
-                *data = reinterpret_cast<std::byte *>(base) + offset_to_lock;
-            }
-            return result;
-        }
-
-        HRESULT STDMETHODCALLTYPE index_buffer_lock_hook(IDirect3DIndexBuffer9 *buffer,
-                                                         UINT offset_to_lock,
-                                                         UINT size_to_lock,
-                                                         void **data,
-                                                         DWORD flags) noexcept {
-            auto original_address = find_original_lock(buffer, index_buffer_vtables, index_buffer_vtable_count);
-            auto original = reinterpret_cast<IndexBufferLockFunction>(original_address);
-            if(!original) {
-                return D3DERR_INVALIDCALL;
-            }
-
-            if(!data || (flags & D3DLOCK_DISCARD) || size_to_lock == 0) {
-                return original(buffer, offset_to_lock, size_to_lock, data, flags);
-            }
-
-            D3DINDEXBUFFER_DESC desc = {};
-            if(FAILED(buffer->GetDesc(&desc)) || desc.Pool != D3DPOOL_DEFAULT || offset_to_lock > desc.Size) {
-                return original(buffer, offset_to_lock, size_to_lock, data, flags);
-            }
-
-            void *base = nullptr;
-            auto result = original(buffer, 0, 0, &base, flags);
-            if(SUCCEEDED(result) && base) {
-                *data = reinterpret_cast<std::byte *>(base) + offset_to_lock;
-            }
-            return result;
-        }
-
-        HRESULT STDMETHODCALLTYPE create_vertex_buffer_hook(IDirect3DDevice9 *device,
-                                                            UINT length,
-                                                            DWORD usage,
-                                                            DWORD fvf,
-                                                            D3DPOOL pool,
-                                                            IDirect3DVertexBuffer9 **buffer,
-                                                            HANDLE *shared_handle) noexcept {
-            if(!native_create_vertex_buffer) {
-                return D3DERR_INVALIDCALL;
-            }
-
-            // Do not add D3DUSAGE_SOFTWAREPROCESSING here. The final compatibility
-            // path keeps the D3D9 device on hardware vertex processing; Halo may do
-            // CPU-side model preprocessing, but D3D9On12 should consume GPU buffers
-            // with their original usage flags.
-            auto result = native_create_vertex_buffer(device, length, usage, fvf, pool, buffer, shared_handle);
-            if(SUCCEEDED(result) && buffer && *buffer) {
-                patch_buffer_lock(*buffer,
-                                  reinterpret_cast<ULONG_PTR>(vertex_buffer_lock_hook),
-                                  vertex_buffer_vtables,
-                                  vertex_buffer_vtable_count);
-            }
-            return result;
-        }
-
-        HRESULT STDMETHODCALLTYPE create_index_buffer_hook(IDirect3DDevice9 *device,
-                                                           UINT length,
-                                                           DWORD usage,
-                                                           D3DFORMAT format,
-                                                           D3DPOOL pool,
-                                                           IDirect3DIndexBuffer9 **buffer,
-                                                           HANDLE *shared_handle) noexcept {
-            if(!native_create_index_buffer) {
-                return D3DERR_INVALIDCALL;
-            }
-
-            auto result = native_create_index_buffer(device, length, usage, format, pool, buffer, shared_handle);
-            if(SUCCEEDED(result) && buffer && *buffer) {
-                patch_buffer_lock(*buffer,
-                                  reinterpret_cast<ULONG_PTR>(index_buffer_lock_hook),
-                                  index_buffer_vtables,
-                                  index_buffer_vtable_count);
-            }
-            return result;
-        }
-
-        bool install_buffer_lock_compat(IDirect3DDevice9 *device) noexcept {
-            if(!device) {
-                return false;
-            }
-
-            auto *vtable = *reinterpret_cast<ULONG_PTR **>(device);
-            if(!vtable) {
-                return false;
-            }
-
-            ULONG_PTR original_vertex = reinterpret_cast<ULONG_PTR>(native_create_vertex_buffer);
-            ULONG_PTR original_index = reinterpret_cast<ULONG_PTR>(native_create_index_buffer);
-            auto vertex_replacement = reinterpret_cast<ULONG_PTR>(create_vertex_buffer_hook);
-            auto index_replacement = reinterpret_cast<ULONG_PTR>(create_index_buffer_hook);
-
-            bool vertex_ok = false;
-            if(vtable[DEVICE_CREATE_VERTEX_BUFFER_INDEX] == vertex_replacement && native_create_vertex_buffer) {
-                vertex_ok = true;
-            }
-            else if(write_vtable_entry(&vtable[DEVICE_CREATE_VERTEX_BUFFER_INDEX], vertex_replacement, original_vertex)) {
-                native_create_vertex_buffer = reinterpret_cast<CreateVertexBufferFunction>(original_vertex);
-                vertex_ok = native_create_vertex_buffer != nullptr;
-            }
-
-            bool index_ok = false;
-            if(vtable[DEVICE_CREATE_INDEX_BUFFER_INDEX] == index_replacement && native_create_index_buffer) {
-                index_ok = true;
-            }
-            else if(write_vtable_entry(&vtable[DEVICE_CREATE_INDEX_BUFFER_INDEX], index_replacement, original_index)) {
-                native_create_index_buffer = reinterpret_cast<CreateIndexBufferFunction>(original_index);
-                index_ok = native_create_index_buffer != nullptr;
-            }
-
-            return vertex_ok && index_ok;
         }
 
         class Direct3D9On12Fallback final : public IDirect3D9 {
@@ -430,10 +188,6 @@ namespace Chimera {
                                                    DWORD behavior_flags,
                                                    D3DPRESENT_PARAMETERS *presentation_parameters,
                                                    IDirect3DDevice9 **device) override {
-                // Preserve Halo's original creation flags. The previous MIXED/SWVP
-                // experiments proved useful diagnostically, but they impose a large
-                // CPU cost. Halo's software-compatible preprocessing is now kept
-                // separate from the D3D9 device, which remains on its native HWVP path.
                 auto result = this->active->CreateDevice(adapter,
                                                          device_type,
                                                          focus_window,
@@ -442,17 +196,13 @@ namespace Chimera {
                                                          device);
 
                 if(SUCCEEDED(result) && this->active == this->on_12) {
-                    const bool on_12_active = device && is_d3d9_on_12_device(*device);
-                    backend_status = on_12_active
+                    backend_status = device && is_d3d9_on_12_device(*device)
                                          ? D3D9BackendStatus::ON_12_ACTIVE
                                          : D3D9BackendStatus::NATIVE_FALLBACK;
-                    if(on_12_active && device && *device) {
-                        buffer_lock_compat_ready = install_buffer_lock_compat(*device);
-                    }
                 }
 
-                // If 9On12 cannot create Halo's device, retry once using the exact
-                // native D3D9 entrypoint that Halo originally imported.
+                // If 9On12 cannot create Halo's device, retry once using the
+                // exact native D3D9 entrypoint that Halo originally imported.
                 if(FAILED(result) && this->active == this->on_12 && this->native) {
                     if(device && *device) {
                         (*device)->Release();
@@ -697,12 +447,7 @@ namespace Chimera {
                 console_warning("D3D9 backend: 9On12 was selected, but device activation was not observed.");
                 break;
             case D3D9BackendStatus::ON_12_ACTIVE:
-                if(buffer_lock_compat_ready) {
-                    console_output("D3D9 backend: D3D9On12 is active with Halo buffer-lock compatibility on hardware vertex processing.");
-                }
-                else {
-                    console_warning("D3D9 backend: D3D9On12 is active, but Halo buffer-lock compatibility could not be installed.");
-                }
+                console_output("D3D9 backend: D3D9On12 is active.");
                 break;
             case D3D9BackendStatus::NATIVE_FALLBACK:
                 console_warning("D3D9 backend: 9On12 did not remain active; native D3D9 fallback is active.");
