@@ -11,6 +11,7 @@
 
 #include "../chimera.hpp"
 #include "../config/ini.hpp"
+#include "../event/d3d9_end_scene.hpp"
 #include "../halo_data/game_variables.hpp"
 #include "../halo_data/shader_effects.hpp"
 #include "../output/output.hpp"
@@ -33,6 +34,8 @@ namespace Chimera {
         static SetVertexShaderFunction original_set_vertex_shader = nullptr;
         static IDirect3DDevice9 *installed_device = nullptr;
         static bool announced = false;
+        static bool queued_announced = false;
+        static bool end_scene_retry_registered = false;
         static std::uint32_t family_hit_mask = 0;
 
         static bool d3d9on12_requested() noexcept {
@@ -135,7 +138,6 @@ namespace Chimera {
                     break;
 
                 case Mode::MODEL_FAMILY_TO_SCENERY:
-                    // Broader isolation after FAST_TO_SCENERY proved insufficient.
                     // Replace all ordinary visible-model multi-bone variants so a
                     // spike cannot simply come from MODEL/MODEL_FOGGED/MODEL_FF
                     // while MODEL_FAST alone is under test.
@@ -166,9 +168,6 @@ namespace Chimera {
                 return true;
             }
 
-            // Do not chain this diagnostic experiment on top of another unknown
-            // SetVertexShader hook. Run it with d3d_diag=off so the experiment has
-            // one controlled variable.
             original_set_vertex_shader = reinterpret_cast<SetVertexShaderFunction>(*entry);
             if(!original_set_vertex_shader) {
                 return false;
@@ -205,11 +204,36 @@ namespace Chimera {
             return true;
         }
 
+        static void on_end_scene(IDirect3DDevice9 *device) noexcept {
+            // This event is our reliable late-install point. The earlier rasterizer
+            // and game-start callbacks can run before Halo has exposed a usable
+            // device through global_d3d9_device. EndScene always supplies the real
+            // live device, so keep retrying until the vtable hook is installed.
+            if(enabled()) {
+                install(device);
+            }
+        }
+
         static void set_up() noexcept {
-            if(!enabled() || !global_d3d9_device || !*global_d3d9_device) {
+            if(!enabled()) {
                 return;
             }
-            install(*global_d3d9_device);
+
+            if(!queued_announced) {
+                console_output("D3D9 backend: model shader isolation mode recognized; waiting for live D3D9 device.");
+                queued_announced = true;
+            }
+
+            if(!end_scene_retry_registered) {
+                add_d3d9_end_scene_event(on_end_scene);
+                end_scene_retry_registered = true;
+            }
+
+            // Fast path when the device is already available. EndScene will retry
+            // later if this pointer is still null at rasterizer/game-start setup.
+            if(global_d3d9_device && *global_d3d9_device) {
+                install(*global_d3d9_device);
+            }
         }
     }
 
