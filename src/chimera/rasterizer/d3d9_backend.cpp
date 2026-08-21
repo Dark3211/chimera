@@ -4,19 +4,23 @@
 #include <d3d9.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
+#include <limits>
 #include <new>
 
 #include "d3d9_backend.hpp"
 #include "../chimera.hpp"
 #include "../config/ini.hpp"
 #include "../output/output.hpp"
+#include "../halo_data/game_variables.hpp"
 
 namespace Chimera {
     namespace {
         constexpr UINT MAX_D3D9ON12_QUEUES = 2;
         constexpr std::size_t DEVICE_CREATE_VERTEX_BUFFER_INDEX = 26;
         constexpr std::size_t DEVICE_CREATE_INDEX_BUFFER_INDEX = 27;
+        constexpr std::size_t DEVICE_DRAW_INDEXED_PRIMITIVE_INDEX = 82;
         constexpr std::size_t BUFFER_LOCK_INDEX = 11;
         constexpr std::size_t MAX_BUFFER_VTABLES = 16;
 
@@ -35,6 +39,7 @@ namespace Chimera {
         using GetProcAddressFunction = FARPROC (WINAPI *)(HMODULE, LPCSTR);
         using CreateVertexBufferFunction = HRESULT (STDMETHODCALLTYPE *)(IDirect3DDevice9 *, UINT, DWORD, DWORD, D3DPOOL, IDirect3DVertexBuffer9 **, HANDLE *);
         using CreateIndexBufferFunction = HRESULT (STDMETHODCALLTYPE *)(IDirect3DDevice9 *, UINT, DWORD, D3DFORMAT, D3DPOOL, IDirect3DIndexBuffer9 **, HANDLE *);
+        using DrawIndexedPrimitiveFunction = HRESULT (STDMETHODCALLTYPE *)(IDirect3DDevice9 *, D3DPRIMITIVETYPE, INT, UINT, UINT, UINT, UINT);
         using VertexBufferLockFunction = HRESULT (STDMETHODCALLTYPE *)(IDirect3DVertexBuffer9 *, UINT, UINT, void **, DWORD);
         using IndexBufferLockFunction = HRESULT (STDMETHODCALLTYPE *)(IDirect3DIndexBuffer9 *, UINT, UINT, void **, DWORD);
 
@@ -43,6 +48,7 @@ namespace Chimera {
         GetProcAddressFunction native_get_proc_address = nullptr;
         CreateVertexBufferFunction native_create_vertex_buffer = nullptr;
         CreateIndexBufferFunction native_create_index_buffer = nullptr;
+        DrawIndexedPrimitiveFunction native_draw_indexed_primitive = nullptr;
 
         struct BufferVtablePatch {
             ULONG_PTR *vtable = nullptr;
@@ -54,6 +60,7 @@ namespace Chimera {
         std::size_t vertex_buffer_vtable_count = 0;
         std::size_t index_buffer_vtable_count = 0;
         bool buffer_lock_compat_ready = false;
+        bool model_draw_bounds_compat_ready = false;
 
         enum class D3D9BackendStatus {
             DISABLED,
@@ -261,6 +268,119 @@ namespace Chimera {
             return result;
         }
 
+        HRESULT STDMETHODCALLTYPE draw_indexed_primitive_hook(IDirect3DDevice9 *device,
+                                                              D3DPRIMITIVETYPE primitive_type,
+                                                              INT base_vertex_index,
+                                                              UINT min_vertex_index,
+                                                              UINT num_vertices,
+                                                              UINT start_index,
+                                                              UINT primitive_count) noexcept {
+            if(!native_draw_indexed_primitive) {
+                return D3DERR_INVALIDCALL;
+            }
+
+            // game_variables.cpp uses this flag only as a short-lived marker around
+            // model/first-person/object-transparent compatibility scopes while 9On12
+            // is active. Keep world/BSP/effect draw bounds completely untouched.
+            if(!rasterizer_globals || !rasterizer_globals->using_software_vertex_processing || primitive_count == 0) {
+                return native_draw_indexed_primitive(device,
+                                                     primitive_type,
+                                                     base_vertex_index,
+                                                     min_vertex_index,
+                                                     num_vertices,
+                                                     start_index,
+                                                     primitive_count);
+            }
+
+            IDirect3DVertexBuffer9 *stream_zero = nullptr;
+            UINT stream_offset = 0;
+            UINT stream_stride = 0;
+            auto stream_result = device->GetStreamSource(0, &stream_zero, &stream_offset, &stream_stride);
+            if(FAILED(stream_result) || !stream_zero || stream_stride == 0) {
+                if(stream_zero) {
+                    stream_zero->Release();
+                }
+                return native_draw_indexed_primitive(device,
+                                                     primitive_type,
+                                                     base_vertex_index,
+                                                     min_vertex_index,
+                                                     num_vertices,
+                                                     start_index,
+                                                     primitive_count);
+            }
+
+            D3DVERTEXBUFFER_DESC desc = {};
+            auto desc_result = stream_zero->GetDesc(&desc);
+            stream_zero->Release();
+            if(FAILED(desc_result) || stream_offset >= desc.Size) {
+                return native_draw_indexed_primitive(device,
+                                                     primitive_type,
+                                                     base_vertex_index,
+                                                     min_vertex_index,
+                                                     num_vertices,
+                                                     start_index,
+                                                     primitive_count);
+            }
+
+            const std::uint64_t vertex_capacity = (desc.Size - stream_offset) / stream_stride;
+            if(vertex_capacity == 0) {
+                return native_draw_indexed_primitive(device,
+                                                     primitive_type,
+                                                     base_vertex_index,
+                                                     min_vertex_index,
+                                                     num_vertices,
+                                                     start_index,
+                                                     primitive_count);
+            }
+
+            const std::int64_t signed_base = static_cast<std::int64_t>(base_vertex_index);
+            std::uint64_t compatible_min = 0;
+            std::uint64_t compatible_count = 0;
+
+            if(signed_base >= 0) {
+                const auto base = static_cast<std::uint64_t>(signed_base);
+                if(base >= vertex_capacity) {
+                    return native_draw_indexed_primitive(device,
+                                                         primitive_type,
+                                                         base_vertex_index,
+                                                         min_vertex_index,
+                                                         num_vertices,
+                                                         start_index,
+                                                         primitive_count);
+                }
+                compatible_count = vertex_capacity - base;
+            }
+            else {
+                compatible_min = static_cast<std::uint64_t>(-signed_base);
+                compatible_count = vertex_capacity;
+            }
+
+            if(compatible_count == 0 ||
+               compatible_min > std::numeric_limits<UINT>::max() ||
+               compatible_count > std::numeric_limits<UINT>::max()) {
+                return native_draw_indexed_primitive(device,
+                                                     primitive_type,
+                                                     base_vertex_index,
+                                                     min_vertex_index,
+                                                     num_vertices,
+                                                     start_index,
+                                                     primitive_count);
+            }
+
+            // Diagnostic compatibility experiment: legacy D3D9 drivers were often
+            // lenient with Halo's MinVertexIndex/NumVertices hints. D3D9On12 may use
+            // those hints more strictly when preparing translated vertex work. Give
+            // model draws the full valid stream-zero range without changing indices,
+            // BaseVertexIndex, StartIndex or PrimitiveCount.
+            return native_draw_indexed_primitive(device,
+                                                 primitive_type,
+                                                 base_vertex_index,
+                                                 static_cast<UINT>(compatible_min),
+                                                 static_cast<UINT>(compatible_count),
+                                                 start_index,
+                                                 primitive_count);
+        }
+
         HRESULT STDMETHODCALLTYPE create_vertex_buffer_hook(IDirect3DDevice9 *device,
                                                             UINT length,
                                                             DWORD usage,
@@ -319,8 +439,10 @@ namespace Chimera {
 
             ULONG_PTR original_vertex = reinterpret_cast<ULONG_PTR>(native_create_vertex_buffer);
             ULONG_PTR original_index = reinterpret_cast<ULONG_PTR>(native_create_index_buffer);
+            ULONG_PTR original_draw_indexed = reinterpret_cast<ULONG_PTR>(native_draw_indexed_primitive);
             auto vertex_replacement = reinterpret_cast<ULONG_PTR>(create_vertex_buffer_hook);
             auto index_replacement = reinterpret_cast<ULONG_PTR>(create_index_buffer_hook);
+            auto draw_indexed_replacement = reinterpret_cast<ULONG_PTR>(draw_indexed_primitive_hook);
 
             bool vertex_ok = false;
             if(vtable[DEVICE_CREATE_VERTEX_BUFFER_INDEX] == vertex_replacement && native_create_vertex_buffer) {
@@ -339,6 +461,16 @@ namespace Chimera {
                 native_create_index_buffer = reinterpret_cast<CreateIndexBufferFunction>(original_index);
                 index_ok = native_create_index_buffer != nullptr;
             }
+
+            bool draw_indexed_ok = false;
+            if(vtable[DEVICE_DRAW_INDEXED_PRIMITIVE_INDEX] == draw_indexed_replacement && native_draw_indexed_primitive) {
+                draw_indexed_ok = true;
+            }
+            else if(write_vtable_entry(&vtable[DEVICE_DRAW_INDEXED_PRIMITIVE_INDEX], draw_indexed_replacement, original_draw_indexed)) {
+                native_draw_indexed_primitive = reinterpret_cast<DrawIndexedPrimitiveFunction>(original_draw_indexed);
+                draw_indexed_ok = native_draw_indexed_primitive != nullptr;
+            }
+            model_draw_bounds_compat_ready = draw_indexed_ok;
 
             return vertex_ok && index_ok;
         }
@@ -697,8 +829,12 @@ namespace Chimera {
                 console_warning("D3D9 backend: 9On12 was selected, but device activation was not observed.");
                 break;
             case D3D9BackendStatus::ON_12_ACTIVE:
-                if(buffer_lock_compat_ready) {
+                if(buffer_lock_compat_ready && model_draw_bounds_compat_ready) {
+                    console_output("D3D9 backend: D3D9On12 is active with Halo buffer-lock and model draw-range compatibility on hardware vertex processing.");
+                }
+                else if(buffer_lock_compat_ready) {
                     console_output("D3D9 backend: D3D9On12 is active with Halo buffer-lock compatibility on hardware vertex processing.");
+                    console_warning("D3D9 backend: model DrawIndexedPrimitive range compatibility could not be installed.");
                 }
                 else {
                     console_warning("D3D9 backend: D3D9On12 is active, but Halo buffer-lock compatibility could not be installed.");
