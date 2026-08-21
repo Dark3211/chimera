@@ -6,6 +6,7 @@
 #include "rasterizer_transparent_geometry.hpp"
 #include "d3d9_diagnostics_compat.hpp"
 #include "d3d9_diagnostics.hpp"
+#include "d3d9_runtime_diagnostics.hpp"
 #include "../chimera.hpp"
 #include "../config/ini.hpp"
 #include "../signature/hook.hpp"
@@ -136,10 +137,12 @@ namespace Chimera {
 
         // The rasterizer is initialized before Halo has necessarily created its
         // IDirect3DDevice9. Try immediately, then retry once a map/game starts,
-        // when the device is guaranteed to exist. The diagnostic helper is
-        // internally one-shot, so the second call is harmless if the first worked.
+        // when the device is guaranteed to exist. Both diagnostic helpers are
+        // internally one-shot, so the later call is harmless if setup succeeded.
         set_up_d3d9_diagnostics();
+        set_up_d3d9_runtime_diagnostics();
         add_game_start_event(set_up_d3d9_diagnostics);
+        add_game_start_event(set_up_d3d9_runtime_diagnostics);
         add_game_exit_event(rasterizer_release_vertex_shaders_3_0);
         add_game_exit_event(rasterizer_release_pixel_shaders, EVENT_PRIORITY_AFTER);
         add_game_start_event(rasterizer_create_pixel_shaders);
