@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+#include <cstring>
+
 #include "rasterizer.hpp"
 #include "rasterizer_transparent_geometry.hpp"
 #include "../chimera.hpp"
+#include "../config/ini.hpp"
 #include "../signature/hook.hpp"
 #include "../halo_data/game_variables.hpp"
 #include "../halo_data/shaders/shader_blob.hpp"
@@ -116,7 +119,19 @@ namespace Chimera {
     void set_up_rasterizer() noexcept {
         global_d3d9_device = reinterpret_cast<IDirect3DDevice9 **>(*reinterpret_cast<std::byte **>(get_chimera().get_signature("model_af_set_sampler_states_sig").data() + 1));
         d3d9_device_caps = reinterpret_cast<D3DCAPS9 *>(*reinterpret_cast<std::byte **>(get_chimera().get_signature("d3d9_device_caps_sig").data() + 1));
-        set_up_environment_transparent_index_buffer_fix();
+
+        // Diagnostic isolation for the experimental 9On12 backend: this legacy
+        // transparent-geometry fix also patches DrawIndexedPrimitive and dynamic
+        // index-buffer Lock vtables. The 9On12 compatibility layer has its own
+        // buffer hooks, so do not stack both hook systems while testing 9On12.
+        // Native D3D9 keeps the existing fix unchanged.
+        auto *backend = get_chimera().get_ini()->get_value("video_mode.d3d_backend");
+        const bool d3d9on12_requested = backend
+            && (_stricmp(backend, "9on12") == 0 || _stricmp(backend, "d3d9on12") == 0);
+        if(!d3d9on12_requested) {
+            set_up_environment_transparent_index_buffer_fix();
+        }
+
         add_game_exit_event(rasterizer_release_vertex_shaders_3_0);
         add_game_exit_event(rasterizer_release_pixel_shaders, EVENT_PRIORITY_AFTER);
         add_game_start_event(rasterizer_create_pixel_shaders);
