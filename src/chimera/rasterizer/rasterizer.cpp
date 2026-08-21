@@ -4,6 +4,7 @@
 
 #include "rasterizer.hpp"
 #include "rasterizer_transparent_geometry.hpp"
+#include "d3d9_diagnostics.hpp"
 #include "../chimera.hpp"
 #include "../config/ini.hpp"
 #include "../signature/hook.hpp"
@@ -132,6 +133,7 @@ namespace Chimera {
             set_up_environment_transparent_index_buffer_fix();
         }
 
+        set_up_d3d9_diagnostics();
         add_game_exit_event(rasterizer_release_vertex_shaders_3_0);
         add_game_exit_event(rasterizer_release_pixel_shaders, EVENT_PRIORITY_AFTER);
         add_game_start_event(rasterizer_create_pixel_shaders);
