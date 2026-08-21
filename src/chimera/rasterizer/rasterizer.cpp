@@ -4,6 +4,7 @@
 
 #include "rasterizer.hpp"
 #include "rasterizer_transparent_geometry.hpp"
+#include "d3d9_diagnostics_compat.hpp"
 #include "d3d9_diagnostics.hpp"
 #include "../chimera.hpp"
 #include "../config/ini.hpp"
