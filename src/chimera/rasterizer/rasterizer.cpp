@@ -6,6 +6,7 @@
 #include "rasterizer_transparent_geometry.hpp"
 #include "d3d9_model_shader_compat.hpp"
 #include "d3d9_model_shader_primary_v2.hpp"
+#include "d3d9_model_safe_lighting_vs3.hpp"
 #include "d3d9_model_vertex_input_diag.hpp"
 #include "d3d9_transparent_shader_compat.hpp"
 #include "d3d9_modern_shader_bank.hpp"
@@ -130,7 +131,24 @@ namespace Chimera {
     }
 
     bool d3d9_modern_shader_command(int argc, const char **argv) noexcept {
-        return D3D9ModernShaderBank::command(argc, argv);
+        if(argc >= 2 && _stricmp(argv[0], "model") == 0) {
+            if(_stricmp(argv[1], "safe") == 0 || _stricmp(argv[1], "lit") == 0) {
+                D3D9ModelSafeLightingVS3::set_safe_mode(true);
+                return true;
+            }
+            if(_stricmp(argv[1], "on") == 0 || _stricmp(argv[1], "off") == 0) {
+                D3D9ModelSafeLightingVS3::set_safe_mode(false);
+            }
+        }
+
+        const bool result = D3D9ModernShaderBank::command(argc, argv);
+        if(argc == 0 || (argc >= 1 && _stricmp(argv[0], "status") == 0)) {
+            console_output(
+                "D3D9 modern MODEL safe-lighting mode: %s",
+                D3D9ModelSafeLightingVS3::safe_mode_enabled() ? "ON" : "OFF"
+            );
+        }
+        return result;
     }
 
     void set_up_rasterizer() noexcept {
@@ -147,15 +165,17 @@ namespace Chimera {
             set_up_environment_transparent_index_buffer_fix();
         }
 
-        // Keep only the compatibility path under test plus the live/compact
-        // DrawPrimitive/DrawIndexedPrimitive probe. Completed legacy A/B hook
-        // stacks remain removed.
+        // primary_v2 remains the proven geometry path. The safe-lighting VS3
+        // hook is deliberately installed immediately after it so MODEL/Fast/
+        // Fogged can preserve that safe skinning while restoring stock oD0/oD1.
         set_up_d3d9_model_shader_compat();
         set_up_d3d9_model_shader_primary_v2();
+        set_up_d3d9_model_safe_lighting_vs3();
         set_up_d3d9_model_vertex_input_diag();
 
         add_game_start_event(set_up_d3d9_model_shader_compat);
         add_game_start_event(set_up_d3d9_model_shader_primary_v2);
+        add_game_start_event(set_up_d3d9_model_safe_lighting_vs3);
         add_game_start_event(set_up_d3d9_model_vertex_input_diag);
 
         if(d3d9on12_requested) {
@@ -195,7 +215,7 @@ namespace Chimera {
                     "chimera_d3d9_modern",
                     "chimera_category_debug",
                     "client",
-                    "D3D9On12 modern VS3 bank: status/dump_all/model on|off",
+                    "D3D9On12 modern VS3 bank: status/dump_all/model on|off|safe",
                     d3d9_modern_shader_command,
                     false,
                     0,
