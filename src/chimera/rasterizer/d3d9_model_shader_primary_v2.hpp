@@ -56,7 +56,7 @@ float4 c_screenproj_0 : register(c13);
 float4 c_screenproj_1 : register(c14);
 float4 c_screenproj_2 : register(c15);
 float4 c_screenproj_3 : register(c16);
-float4 c_detail_normal_scales : register(c15);
+#define c_detail_normal_scales c_screenproj_2
 float4 c_eye_xform_x : register(c27);
 float4 c_eye_xform_y : register(c28);
 float4x3 c_node_matrices[22] : register(c29);
