@@ -16,7 +16,6 @@
 #include "../halo_data/shaders/shader_blob.hpp"
 #include "../output/error_box.hpp"
 #include "../event/game_loop.hpp"
-#include "../event/d3d9_end_scene.hpp"
 
 
 namespace Chimera {
@@ -26,165 +25,6 @@ namespace Chimera {
     bool chimera_rasterizer_enabled = false;
 
     IDirect3DPixelShader9 *chimera_pixel_shaders[NUMBER_OF_CHIMERA_PIXEL_SHADERS] = { nullptr };
-
-    static bool validated_hybrid_auto_enabled = true;
-    static bool validated_hybrid_announced = false;
-    static unsigned validated_hybrid_retry_cooldown = 0;
-
-    static bool d3d9on12_requested_now() noexcept {
-        auto *backend = get_chimera().get_ini()->get_value("video_mode.d3d_backend");
-        return backend
-            && (_stricmp(backend, "9on12") == 0 || _stricmp(backend, "d3d9on12") == 0);
-    }
-
-    static bool validated_hybrid_requested() noexcept {
-        if(!d3d9on12_requested_now() || !validated_hybrid_auto_enabled) {
-            return false;
-        }
-
-        // Hybrid is the default for 9On12 on this hardened branch. A user can
-        // explicitly fall back to the old path without removing any fixes.
-        auto *mode = get_chimera().get_ini()->get_value("video_mode.d3d_shader_backend");
-        if(!mode || !*mode) {
-            return true;
-        }
-        if(_stricmp(mode, "off") == 0
-            || _stricmp(mode, "stock") == 0
-            || _stricmp(mode, "legacy") == 0) {
-            return false;
-        }
-        return _stricmp(mode, "hybrid") == 0
-            || _stricmp(mode, "validated") == 0
-            || _stricmp(mode, "modern") == 0;
-    }
-
-    static bool refresh_hybrid_transparent_baselines() noexcept {
-        using namespace D3D9TransparentShaderCompat;
-        if(!vertex_shaders) {
-            return false;
-        }
-
-        auto *generic_slot = vertex_shaders[VSH_TRANSPARENT_GENERIC_M].shader;
-        auto *plasma_slot = vertex_shaders[VSH_TRANSPARENT_PLASMA_M].shader;
-        if(!generic_slot || !plasma_slot) {
-            return false;
-        }
-
-        // Halo can recreate its shader table on a map transition while the D3D9
-        // device itself remains alive. In that case our AddRef'd stock pointer is
-        // from the previous table generation. Recognize our own installed shader
-        // first; otherwise recapture the current table entry as the new stock
-        // baseline instead of treating it as a foreign/unsafe replacement.
-        if(exact_generic_m && generic_slot == exact_generic_m) {
-            generic_mode = GENERIC_MODE_EXACT_VS2;
-        }
-        else if(legacy_generic_m && generic_slot == legacy_generic_m) {
-            generic_mode = GENERIC_MODE_LEGACY_VS3;
-        }
-        else {
-            if(stock_generic_m != generic_slot) {
-                if(stock_generic_m) {
-                    stock_generic_m->Release();
-                }
-                stock_generic_m = generic_slot;
-                stock_generic_m->AddRef();
-            }
-            generic_mode = GENERIC_MODE_STOCK;
-        }
-
-        if(exact_plasma_m && plasma_slot == exact_plasma_m) {
-            plasma_m_active = true;
-        }
-        else {
-            if(stock_plasma_m != plasma_slot) {
-                if(stock_plasma_m) {
-                    stock_plasma_m->Release();
-                }
-                stock_plasma_m = plasma_slot;
-                stock_plasma_m->AddRef();
-            }
-            plasma_m_active = false;
-        }
-
-        return true;
-    }
-
-    static void ensure_validated_hybrid(IDirect3DDevice9 *device) noexcept {
-        if(!device || !validated_hybrid_requested()) {
-            return;
-        }
-
-        if(validated_hybrid_retry_cooldown > 0) {
-            validated_hybrid_retry_cooldown--;
-            return;
-        }
-
-        // Validated combination:
-        //   MODEL_FOGGED..MODEL_ZBUFFER -> stock-equivalent VS3 bank
-        //   TRANSPARENT_GENERIC_M       -> exact VS2 compatibility shader
-        //   TRANSPARENT_PLASMA_M        -> exact VS2 compatibility shader
-        // This exact combination restored model colour/lighting while removing
-        // both known D3D9On12 spikes in live A/B testing.
-        rasterizer_set_modern_model_test(true);
-
-        if(!refresh_hybrid_transparent_baselines()) {
-            validated_hybrid_retry_cooldown = 60;
-            return;
-        }
-
-        using namespace D3D9TransparentShaderCompat;
-        bool generic_ok = exact_generic_m
-            && vertex_shaders[VSH_TRANSPARENT_GENERIC_M].shader == exact_generic_m;
-        if(!generic_ok) {
-            generic_ok = enable_generic_m_exact();
-        }
-
-        bool plasma_ok = exact_plasma_m
-            && vertex_shaders[VSH_TRANSPARENT_PLASMA_M].shader == exact_plasma_m;
-        if(!plasma_ok) {
-            plasma_ok = enable_plasma_m_exact();
-        }
-
-        if(generic_ok && plasma_ok) {
-            validated_hybrid_retry_cooldown = 0;
-            if(!validated_hybrid_announced) {
-                console_output(
-                    "D3D9On12 validated hybrid active: MODEL=VS3, GENERIC_M=exact VS2, PLASMA_M=exact VS2."
-                );
-                validated_hybrid_announced = true;
-            }
-        }
-        else {
-            // Do not flood the in-game console if the shader table is between
-            // generations for a few frames. Retry at a low rate until stable.
-            validated_hybrid_retry_cooldown = 60;
-        }
-    }
-
-    static void set_up_validated_hybrid() noexcept {
-        validated_hybrid_announced = false;
-        validated_hybrid_retry_cooldown = 0;
-        if(global_d3d9_device && *global_d3d9_device) {
-            ensure_validated_hybrid(*global_d3d9_device);
-        }
-    }
-
-    static void set_validated_hybrid(bool enabled) noexcept {
-        validated_hybrid_auto_enabled = enabled;
-        validated_hybrid_announced = false;
-        validated_hybrid_retry_cooldown = 0;
-
-        if(enabled) {
-            set_up_validated_hybrid();
-            console_output("D3D9On12 validated hybrid: ON.");
-        }
-        else {
-            rasterizer_set_modern_model_test(false);
-            D3D9TransparentShaderCompat::restore_generic_m();
-            D3D9TransparentShaderCompat::restore_plasma_m();
-            console_output("D3D9On12 validated hybrid: OFF (manual/fallback control restored).");
-        }
-    }
 
     void rasterizer_set_render_state(D3DRENDERSTATETYPE state, DWORD value) noexcept {
         throw_error(global_d3d9_device, "d3d device missing");
@@ -286,49 +126,71 @@ namespace Chimera {
     }
 
     bool d3d9_transparent_compat_command(int argc, const char **argv) noexcept {
-        // A manual per-pass change intentionally leaves automatic hybrid mode so
-        // A/B diagnostics are not immediately overwritten on the next EndScene.
-        if(argc >= 1
-            && (_stricmp(argv[0], "generic_m") == 0
-                || _stricmp(argv[0], "plasma_m") == 0
-                || _stricmp(argv[0], "plasma") == 0)) {
-            validated_hybrid_auto_enabled = false;
-            validated_hybrid_announced = false;
-        }
         return D3D9TransparentShaderCompat::command(argc, argv);
+    }
+
+    static bool d3d9_hybrid_enable() noexcept {
+        // Do this only on explicit user request after Halo has entered a map.
+        // This is the exact live combination that was validated visually:
+        // MODEL family -> VS3 bank, GENERIC_M -> exact VS2, PLASMA_M -> exact VS2.
+        if(!D3D9ModernShaderBank::model_family_ready()) {
+            console_error("D3D9 hybrid: MODEL VS3 family is not ready; inspect chimera_d3d9_modern_build.log.");
+            return false;
+        }
+
+        if(!D3D9TransparentShaderCompat::enable_generic_m_exact()) {
+            console_error("D3D9 hybrid: could not enable GENERIC_M exact VS2.");
+            return false;
+        }
+
+        if(!D3D9TransparentShaderCompat::enable_plasma_m_exact()) {
+            D3D9TransparentShaderCompat::restore_generic_m();
+            console_error("D3D9 hybrid: could not enable PLASMA_M exact VS2; GENERIC_M restored.");
+            return false;
+        }
+
+        rasterizer_set_modern_model_test(true);
+        console_output("D3D9 hybrid: ON (MODEL=VS3, GENERIC_M=exact VS2, PLASMA_M=exact VS2).");
+        return true;
+    }
+
+    static bool d3d9_hybrid_disable() noexcept {
+        rasterizer_set_modern_model_test(false);
+        D3D9TransparentShaderCompat::restore_generic_m();
+        D3D9TransparentShaderCompat::restore_plasma_m();
+        console_output("D3D9 hybrid: OFF (restored primary_v2/current fallback path).");
+        return true;
+    }
+
+    static void d3d9_hybrid_status() noexcept {
+        const bool model = rasterizer_modern_model_test_enabled();
+        const bool generic = D3D9TransparentShaderCompat::generic_mode
+            == D3D9TransparentShaderCompat::GENERIC_MODE_EXACT_VS2;
+        const bool plasma = D3D9TransparentShaderCompat::plasma_m_active;
+        console_output(
+            "D3D9 hybrid status: MODEL=%s GENERIC_M=%s PLASMA_M=%s",
+            model ? "VS3" : "fallback",
+            generic ? "exact-vs2" : "stock/other",
+            plasma ? "exact-vs2" : "stock"
+        );
     }
 
     bool d3d9_modern_shader_command(int argc, const char **argv) noexcept {
         if(argc >= 1 && _stricmp(argv[0], "hybrid") == 0) {
             if(argc < 2 || _stricmp(argv[1], "status") == 0) {
-                console_output(
-                    "D3D9On12 validated hybrid: %s (MODEL VS3 + GENERIC_M exact VS2 + PLASMA_M exact VS2).",
-                    validated_hybrid_requested() ? "ON" : "OFF"
-                );
+                d3d9_hybrid_status();
                 return true;
             }
             if(_stricmp(argv[1], "on") == 0) {
-                set_validated_hybrid(true);
-                return true;
+                return d3d9_hybrid_enable();
             }
             if(_stricmp(argv[1], "off") == 0) {
-                set_validated_hybrid(false);
-                return true;
+                return d3d9_hybrid_disable();
             }
             console_error("D3D9 modern bank: use hybrid on|off|status.");
             return false;
         }
 
-        if(argc >= 1 && _stricmp(argv[0], "model") == 0) {
-            // Manual MODEL A/B should remain manual until hybrid is explicitly
-            // re-enabled; otherwise EndScene would immediately undo the test.
-            validated_hybrid_auto_enabled = false;
-            validated_hybrid_announced = false;
-        }
-
-        if(argc >= 1 && _stricmp(argv[0], "help") == 0) {
-            console_output("chimera_d3d9_modern hybrid on|off|status");
-        }
         return D3D9ModernShaderBank::command(argc, argv);
     }
 
@@ -339,14 +201,15 @@ namespace Chimera {
         // The legacy transparent-geometry fix patches DrawIndexedPrimitive and
         // dynamic index-buffer Lock vtables. Do not stack it with the 9On12
         // live draw probe. Native D3D9 keeps the existing fix unchanged.
-        const bool d3d9on12_requested = d3d9on12_requested_now();
+        auto *backend = get_chimera().get_ini()->get_value("video_mode.d3d_backend");
+        const bool d3d9on12_requested = backend
+            && (_stricmp(backend, "9on12") == 0 || _stricmp(backend, "d3d9on12") == 0);
         if(!d3d9on12_requested) {
             set_up_environment_transparent_index_buffer_fix();
         }
 
-        // primary_v2 remains installed as the reversible fallback and as the
-        // SetVertexShader interception point. In validated hybrid mode its MODEL
-        // branch routes the complete MODEL family to the modern VS3 bank.
+        // Keep startup identical to the previously validated stable path.
+        // Hybrid shader selection is intentionally manual after map load.
         set_up_d3d9_model_shader_compat();
         set_up_d3d9_model_shader_primary_v2();
         set_up_d3d9_model_vertex_input_diag();
@@ -354,12 +217,8 @@ namespace Chimera {
         add_game_start_event(set_up_d3d9_model_shader_compat);
         add_game_start_event(set_up_d3d9_model_shader_primary_v2);
         add_game_start_event(set_up_d3d9_model_vertex_input_diag);
-        add_game_start_event(set_up_validated_hybrid);
 
         if(d3d9on12_requested) {
-            add_d3d9_end_scene_event(ensure_validated_hybrid);
-            set_up_validated_hybrid();
-
             static bool probe_command_registered = false;
             if(!probe_command_registered) {
                 get_chimera().get_commands().emplace_back(
@@ -396,7 +255,7 @@ namespace Chimera {
                     "chimera_d3d9_modern",
                     "chimera_category_debug",
                     "client",
-                    "D3D9On12 modern bank: status/dump_all/model/hybrid",
+                    "D3D9On12 modern VS3 bank: status/dump_all/model/hybrid",
                     d3d9_modern_shader_command,
                     false,
                     0,
