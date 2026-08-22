@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstring>
 
+#include "rasterizer_vertex_shaders.hpp"
 #include "../chimera.hpp"
 #include "../config/ini.hpp"
 #include "../event/d3d9_end_scene.hpp"
@@ -342,7 +343,22 @@ SHADOW_OUTPUT main_shadow(VS_INPUT IN) {
             }
 
             if(enabled() && vertex_shaders && installed_device == device) {
-                if(vertex_shaders[VSH_MODEL_FOGGED].shader && shader == vertex_shaders[VSH_MODEL_FOGGED].shader) {
+                // Live A/B path: replace the complete Halo MODEL shader family
+                // with the stock-equivalent VS3 bank. This takes priority over
+                // primary_v2 only while explicitly enabled by the console
+                // command; turning it off restores the already-proven path.
+                if(rasterizer_modern_model_test_enabled()) {
+                    for(std::uint16_t i = VSH_MODEL_FOGGED; i <= VSH_MODEL_ZBUFFER; i++) {
+                        IDirect3DVertexShader9 *stock = vertex_shaders[i].shader;
+                        if(stock && shader == stock) {
+                            if(IDirect3DVertexShader9 *modern = rasterizer_get_modern_vertex_shader(i)) {
+                                shader = modern;
+                            }
+                            break;
+                        }
+                    }
+                }
+                else if(vertex_shaders[VSH_MODEL_FOGGED].shader && shader == vertex_shaders[VSH_MODEL_FOGGED].shader) {
                     announce_hit(1u << 0, "VSH_MODEL_FOGGED");
                     shader = fogged_shader;
                 }
