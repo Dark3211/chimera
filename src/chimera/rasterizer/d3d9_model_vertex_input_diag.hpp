@@ -38,6 +38,7 @@ namespace Chimera {
         static IDirect3DDevice9 *installed_device = nullptr;
         static bool queued_announced = false;
         static bool installed_announced = false;
+        static bool scenery_isolation_announced = false;
         static bool end_scene_retry_registered = false;
         static std::FILE *input_log = nullptr;
         static std::uint32_t log_flush_counter = 0;
@@ -51,8 +52,12 @@ namespace Chimera {
                 && (_stricmp(backend, "9on12") == 0 || _stricmp(backend, "d3d9on12") == 0);
         }
 
-        static bool enabled() noexcept {
-            if(!d3d9on12_requested() || !D3D9ModelShaderPrimaryV2::enabled()) {
+        static bool common_requirements_met() noexcept {
+            return d3d9on12_requested() && D3D9ModelShaderPrimaryV2::enabled();
+        }
+
+        static bool trace_enabled() noexcept {
+            if(!common_requirements_met()) {
                 return false;
             }
 
@@ -63,8 +68,24 @@ namespace Chimera {
             );
         }
 
+        static bool scenery_isolation_enabled() noexcept {
+            if(!common_requirements_met()) {
+                return false;
+            }
+
+            auto *value = get_chimera().get_ini()->get_value("video_mode.d3d_model_warthog_test");
+            return value && (
+                _stricmp(value, "no_scenery") == 0
+                || _stricmp(value, "skip_scenery") == 0
+            );
+        }
+
+        static bool enabled() noexcept {
+            return trace_enabled() || scenery_isolation_enabled();
+        }
+
         static void ensure_input_log() noexcept {
-            if(input_log) {
+            if(input_log || !trace_enabled()) {
                 return;
             }
 
@@ -72,11 +93,11 @@ namespace Chimera {
             if(input_log) {
                 std::fprintf(
                     input_log,
-                    "# MODEL_VERTEX_INPUT diagnostic: observational only; no render state is modified.\n"
+                    "# MODEL_VERTEX_INPUT diagnostic. ACTION=DRAW/SKIP; no_scenery intentionally suppresses stock scenery draws.\n"
                 );
                 std::fprintf(
                     input_log,
-                    "# frame draw pass material prim VB0 OFFSET0 STRIDE0 VB0_SIZE VB0_CAP VB1 OFFSET1 STRIDE1 VB1_SIZE IB IB_SIZE IB_FMT DECL DECL_ID DECL_STOCK FVF BASE_VERTEX MIN_VERTEX NUM_VERTICES START_INDEX PRIMITIVE_COUNT RANGE_FIRST RANGE_LAST RANGE_OK\n"
+                    "# frame draw pass material prim VB0 OFFSET0 STRIDE0 VB0_SIZE VB0_CAP VB1 OFFSET1 STRIDE1 VB1_SIZE IB IB_SIZE IB_FMT DECL DECL_ID DECL_STOCK FVF BASE_VERTEX MIN_VERTEX NUM_VERTICES START_INDEX PRIMITIVE_COUNT RANGE_FIRST RANGE_LAST RANGE_OK ACTION\n"
                 );
                 std::fflush(input_log);
             }
@@ -327,102 +348,112 @@ namespace Chimera {
                 );
             }
 
-            ensure_input_log();
-            if(input_log) {
-                IDirect3DVertexBuffer9 *vb0 = nullptr;
-                IDirect3DVertexBuffer9 *vb1 = nullptr;
-                IDirect3DIndexBuffer9 *ib = nullptr;
-                IDirect3DVertexDeclaration9 *declaration = nullptr;
-                IDirect3DPixelShader9 *pixel_shader = nullptr;
-                UINT offset0 = 0;
-                UINT stride0 = 0;
-                UINT offset1 = 0;
-                UINT stride1 = 0;
-                DWORD fvf = 0;
+            const bool skip_scenery = scenery_isolation_enabled()
+                && std::strcmp(pass_name, "VSH_MODEL_SCENERY_STOCK") == 0;
 
-                device->GetStreamSource(0, &vb0, &offset0, &stride0);
-                device->GetStreamSource(1, &vb1, &offset1, &stride1);
-                device->GetIndices(&ib);
-                device->GetVertexDeclaration(&declaration);
-                device->GetFVF(&fvf);
-                device->GetPixelShader(&pixel_shader);
+            if(trace_enabled()) {
+                ensure_input_log();
+                if(input_log) {
+                    IDirect3DVertexBuffer9 *vb0 = nullptr;
+                    IDirect3DVertexBuffer9 *vb1 = nullptr;
+                    IDirect3DIndexBuffer9 *ib = nullptr;
+                    IDirect3DVertexDeclaration9 *declaration = nullptr;
+                    IDirect3DPixelShader9 *pixel_shader = nullptr;
+                    UINT offset0 = 0;
+                    UINT stride0 = 0;
+                    UINT offset1 = 0;
+                    UINT stride1 = 0;
+                    DWORD fvf = 0;
 
-                const UINT vb0_size = vertex_buffer_size(vb0);
-                const UINT vb1_size = vertex_buffer_size(vb1);
-                const unsigned long long vb0_capacity = stride0 > 0 && vb0_size >= offset0
-                    ? static_cast<unsigned long long>((vb0_size - offset0) / stride0)
-                    : 0ULL;
+                    device->GetStreamSource(0, &vb0, &offset0, &stride0);
+                    device->GetStreamSource(1, &vb1, &offset1, &stride1);
+                    device->GetIndices(&ib);
+                    device->GetVertexDeclaration(&declaration);
+                    device->GetFVF(&fvf);
+                    device->GetPixelShader(&pixel_shader);
 
-                UINT ib_size = 0;
-                D3DFORMAT ib_format = D3DFMT_UNKNOWN;
-                index_buffer_description(ib, ib_size, ib_format);
+                    const UINT vb0_size = vertex_buffer_size(vb0);
+                    const UINT vb1_size = vertex_buffer_size(vb1);
+                    const unsigned long long vb0_capacity = stride0 > 0 && vb0_size >= offset0
+                        ? static_cast<unsigned long long>((vb0_size - offset0) / stride0)
+                        : 0ULL;
 
-                const std::uint32_t decl_id = declaration_id(declaration);
-                const int stock_decl = find_stock_declaration(declaration);
-                const long long range_first = static_cast<long long>(base_vertex_index)
-                    + static_cast<long long>(min_vertex_index);
-                const long long range_last = num_vertices > 0
-                    ? range_first + static_cast<long long>(num_vertices) - 1LL
-                    : range_first;
-                const bool range_ok = vb0_capacity > 0
-                    && range_first >= 0
-                    && range_last >= range_first
-                    && static_cast<unsigned long long>(range_last) < vb0_capacity;
+                    UINT ib_size = 0;
+                    D3DFORMAT ib_format = D3DFMT_UNKNOWN;
+                    index_buffer_description(ib, ib_size, ib_format);
 
-                const long long frame = rasterizer_globals
-                    ? static_cast<long long>(rasterizer_globals->frame_index)
-                    : -1LL;
-                const unsigned long long draw = ++model_draw_counter;
+                    const std::uint32_t decl_id = declaration_id(declaration);
+                    const int stock_decl = find_stock_declaration(declaration);
+                    const long long range_first = static_cast<long long>(base_vertex_index)
+                        + static_cast<long long>(min_vertex_index);
+                    const long long range_last = num_vertices > 0
+                        ? range_first + static_cast<long long>(num_vertices) - 1LL
+                        : range_first;
+                    const bool range_ok = vb0_capacity > 0
+                        && range_first >= 0
+                        && range_last >= range_first
+                        && static_cast<unsigned long long>(range_last) < vb0_capacity;
 
-                std::fprintf(
-                    input_log,
-                    "MODEL_VERTEX_INPUT frame=%lld draw=%llu pass=%s material=%s prim=%u "
-                    "VB0=%p OFFSET0=%u STRIDE0=%u VB0_SIZE=%u VB0_CAP=%llu "
-                    "VB1=%p OFFSET1=%u STRIDE1=%u VB1_SIZE=%u "
-                    "IB=%p IB_SIZE=%u IB_FMT=%u DECL=%p DECL_ID=%lu DECL_STOCK=%d DECL_NAME=%s FVF=0x%08lX "
-                    "BASE_VERTEX=%d MIN_VERTEX=%u NUM_VERTICES=%u START_INDEX=%u PRIMITIVE_COUNT=%u "
-                    "RANGE_FIRST=%lld RANGE_LAST=%lld RANGE_OK=%u\n",
-                    frame,
-                    draw,
-                    pass_name,
-                    classify_material(pixel_shader),
-                    static_cast<unsigned>(primitive_type),
-                    static_cast<void *>(vb0),
-                    offset0,
-                    stride0,
-                    vb0_size,
-                    vb0_capacity,
-                    static_cast<void *>(vb1),
-                    offset1,
-                    stride1,
-                    vb1_size,
-                    static_cast<void *>(ib),
-                    ib_size,
-                    static_cast<unsigned>(ib_format),
-                    static_cast<void *>(declaration),
-                    static_cast<unsigned long>(decl_id),
-                    stock_decl,
-                    stock_declaration_name(stock_decl),
-                    static_cast<unsigned long>(fvf),
-                    base_vertex_index,
-                    min_vertex_index,
-                    num_vertices,
-                    start_index,
-                    primitive_count,
-                    range_first,
-                    range_last,
-                    range_ok ? 1U : 0U
-                );
+                    const long long frame = rasterizer_globals
+                        ? static_cast<long long>(rasterizer_globals->frame_index)
+                        : -1LL;
+                    const unsigned long long draw = ++model_draw_counter;
 
-                if((++log_flush_counter & 63u) == 0u) {
-                    std::fflush(input_log);
+                    std::fprintf(
+                        input_log,
+                        "MODEL_VERTEX_INPUT frame=%lld draw=%llu pass=%s material=%s prim=%u "
+                        "VB0=%p OFFSET0=%u STRIDE0=%u VB0_SIZE=%u VB0_CAP=%llu "
+                        "VB1=%p OFFSET1=%u STRIDE1=%u VB1_SIZE=%u "
+                        "IB=%p IB_SIZE=%u IB_FMT=%u DECL=%p DECL_ID=%lu DECL_STOCK=%d DECL_NAME=%s FVF=0x%08lX "
+                        "BASE_VERTEX=%d MIN_VERTEX=%u NUM_VERTICES=%u START_INDEX=%u PRIMITIVE_COUNT=%u "
+                        "RANGE_FIRST=%lld RANGE_LAST=%lld RANGE_OK=%u ACTION=%s\n",
+                        frame,
+                        draw,
+                        pass_name,
+                        classify_material(pixel_shader),
+                        static_cast<unsigned>(primitive_type),
+                        static_cast<void *>(vb0),
+                        offset0,
+                        stride0,
+                        vb0_size,
+                        vb0_capacity,
+                        static_cast<void *>(vb1),
+                        offset1,
+                        stride1,
+                        vb1_size,
+                        static_cast<void *>(ib),
+                        ib_size,
+                        static_cast<unsigned>(ib_format),
+                        static_cast<void *>(declaration),
+                        static_cast<unsigned long>(decl_id),
+                        stock_decl,
+                        stock_declaration_name(stock_decl),
+                        static_cast<unsigned long>(fvf),
+                        base_vertex_index,
+                        min_vertex_index,
+                        num_vertices,
+                        start_index,
+                        primitive_count,
+                        range_first,
+                        range_last,
+                        range_ok ? 1U : 0U,
+                        skip_scenery ? "SKIP" : "DRAW"
+                    );
+
+                    if((++log_flush_counter & 63u) == 0u) {
+                        std::fflush(input_log);
+                    }
+
+                    if(pixel_shader) pixel_shader->Release();
+                    if(declaration) declaration->Release();
+                    if(ib) ib->Release();
+                    if(vb1) vb1->Release();
+                    if(vb0) vb0->Release();
                 }
+            }
 
-                if(pixel_shader) pixel_shader->Release();
-                if(declaration) declaration->Release();
-                if(ib) ib->Release();
-                if(vb1) vb1->Release();
-                if(vb0) vb0->Release();
+            if(skip_scenery) {
+                return D3D_OK;
             }
 
             return original_draw_indexed_primitive(
@@ -470,16 +501,28 @@ namespace Chimera {
             VirtualProtect(entry, sizeof(*entry), old_protection, &ignored);
             FlushInstructionCache(GetCurrentProcess(), entry, sizeof(*entry));
             installed_device = device;
-            ensure_input_log();
 
-            if(!installed_announced) {
+            if(trace_enabled()) {
+                ensure_input_log();
+                if(!installed_announced) {
+                    console_output(
+                        "D3D9 backend: model vertex-input draw diagnostic enabled on D3D9On12."
+                    );
+                    console_output(
+                        "D3D9 model vertex-input trace -> chimera_d3d9_model_vertex_input.log."
+                    );
+                    installed_announced = true;
+                }
+            }
+
+            if(scenery_isolation_enabled() && !scenery_isolation_announced) {
                 console_output(
-                    "D3D9 backend: model vertex-input draw diagnostic enabled on D3D9On12."
+                    "D3D9 Warthog A/B: suppressing VSH_MODEL_SCENERY stock draws on D3D9On12."
                 );
                 console_output(
-                    "D3D9 model vertex-input trace -> chimera_d3d9_model_vertex_input.log."
+                    "D3D9 Warthog A/B: this is diagnostic only; scenery-model pieces may disappear."
                 );
-                installed_announced = true;
+                scenery_isolation_announced = true;
             }
             return true;
         }
@@ -496,9 +539,16 @@ namespace Chimera {
             }
 
             if(!queued_announced) {
-                console_output(
-                    "D3D9 backend: model vertex-input diagnostic requested; waiting for live D3D9 device."
-                );
+                if(trace_enabled()) {
+                    console_output(
+                        "D3D9 backend: model vertex-input diagnostic requested; waiting for live D3D9 device."
+                    );
+                }
+                if(scenery_isolation_enabled()) {
+                    console_output(
+                        "D3D9 backend: Warthog no-scenery A/B requested; waiting for live D3D9 device."
+                    );
+                }
                 queued_announced = true;
             }
 
