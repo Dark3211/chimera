@@ -8,6 +8,7 @@
 #include "d3d9_model_shader_primary_v2.hpp"
 #include "d3d9_model_vertex_input_diag.hpp"
 #include "d3d9_transparent_shader_compat.hpp"
+#include "d3d9_modern_shader_bank.hpp"
 #include "../chimera.hpp"
 #include "../config/ini.hpp"
 #include "../signature/hook.hpp"
@@ -128,6 +129,10 @@ namespace Chimera {
         return D3D9TransparentShaderCompat::command(argc, argv);
     }
 
+    bool d3d9_modern_shader_command(int argc, const char **argv) noexcept {
+        return D3D9ModernShaderBank::command(argc, argv);
+    }
+
     void set_up_rasterizer() noexcept {
         global_d3d9_device = reinterpret_cast<IDirect3DDevice9 **>(*reinterpret_cast<std::byte **>(get_chimera().get_signature("model_af_set_sampler_states_sig").data() + 1));
         d3d9_device_caps = reinterpret_cast<D3DCAPS9 *>(*reinterpret_cast<std::byte **>(get_chimera().get_signature("d3d9_device_caps_sig").data() + 1));
@@ -175,13 +180,28 @@ namespace Chimera {
                     "chimera_d3d9_compat",
                     "chimera_category_debug",
                     "client",
-                    "Live D3D9On12 transparent shader compatibility: status/generic_m/dump",
+                    "Live D3D9On12 transparent shader compatibility: status/generic_m/plasma_m/dump",
                     d3d9_transparent_compat_command,
                     false,
                     0,
                     2
                 );
                 transparent_compat_command_registered = true;
+            }
+
+            static bool modern_shader_command_registered = false;
+            if(!modern_shader_command_registered) {
+                get_chimera().get_commands().emplace_back(
+                    "chimera_d3d9_modern",
+                    "chimera_category_debug",
+                    "client",
+                    "D3D9On12 modern VS3 bank: status/dump_all",
+                    d3d9_modern_shader_command,
+                    false,
+                    0,
+                    1
+                );
+                modern_shader_command_registered = true;
             }
         }
 
