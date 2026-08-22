@@ -10,6 +10,7 @@
 #include "d3d9_model_vertex_input_diag.hpp"
 #include "d3d9_transparent_shader_compat.hpp"
 #include "d3d9_modern_shader_bank.hpp"
+#include "d3d9_vsh_enc_export.hpp"
 #include "../chimera.hpp"
 #include "../config/ini.hpp"
 #include "../signature/hook.hpp"
@@ -371,6 +372,12 @@ namespace Chimera {
     }
 
     bool d3d9_modern_shader_command(int argc, const char **argv) noexcept {
+        if(argc >= 1
+            && (_stricmp(argv[0], "export_vsh") == 0
+                || _stricmp(argv[0], "export_vsh_9on12") == 0)) {
+            return D3D9VshEncExport::export_vsh_9on12();
+        }
+
         if(argc >= 1 && _stricmp(argv[0], "hybrid") == 0) {
             if(argc < 2 || _stricmp(argv[1], "status") == 0) {
                 d3d9_hybrid_status();
@@ -458,7 +465,7 @@ namespace Chimera {
                     "chimera_d3d9_modern",
                     "chimera_category_debug",
                     "client",
-                    "D3D9On12 modern VS3 bank: status/dump_all/model/hybrid",
+                    "D3D9On12 modern VS3 bank: status/dump_all/model/hybrid/export_vsh",
                     d3d9_modern_shader_command,
                     false,
                     0,
