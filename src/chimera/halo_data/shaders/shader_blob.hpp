@@ -6,6 +6,12 @@
 extern unsigned char vsh_collection[];
 extern const size_t vsh_collection_size;
 
+// D3D9On12 validated hybrid collection. This is built from Chimera's own
+// internal vsh.bin and replaces only the validated MODEL/GENERIC_M/PLASMA_M
+// slots, so native D3D9 keeps the existing internal collection unchanged.
+extern unsigned char vsh_9on12_collection[];
+extern const size_t vsh_9on12_collection_size;
+
 // We need to have seperate vs_3_0 versions to ensure shader model 3 compliance.
 extern unsigned char vsh_transparent_generic[];
 extern unsigned char vsh_transparent_generic_lit_m[];

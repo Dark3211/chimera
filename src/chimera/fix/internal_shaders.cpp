@@ -29,6 +29,18 @@ namespace Chimera {
 
     static D3DCAPS9 *d3d9_device_caps = nullptr;
 
+    static bool d3d9on12_requested() noexcept {
+        auto *backend = get_chimera().get_ini()->get_value("video_mode.d3d_backend");
+        return backend
+            && (_stricmp(backend, "9on12") == 0 || _stricmp(backend, "d3d9on12") == 0);
+    }
+
+    bool using_internal_d3d9on12_vertex_shader_collection() noexcept {
+        return get_chimera().feature_present("client_custom_edition")
+            && d3d9on12_requested()
+            && !get_chimera().get_ini()->get_value_bool("debug.use_external_vertex_shader_collection").value_or(false);
+    }
+
     extern "C" bool effect_load_check_device_caps() {
         return d3d9_device_caps->PixelShaderVersion < 0xffff0200;
     }
@@ -55,11 +67,22 @@ namespace Chimera {
         }
 
         if(!get_chimera().get_ini()->get_value_bool("debug.use_external_vertex_shader_collection").value_or(false)) {
-            // Redirect the vsh collection the game tries to load to our patched one.
+            // Redirect the VSH collection before Halo creates any vertex shader.
+            // Native D3D9 keeps Chimera's existing internal collection. Custom
+            // Edition on D3D9On12 gets the validated internal hybrid collection,
+            // so MODEL=VS3 and GENERIC_M/PLASMA_M=exact VS2 are effectively the
+            // stock shaders from the first menu draw onward.
             static Hook vsh_hook;
             auto *vsh_load_file = get_chimera().get_signature("vsh_collection_load_sig").data();
-            patched_vsh_collection_ptr = reinterpret_cast<std::byte *>(&vsh_collection);
-            patched_vsh_collection_size = vsh_collection_size;
+
+            if(using_internal_d3d9on12_vertex_shader_collection()) {
+                patched_vsh_collection_ptr = reinterpret_cast<std::byte *>(&vsh_9on12_collection);
+                patched_vsh_collection_size = vsh_9on12_collection_size;
+            }
+            else {
+                patched_vsh_collection_ptr = reinterpret_cast<std::byte *>(&vsh_collection);
+                patched_vsh_collection_size = vsh_collection_size;
+            }
 
             write_function_override(vsh_load_file, vsh_hook, reinterpret_cast<const void *>(overwrite_stock_vsh_data_asm), &original_vsh_load_instruction);
         }

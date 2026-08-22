@@ -1,51 +1,158 @@
 # SPDX-License-Identifier: GPL-3.0-only
 
-import sys
 import os
+import struct
+import sys
 
-def generate_shader_blobs(name, binary, type):
-    shaders = open(binary, "rb")
-    collection_size = 0
-    binary_size = os.path.getsize(binary)
+NUM_VERTEX_SHADERS = 64
+D3D9ON12_PATCH_SLOTS = {
+    25: 0xFFFE0300,
+    26: 0xFFFE0300,
+    27: 0xFFFE0300,
+    28: 0xFFFE0300,
+    29: 0xFFFE0300,
+    30: 0xFFFE0300,
+    31: 0xFFFE0300,
+    32: 0xFFFE0300,
+    33: 0xFFFE0300,
+    34: 0xFFFE0300,
+    39: 0xFFFE0200,
+    59: 0xFFFE0200,
+}
 
-    if type == 0:
-        collection = open(sys.argv[2] + "d3dx_effects.cpp", "a")
-        collection_size = os.path.getsize(sys.argv[2] + "d3dx_effects.cpp")
-    elif type == 1:
-        collection = open(sys.argv[2] + "effects_collection.cpp", "a")
-        collection_size = os.path.getsize(sys.argv[2] + "effects_collection.cpp")
-    elif type == 2:
-        collection = open(sys.argv[2] + "vertex_shaders.cpp", "a")
-        collection_size = os.path.getsize(sys.argv[2] + "vertex_shaders.cpp")
-    elif type == 3:
-        collection = open(sys.argv[2] + "pixel_shaders.cpp", "a")
-        collection_size = os.path.getsize(sys.argv[2] + "pixel_shaders.cpp")
 
-    # write the include if file is new
-    if collection_size == 0:
-        collection.write("#include <cstddef>\n" + "#include " + '"' + sys.argv[1] + 'shader_blob.hpp"')
+def output_file_for_type(shader_type):
+    if shader_type == 0:
+        return sys.argv[2] + "d3dx_effects.cpp"
+    if shader_type == 1:
+        return sys.argv[2] + "effects_collection.cpp"
+    if shader_type == 2:
+        return sys.argv[2] + "vertex_shaders.cpp"
+    if shader_type == 3:
+        return sys.argv[2] + "pixel_shaders.cpp"
+    raise ValueError("invalid shader blob type")
 
-    collection.write("\n\n")
-    
-    collection.write("const size_t " + name +"_size = " + str(binary_size) + ";\n\n")
-    collection.write("unsigned char " + name +"[" + str(binary_size) + "] = {\n")
 
-    i = 0
-    byte = shaders.read(1)
-    while byte:
-        i = i+1
-        if i != 1:
-            collection.write(", ")
-        collection.write("0x" + byte.hex())
-        if i == 20:
-            collection.write(", \n")
-            i = 0
-        byte = shaders.read(1)
-    
-    collection.write("\n" + "};" + "\n")
+def generate_shader_blob_data(name, data, shader_type):
+    output_path = output_file_for_type(shader_type)
+    collection_size = os.path.getsize(output_path)
 
-    shaders.close()
-    collection.close()
+    with open(output_path, "a") as collection:
+        if collection_size == 0:
+            collection.write("#include <cstddef>\n" + "#include " + '"' + sys.argv[1] + 'shader_blob.hpp"')
+
+        collection.write("\n\n")
+        collection.write("const size_t " + name + "_size = " + str(len(data)) + ";\n\n")
+        collection.write("unsigned char " + name + "[" + str(len(data)) + "] = {\n")
+
+        for index, byte in enumerate(data):
+            if index != 0:
+                collection.write(", ")
+            collection.write("0x{:02x}".format(byte))
+            if (index + 1) % 20 == 0:
+                collection.write("\n")
+
+        collection.write("\n};\n")
+
+
+def generate_shader_blobs(name, binary, shader_type):
+    with open(binary, "rb") as shaders:
+        generate_shader_blob_data(name, shaders.read(), shader_type)
+
+
+def parse_vsh_collection(data):
+    shaders = []
+    offset = 0
+
+    for index in range(NUM_VERTEX_SHADERS):
+        if offset + 4 > len(data):
+            raise RuntimeError("vsh.bin ended before shader {}".format(index))
+
+        size = struct.unpack_from("<I", data, offset)[0]
+        offset += 4
+
+        if size < 4 or offset + size > len(data):
+            raise RuntimeError("vsh.bin has invalid shader {} size {}".format(index, size))
+
+        shaders.append(data[offset:offset + size])
+        offset += size
+
+    if offset != len(data):
+        raise RuntimeError("vsh.bin has trailing data after 64 shaders")
+
+    return shaders
+
+
+def build_vsh_collection(shaders):
+    output = bytearray()
+    for shader in shaders:
+        output += struct.pack("<I", len(shader))
+        output += shader
+    return bytes(output)
+
+
+def read_d3d9on12_patch(path):
+    with open(path, "rb") as patch_file:
+        data = patch_file.read()
+
+    if len(data) < 8 or data[:4] != b"V9P1":
+        raise RuntimeError("invalid D3D9On12 VSH patch header")
+
+    count = struct.unpack_from("<I", data, 4)[0]
+    offset = 8
+    entries = {}
+
+    for _ in range(count):
+        if offset + 8 > len(data):
+            raise RuntimeError("truncated D3D9On12 VSH patch")
+
+        index, size = struct.unpack_from("<II", data, offset)
+        offset += 8
+
+        if size < 4 or offset + size > len(data):
+            raise RuntimeError("invalid D3D9On12 VSH patch slot size")
+
+        if index in entries:
+            raise RuntimeError("duplicate D3D9On12 VSH patch slot {}".format(index))
+
+        entries[index] = data[offset:offset + size]
+        offset += size
+
+    if offset != len(data):
+        raise RuntimeError("D3D9On12 VSH patch has trailing data")
+
+    return entries
+
+
+def build_d3d9on12_vsh_collection(base_path, patch_path):
+    with open(base_path, "rb") as base_file:
+        shaders = parse_vsh_collection(base_file.read())
+
+    replacements = read_d3d9on12_patch(patch_path)
+    expected_indices = set(D3D9ON12_PATCH_SLOTS)
+
+    if set(replacements) != expected_indices:
+        raise RuntimeError(
+            "D3D9On12 VSH patch slots do not match the validated set: {}".format(
+                sorted(replacements)
+            )
+        )
+
+    for index, bytecode in replacements.items():
+        version = struct.unpack_from("<I", bytecode, 0)[0]
+        expected_version = D3D9ON12_PATCH_SLOTS[index]
+        if version != expected_version:
+            raise RuntimeError(
+                "shader model mismatch for D3D9On12 VSH slot {}: 0x{:08x} != 0x{:08x}".format(
+                    index, version, expected_version
+                )
+            )
+        shaders[index] = bytecode
+
+    rebuilt = build_vsh_collection(shaders)
+    parse_vsh_collection(rebuilt)
+    return rebuilt
+
 
 if __name__ == '__main__':
     def eprint(message):
@@ -55,34 +162,20 @@ if __name__ == '__main__':
         eprint("Syntax: {} <shader_files> <output>".format(sys.argv[0]))
         sys.exit(1)
 
-    # Delete the shader cpp files if they already exist
-    if os.path.exists(sys.argv[2] + "d3dx_effects.cpp"):
-        os.remove(sys.argv[2] + "d3dx_effects.cpp")
-    if os.path.exists(sys.argv[2] + "effects_collection.cpp"):
-        os.remove(sys.argv[2] + "effects_collection.cpp")
-    if os.path.exists(sys.argv[2] + "vertex_shaders.cpp"):
-        os.remove(sys.argv[2] + "vertex_shaders.cpp")
-    if os.path.exists(sys.argv[2] + "pixel_shaders.cpp"):
-        os.remove(sys.argv[2] + "pixel_shaders.cpp")
+    for output_name in ("d3dx_effects.cpp", "effects_collection.cpp", "vertex_shaders.cpp", "pixel_shaders.cpp"):
+        output_path = sys.argv[2] + output_name
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        with open(output_path, "w"):
+            pass
 
-    # Create new empty cpp files
-    with open(sys.argv[2] + "d3dx_effects.cpp", "w") as fp:
-        pass
-    with open(sys.argv[2] + "effects_collection.cpp", "w") as fp:
-        pass
-    with open(sys.argv[2] + "vertex_shaders.cpp", "w") as fp:
-        pass
-    with open(sys.argv[2] + "pixel_shaders.cpp", "w") as fp:
-        pass
-
-    # Retail effects collection
     generate_shader_blobs("fx_collection", sys.argv[1] + "fx/fx.bin", 0)
-
-    # Custom edition pixel shader collection
     generate_shader_blobs("ce_effects_collection", sys.argv[1] + "fx/EffectCollection_ps_2_0.bin", 1)
 
-    # Vertex Shaders
-    generate_shader_blobs("vsh_collection", sys.argv[1] + "vertex/vsh.bin", 2)
+    vsh_base_path = sys.argv[1] + "vertex/vsh.bin"
+    generate_shader_blobs("vsh_collection", vsh_base_path, 2)
+    vsh_9on12 = build_d3d9on12_vsh_collection(vsh_base_path, sys.argv[1] + "vertex/vsh_9on12_patch.bin")
+    generate_shader_blob_data("vsh_9on12_collection", vsh_9on12, 2)
 
     generate_shader_blobs("vsh_transparent_generic", sys.argv[1] + "vertex/transparent_generic.cso", 2)
     generate_shader_blobs("vsh_transparent_generic_lit_m", sys.argv[1] + "vertex/transparent_generic_lit_m.cso", 2)
@@ -96,7 +189,6 @@ if __name__ == '__main__':
     generate_shader_blobs("vsh_transparent_generic_viewer_centered", sys.argv[1] + "vertex/transparent_generic_viewer_centered.cso", 2)
     generate_shader_blobs("vsh_transparent_generic_viewer_centered_m", sys.argv[1] + "vertex/transparent_generic_viewer_centered_m.cso", 2)
 
-    # Pixel Shaders
     generate_shader_blobs("shader_transparent_generic_source", sys.argv[1] + "pixel/hlsl/shader_transparent_generic.psh", 3)
     generate_shader_blobs("shader_transparent_generic_2_0_source", sys.argv[1] + "pixel/hlsl/shader_transparent_generic_2_0.psh", 3)
 
