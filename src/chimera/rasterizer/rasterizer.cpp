@@ -10,7 +10,6 @@
 #include "d3d9_model_shader_test.hpp"
 #include "d3d9_model_shader_compat.hpp"
 #include "d3d9_model_shader_primary_v2.hpp"
-#include "d3d9_model_material_diag.hpp"
 #include "d3d9_model_vertex_input_diag.hpp"
 #include "../chimera.hpp"
 #include "../config/ini.hpp"
@@ -131,7 +130,7 @@ namespace Chimera {
         // Diagnostic isolation for the experimental 9On12 backend: this legacy
         // transparent-geometry fix also patches DrawIndexedPrimitive and dynamic
         // index-buffer Lock vtables. The 9On12 compatibility layer has its own
-        // buffer hooks, so do not stack both hook systems while testing 9On12.
+        // draw-input trace, so do not stack both hook systems while testing 9On12.
         // Native D3D9 keeps the existing fix unchanged.
         auto *backend = get_chimera().get_ini()->get_value("video_mode.d3d_backend");
         const bool d3d9on12_requested = backend
@@ -145,19 +144,16 @@ namespace Chimera {
             && model_shader_test[0] != '\0'
             && _stricmp(model_shader_test, "off") != 0;
 
-        // The diagnostic and compatibility paths all hook SetVertexShader. Never
-        // install the A/B diagnostic together with a compatibility path. The two
-        // compatibility helpers have mutually exclusive INI modes, so only one of
-        // them can arm its vtable hook for a given run. The material diagnostic
-        // only hooks SetPixelShader and is safe alongside the primary VS2 test.
-        // The vertex-input diagnostic only observes DrawIndexedPrimitive state.
+        // The shader-test and compatibility paths hook SetVertexShader. Never
+        // install the A/B shader diagnostic together with a compatibility path.
+        // The current draw-input diagnostic is observational only and hooks
+        // DrawPrimitive/DrawIndexedPrimitive to capture model/effect/transparent state.
         set_up_d3d9_diagnostics();
         set_up_d3d9_runtime_diagnostics();
         set_up_d3d9_model_shader_test();
         if(!model_shader_test_enabled) {
             set_up_d3d9_model_shader_compat();
             set_up_d3d9_model_shader_primary_v2();
-            set_up_d3d9_model_material_diag();
             set_up_d3d9_model_vertex_input_diag();
         }
         add_game_start_event(set_up_d3d9_diagnostics);
@@ -166,7 +162,6 @@ namespace Chimera {
         if(!model_shader_test_enabled) {
             add_game_start_event(set_up_d3d9_model_shader_compat);
             add_game_start_event(set_up_d3d9_model_shader_primary_v2);
-            add_game_start_event(set_up_d3d9_model_material_diag);
             add_game_start_event(set_up_d3d9_model_vertex_input_diag);
         }
         add_game_exit_event(rasterizer_release_vertex_shaders_3_0);
