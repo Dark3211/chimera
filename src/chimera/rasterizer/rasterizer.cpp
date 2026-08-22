@@ -195,11 +195,11 @@ namespace Chimera {
                     "chimera_d3d9_modern",
                     "chimera_category_debug",
                     "client",
-                    "D3D9On12 modern VS3 bank: status/dump_all",
+                    "D3D9On12 modern VS3 bank: status/dump_all/model on|off",
                     d3d9_modern_shader_command,
                     false,
                     0,
-                    1
+                    2
                 );
                 modern_shader_command_registered = true;
             }
