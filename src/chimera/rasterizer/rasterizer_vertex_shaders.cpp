@@ -17,7 +17,6 @@
 #include "../signature/signature.hpp"
 #include "../signature/hook.hpp"
 
-
 namespace Chimera {
     DynamicVertex screen_vertices[4] = {
         -1.0f, 1.0, 0.0f, 0xffffffff, -1.0f, 1.0f,
@@ -26,18 +25,17 @@ namespace Chimera {
         -1.0f, -1.0f, 0.0f, 0xffffffff, -1.0f, -1.0f
     };
 
-    // Full-size modern bank. A null slot means "use Halo's stock shader".
-    // Known transparent-generic shaders use Chimera's existing hand-compiled
-    // VS3 blobs. Stock VS1.1 shaders without relative address-register access
-    // are translated instruction-for-instruction to VS3 at runtime. Paths that
-    // use a0 remain stock until an exact family-specific conversion is added.
+    // Full-size D3D9On12 VS3 bank. Null means stock fallback.
+    // The transparent-generic family uses Chimera's existing VS3 blobs.
+    // Remaining stock VS1.1 shaders are translated at runtime. Relative a0
+    // access is converted explicitly to floor + MOVA so the resulting VS3 does
+    // not depend on the legacy VS1.1 address-register conversion semantics.
     static IDirect3DVertexShader9 *modern_vertex_shaders_3_0[NUM_OF_VERTEX_SHADERS] = {nullptr};
     static bool vsh_initialized = false;
     static bool vsh_creation_failed = false;
 
     enum class ModernBuildResult {
         built,
-        skipped_relative_addressing,
         failed
     };
 
@@ -78,13 +76,6 @@ namespace Chimera {
         const auto footer_position = program.find("// approximately");
         if(footer_position != std::string::npos) {
             program.resize(footer_position);
-        }
-
-        // Address-register conversion is deliberately not done mechanically.
-        // VS1.1 mov a0 and VS3 mova have different integer-conversion behavior;
-        // these are exactly the paths that caused model spikes under 9On12.
-        if(program.find("a0.") != std::string::npos) {
-            return false;
         }
 
         const bool uses_position = program.find("oPos") != std::string::npos;
@@ -142,8 +133,7 @@ namespace Chimera {
             output += declaration + "\n";
         }
 
-        // VS3 outputs are generic registers with explicit semantics. Keep a
-        // stable mapping across every mechanically translated Halo shader.
+        // VS3 outputs are generic registers with explicit semantics.
         output += "dcl_position o0\n";
         if(uses_d0) output += "dcl_color o1\n";
         if(uses_d1) output += "dcl_color1 o2\n";
@@ -157,6 +147,22 @@ namespace Chimera {
         }
 
         for(auto instruction : instructions) {
+            // VS1.1 MOV to a0 performs the legacy integer conversion implicitly.
+            // VS3 MOVA has different rounding rules. Reproduce the stock/HLSL
+            // behavior explicitly: floor the positive Halo address value first,
+            // then feed that integer-valued float to MOVA. r31 is safe scratch:
+            // VS1.1 exposes only r0-r11, so no stock shader can already use it.
+            if(instruction.rfind("mov a0.x,", 0) == 0) {
+                std::string source = trim_left(instruction.substr(std::strlen("mov a0.x,")));
+                if(source.empty()) {
+                    return false;
+                }
+                output += "frc r31.x, " + source + "\n";
+                output += "add r31.x, " + source + ", -r31.x\n";
+                output += "mova a0.x, r31.x\n";
+                continue;
+            }
+
             replace_all(instruction, "oPos", "o0");
             replace_all(instruction, "oD0", "o1");
             replace_all(instruction, "oD1", "o2");
@@ -210,13 +216,10 @@ namespace Chimera {
             disassembly->GetBufferSize()
         );
         disassembly->Release();
+        const bool relative_addressing = stock_assembly.find("a0.") != std::string::npos;
 
         std::string modern_assembly;
         if(!legacy_vs11_to_vs30_assembly(stock_assembly, modern_assembly)) {
-            if(stock_assembly.find("a0.") != std::string::npos) {
-                if(log) std::fprintf(log, "%03u SKIP relative-addressing path requires exact conversion\n", index);
-                return ModernBuildResult::skipped_relative_addressing;
-            }
             if(log) std::fprintf(log, "%03u FAIL unsupported stock assembly\n", index);
             return ModernBuildResult::failed;
         }
@@ -260,7 +263,15 @@ namespace Chimera {
             return ModernBuildResult::failed;
         }
 
-        if(log) std::fprintf(log, "%03u BUILT direct VS1.1 -> VS3\n", index);
+        if(log) {
+            std::fprintf(
+                log,
+                relative_addressing
+                    ? "%03u BUILT relative VS1.1 -> VS3 (floor + MOVA)\n"
+                    : "%03u BUILT direct VS1.1 -> VS3\n",
+                index
+            );
+        }
         return ModernBuildResult::built;
     }
 
@@ -301,9 +312,8 @@ namespace Chimera {
             return nullptr;
         }
 
-        // Preserve Chimera's long-standing behavior for the transparent-generic
-        // family. Newly transpiled slots are inventory-only until explicitly
-        // enabled by the D3D9On12 modern-bank compatibility layer.
+        // Preserve current proven behavior. The newly generated non-generic
+        // shaders remain inventory/test candidates until explicitly enabled.
         if(index >= VSH_TRANSPARENT_GENERIC
             && index <= VSH_TRANSPARENT_GENERIC_VIEWER_CENTERED_M) {
             if(IDirect3DVertexShader9 *modern = rasterizer_get_modern_vertex_shader(index)) {
@@ -353,12 +363,12 @@ namespace Chimera {
         std::FILE *build_log = std::fopen("chimera_d3d9_modern_build.log", "w");
         if(build_log) {
             std::fprintf(build_log, "# D3D9On12 VS3 modern-bank build\n");
-            std::fprintf(build_log, "# Direct VS1.1 paths are mechanically translated; a0 paths are intentionally deferred.\n\n");
+            std::fprintf(build_log, "# Relative VS1.1 a0 paths use explicit floor + MOVA conversion.\n\n");
         }
 
         unsigned built_blob = 0;
         unsigned built_direct = 0;
-        unsigned skipped_relative = 0;
+        unsigned built_relative = 0;
         unsigned failed = 0;
 
         struct KnownBlob {
@@ -401,6 +411,23 @@ namespace Chimera {
                 continue;
             }
 
+            UINT stock_bytes = 0;
+            bool relative = false;
+            if(SUCCEEDED(stock->GetFunction(nullptr, &stock_bytes)) && stock_bytes) {
+                std::vector<unsigned char> stock_code(stock_bytes);
+                if(SUCCEEDED(stock->GetFunction(stock_code.data(), &stock_bytes))) {
+                    ID3DBlob *stock_disassembly = nullptr;
+                    if(SUCCEEDED(D3DDisassemble(stock_code.data(), stock_bytes, 0, nullptr, &stock_disassembly)) && stock_disassembly) {
+                        std::string stock_text(
+                            static_cast<const char *>(stock_disassembly->GetBufferPointer()),
+                            stock_disassembly->GetBufferSize()
+                        );
+                        relative = stock_text.find("a0.") != std::string::npos;
+                        stock_disassembly->Release();
+                    }
+                }
+            }
+
             const auto result = transpile_stock_shader_to_vs3(
                 device,
                 stock,
@@ -409,10 +436,8 @@ namespace Chimera {
                 &modern_vertex_shaders_3_0[i]
             );
             if(result == ModernBuildResult::built) {
-                built_direct++;
-            }
-            else if(result == ModernBuildResult::skipped_relative_addressing) {
-                skipped_relative++;
+                if(relative) built_relative++;
+                else built_direct++;
             }
             else {
                 failed++;
@@ -422,12 +447,12 @@ namespace Chimera {
         if(build_log) {
             std::fprintf(
                 build_log,
-                "\n# SUMMARY existing_vs3=%u direct_transpiled=%u relative_pending=%u failed=%u total_modern=%u/%u\n",
+                "\n# SUMMARY existing_vs3=%u direct_transpiled=%u relative_transpiled=%u failed=%u total_modern=%u/%u\n",
                 built_blob,
                 built_direct,
-                skipped_relative,
+                built_relative,
                 failed,
-                built_blob + built_direct,
+                built_blob + built_direct + built_relative,
                 static_cast<unsigned>(NUM_OF_VERTEX_SHADERS)
             );
             std::fclose(build_log);
@@ -435,12 +460,12 @@ namespace Chimera {
 
         vsh_initialized = true;
         console_output(
-            "D3D9 modern VS bank: %u/%u built (%u existing VS3 + %u direct), %u relative pending, %u failed.",
-            built_blob + built_direct,
+            "D3D9 modern VS bank: %u/%u built (%u existing + %u direct + %u relative), %u failed.",
+            built_blob + built_direct + built_relative,
             static_cast<unsigned>(NUM_OF_VERTEX_SHADERS),
             built_blob,
             built_direct,
-            skipped_relative,
+            built_relative,
             failed
         );
     }
@@ -455,5 +480,4 @@ namespace Chimera {
         vsh_initialized = false;
         vsh_creation_failed = false;
     }
-
 }
