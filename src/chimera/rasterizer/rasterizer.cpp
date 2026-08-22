@@ -17,6 +17,7 @@
 #include "../halo_data/shaders/shader_blob.hpp"
 #include "../output/error_box.hpp"
 #include "../event/game_loop.hpp"
+#include "../event/d3d9_end_scene.hpp"
 
 
 namespace Chimera {
@@ -26,6 +27,38 @@ namespace Chimera {
     bool chimera_rasterizer_enabled = false;
 
     IDirect3DPixelShader9 *chimera_pixel_shaders[NUMBER_OF_CHIMERA_PIXEL_SHADERS] = { nullptr };
+
+    // Never touch Halo's shader table during Chimera/D3D startup. Instead, arm
+    // the validated hybrid at game_start and install it only after a few rendered
+    // frames of the newly loaded map. This preserves the stable startup path that
+    // was validated after the earlier eager-startup experiment crashed Halo.
+    static bool d3d9_hybrid_auto_pending = false;
+    static unsigned d3d9_hybrid_auto_wait_frames = 0;
+    static unsigned d3d9_hybrid_auto_retry_frames = 0;
+    static constexpr unsigned D3D9_HYBRID_AUTO_STABLE_FRAMES = 3;
+    static constexpr unsigned D3D9_HYBRID_AUTO_RETRY_FRAMES = 30;
+
+    static bool d3d9_hybrid_auto_requested() noexcept {
+        auto *backend = get_chimera().get_ini()->get_value("video_mode.d3d_backend");
+        if(!backend
+            || (_stricmp(backend, "9on12") != 0 && _stricmp(backend, "d3d9on12") != 0)) {
+            return false;
+        }
+
+        // Hybrid is the D3D9On12 default. Keep explicit escape hatches so the
+        // proven primary_v2/stock path remains available without reverting code.
+        auto *mode = get_chimera().get_ini()->get_value("video_mode.d3d_shader_backend");
+        if(!mode || !*mode) {
+            return true;
+        }
+        if(_stricmp(mode, "off") == 0
+            || _stricmp(mode, "stock") == 0
+            || _stricmp(mode, "legacy") == 0
+            || _stricmp(mode, "manual") == 0) {
+            return false;
+        }
+        return true;
+    }
 
     void rasterizer_set_render_state(D3DRENDERSTATETYPE state, DWORD value) noexcept {
         throw_error(global_d3d9_device, "d3d device missing");
@@ -276,8 +309,7 @@ namespace Chimera {
     }
 
     static bool d3d9_hybrid_enable() noexcept {
-        // Do this only on explicit user request after Halo has entered a map.
-        // This is the exact live combination that was validated visually:
+        // Exact live combination validated in-game:
         // MODEL family -> VS3 bank, GENERIC_M -> exact VS2, PLASMA_M -> exact VS2.
         if(!sync_generic_m_generation() || !sync_plasma_m_generation()) {
             console_error("D3D9 hybrid: transparent shader slots are not in a safe/known state.");
@@ -342,11 +374,67 @@ namespace Chimera {
             == D3D9TransparentShaderCompat::GENERIC_MODE_EXACT_VS2;
         const bool plasma = D3D9TransparentShaderCompat::plasma_m_active;
         console_output(
-            "D3D9 hybrid status: MODEL=%s GENERIC_M=%s PLASMA_M=%s",
+            "D3D9 hybrid status: MODEL=%s GENERIC_M=%s PLASMA_M=%s AUTO=%s%s",
             model ? "VS3" : "fallback",
             generic ? "exact-vs2" : "stock/other",
-            plasma ? "exact-vs2" : "stock"
+            plasma ? "exact-vs2" : "stock",
+            d3d9_hybrid_auto_requested() ? "ON" : "OFF",
+            d3d9_hybrid_auto_pending ? " (pending)" : ""
         );
+    }
+
+    static void schedule_d3d9_hybrid_auto() noexcept {
+        // The previous map may have left the MODEL test flag set while Halo is
+        // rebuilding its shader table. Keep the new map on the proven fallback
+        // for its first few frames, then install the validated complete trio.
+        rasterizer_set_modern_model_test(false);
+        d3d9_hybrid_auto_pending = d3d9_hybrid_auto_requested();
+        d3d9_hybrid_auto_wait_frames = D3D9_HYBRID_AUTO_STABLE_FRAMES;
+        d3d9_hybrid_auto_retry_frames = 0;
+    }
+
+    static void reset_d3d9_hybrid_auto() noexcept {
+        d3d9_hybrid_auto_pending = false;
+        d3d9_hybrid_auto_wait_frames = 0;
+        d3d9_hybrid_auto_retry_frames = 0;
+        rasterizer_set_modern_model_test(false);
+    }
+
+    static void d3d9_hybrid_auto_end_scene(IDirect3DDevice9 *device) noexcept {
+        if(!d3d9_hybrid_auto_pending || !d3d9_hybrid_auto_requested()) {
+            return;
+        }
+        if(!device || !global_d3d9_device || !*global_d3d9_device || device != *global_d3d9_device) {
+            return;
+        }
+
+        if(d3d9_hybrid_auto_wait_frames > 0) {
+            d3d9_hybrid_auto_wait_frames--;
+            return;
+        }
+        if(d3d9_hybrid_auto_retry_frames > 0) {
+            d3d9_hybrid_auto_retry_frames--;
+            return;
+        }
+
+        // Probe readiness silently. This callback may land between Halo's shader
+        // table generations during a transition, so a temporary mismatch is a
+        // reason to wait, not an in-game error flood.
+        if(!vertex_shaders
+            || !sync_generic_m_generation(false)
+            || !sync_plasma_m_generation(false)
+            || !D3D9ModernShaderBank::model_family_ready()) {
+            d3d9_hybrid_auto_retry_frames = D3D9_HYBRID_AUTO_RETRY_FRAMES;
+            return;
+        }
+
+        if(d3d9_hybrid_enable()) {
+            d3d9_hybrid_auto_pending = false;
+            console_output("D3D9 hybrid auto: active for current map.");
+        }
+        else {
+            d3d9_hybrid_auto_retry_frames = D3D9_HYBRID_AUTO_RETRY_FRAMES;
+        }
     }
 
     bool d3d9_modern_shader_command(int argc, const char **argv) noexcept {
@@ -356,9 +444,16 @@ namespace Chimera {
                 return true;
             }
             if(_stricmp(argv[1], "on") == 0) {
-                return d3d9_hybrid_enable();
+                const bool result = d3d9_hybrid_enable();
+                if(result) {
+                    d3d9_hybrid_auto_pending = false;
+                }
+                return result;
             }
             if(_stricmp(argv[1], "off") == 0) {
+                // Manual OFF remains off for the current map. The next game_start
+                // will arm the automatic validated pipeline again.
+                d3d9_hybrid_auto_pending = false;
                 return d3d9_hybrid_disable();
             }
             console_error("D3D9 modern bank: use hybrid on|off|status.");
@@ -382,8 +477,6 @@ namespace Chimera {
             set_up_environment_transparent_index_buffer_fix();
         }
 
-        // Keep startup identical to the previously validated stable path.
-        // Hybrid shader selection is intentionally manual after map load.
         set_up_d3d9_model_shader_compat();
         set_up_d3d9_model_shader_primary_v2();
         set_up_d3d9_model_vertex_input_diag();
@@ -393,6 +486,12 @@ namespace Chimera {
         add_game_start_event(set_up_d3d9_model_vertex_input_diag);
 
         if(d3d9on12_requested) {
+            // Arm only from game_start. Merely registering the EndScene callback
+            // at startup is harmless because it is dormant until a map starts.
+            add_game_start_event(schedule_d3d9_hybrid_auto, EVENT_PRIORITY_AFTER);
+            add_game_exit_event(reset_d3d9_hybrid_auto, EVENT_PRIORITY_BEFORE);
+            add_d3d9_end_scene_event(d3d9_hybrid_auto_end_scene);
+
             static bool probe_command_registered = false;
             if(!probe_command_registered) {
                 get_chimera().get_commands().emplace_back(
@@ -440,7 +539,8 @@ namespace Chimera {
         }
 
         // Restore any live shader-table replacement before Chimera releases its
-        // VS3 shader objects. This keeps Halo's original shader table intact.
+        // VS3 shader objects. reset_d3d9_hybrid_auto is registered above with
+        // BEFORE priority so MODEL routing is already disabled at this point.
         add_game_exit_event(D3D9TransparentShaderCompat::on_game_exit, EVENT_PRIORITY_BEFORE);
         add_game_exit_event(rasterizer_release_vertex_shaders_3_0);
         add_game_exit_event(rasterizer_release_pixel_shaders, EVENT_PRIORITY_AFTER);
