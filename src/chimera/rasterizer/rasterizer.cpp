@@ -4,10 +4,6 @@
 
 #include "rasterizer.hpp"
 #include "rasterizer_transparent_geometry.hpp"
-#include "d3d9_diagnostics_compat.hpp"
-#include "d3d9_diagnostics.hpp"
-#include "d3d9_runtime_diagnostics.hpp"
-#include "d3d9_model_shader_test.hpp"
 #include "d3d9_model_shader_compat.hpp"
 #include "d3d9_model_shader_primary_v2.hpp"
 #include "d3d9_model_vertex_input_diag.hpp"
@@ -127,11 +123,9 @@ namespace Chimera {
         global_d3d9_device = reinterpret_cast<IDirect3DDevice9 **>(*reinterpret_cast<std::byte **>(get_chimera().get_signature("model_af_set_sampler_states_sig").data() + 1));
         d3d9_device_caps = reinterpret_cast<D3DCAPS9 *>(*reinterpret_cast<std::byte **>(get_chimera().get_signature("d3d9_device_caps_sig").data() + 1));
 
-        // Diagnostic isolation for the experimental 9On12 backend: this legacy
-        // transparent-geometry fix also patches DrawIndexedPrimitive and dynamic
-        // index-buffer Lock vtables. The 9On12 compatibility layer has its own
-        // draw-input trace, so do not stack both hook systems while testing 9On12.
-        // Native D3D9 keeps the existing fix unchanged.
+        // The legacy transparent-geometry fix patches DrawIndexedPrimitive and
+        // dynamic index-buffer Lock vtables. Do not stack it with the 9On12
+        // draw-input trace. Native D3D9 keeps the existing fix unchanged.
         auto *backend = get_chimera().get_ini()->get_value("video_mode.d3d_backend");
         const bool d3d9on12_requested = backend
             && (_stricmp(backend, "9on12") == 0 || _stricmp(backend, "d3d9on12") == 0);
@@ -139,31 +133,17 @@ namespace Chimera {
             set_up_environment_transparent_index_buffer_fix();
         }
 
-        auto *model_shader_test = get_chimera().get_ini()->get_value("video_mode.d3d_model_shader_test");
-        const bool model_shader_test_enabled = model_shader_test
-            && model_shader_test[0] != '\0'
-            && _stricmp(model_shader_test, "off") != 0;
+        // Keep only the compatibility path under test plus the observational
+        // DrawPrimitive/DrawIndexedPrimitive trace. Legacy diagnostic hook stacks
+        // were removed after their A/B tests were completed.
+        set_up_d3d9_model_shader_compat();
+        set_up_d3d9_model_shader_primary_v2();
+        set_up_d3d9_model_vertex_input_diag();
 
-        // The shader-test and compatibility paths hook SetVertexShader. Never
-        // install the A/B shader diagnostic together with a compatibility path.
-        // The current draw-input diagnostic is observational only and hooks
-        // DrawPrimitive/DrawIndexedPrimitive to capture model/effect/transparent state.
-        set_up_d3d9_diagnostics();
-        set_up_d3d9_runtime_diagnostics();
-        set_up_d3d9_model_shader_test();
-        if(!model_shader_test_enabled) {
-            set_up_d3d9_model_shader_compat();
-            set_up_d3d9_model_shader_primary_v2();
-            set_up_d3d9_model_vertex_input_diag();
-        }
-        add_game_start_event(set_up_d3d9_diagnostics);
-        add_game_start_event(set_up_d3d9_runtime_diagnostics);
-        add_game_start_event(set_up_d3d9_model_shader_test);
-        if(!model_shader_test_enabled) {
-            add_game_start_event(set_up_d3d9_model_shader_compat);
-            add_game_start_event(set_up_d3d9_model_shader_primary_v2);
-            add_game_start_event(set_up_d3d9_model_vertex_input_diag);
-        }
+        add_game_start_event(set_up_d3d9_model_shader_compat);
+        add_game_start_event(set_up_d3d9_model_shader_primary_v2);
+        add_game_start_event(set_up_d3d9_model_vertex_input_diag);
+
         add_game_exit_event(rasterizer_release_vertex_shaders_3_0);
         add_game_exit_event(rasterizer_release_pixel_shaders, EVENT_PRIORITY_AFTER);
         add_game_start_event(rasterizer_create_pixel_shaders);
