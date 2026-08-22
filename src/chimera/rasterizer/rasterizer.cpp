@@ -119,13 +119,17 @@ namespace Chimera {
         return true;
     }
 
+    bool d3d9_probe_command(int argc, const char **argv) noexcept {
+        return D3D9ModelVertexInputDiag::command(argc, argv);
+    }
+
     void set_up_rasterizer() noexcept {
         global_d3d9_device = reinterpret_cast<IDirect3DDevice9 **>(*reinterpret_cast<std::byte **>(get_chimera().get_signature("model_af_set_sampler_states_sig").data() + 1));
         d3d9_device_caps = reinterpret_cast<D3DCAPS9 *>(*reinterpret_cast<std::byte **>(get_chimera().get_signature("d3d9_device_caps_sig").data() + 1));
 
         // The legacy transparent-geometry fix patches DrawIndexedPrimitive and
         // dynamic index-buffer Lock vtables. Do not stack it with the 9On12
-        // draw-input trace. Native D3D9 keeps the existing fix unchanged.
+        // live draw probe. Native D3D9 keeps the existing fix unchanged.
         auto *backend = get_chimera().get_ini()->get_value("video_mode.d3d_backend");
         const bool d3d9on12_requested = backend
             && (_stricmp(backend, "9on12") == 0 || _stricmp(backend, "d3d9on12") == 0);
@@ -133,9 +137,9 @@ namespace Chimera {
             set_up_environment_transparent_index_buffer_fix();
         }
 
-        // Keep only the compatibility path under test plus the observational
-        // DrawPrimitive/DrawIndexedPrimitive trace. Legacy diagnostic hook stacks
-        // were removed after their A/B tests were completed.
+        // Keep only the compatibility path under test plus the live/compact
+        // DrawPrimitive/DrawIndexedPrimitive probe. Completed legacy A/B hook
+        // stacks remain removed.
         set_up_d3d9_model_shader_compat();
         set_up_d3d9_model_shader_primary_v2();
         set_up_d3d9_model_vertex_input_diag();
@@ -143,6 +147,23 @@ namespace Chimera {
         add_game_start_event(set_up_d3d9_model_shader_compat);
         add_game_start_event(set_up_d3d9_model_shader_primary_v2);
         add_game_start_event(set_up_d3d9_model_vertex_input_diag);
+
+        if(d3d9on12_requested) {
+            static bool probe_command_registered = false;
+            if(!probe_command_registered) {
+                get_chimera().get_commands().emplace_back(
+                    "chimera_d3d9_probe",
+                    "chimera_category_debug",
+                    "client",
+                    "Live D3D9On12 pass isolation: status/next/reset/toggle/disable/enable/mark",
+                    d3d9_probe_command,
+                    false,
+                    0,
+                    2
+                );
+                probe_command_registered = true;
+            }
+        }
 
         add_game_exit_event(rasterizer_release_vertex_shaders_3_0);
         add_game_exit_event(rasterizer_release_pixel_shaders, EVENT_PRIORITY_AFTER);
