@@ -113,6 +113,25 @@ namespace Chimera {
     bool rasterizer_has_modern_vertex_shader(std::uint16_t index) noexcept;
     std::size_t rasterizer_modern_vertex_shader_count() noexcept;
 
+    /**
+    * Live A/B state for the MODEL-family VS3 candidates. The flag is intentionally
+    * header-local through a function static so diagnostic command code and the
+    * SetVertexShader compatibility hook share one program-wide C++ inline state
+    * without adding another global initialization dependency.
+    */
+    inline bool &rasterizer_modern_model_test_state() noexcept {
+        static bool enabled = false;
+        return enabled;
+    }
+
+    inline void rasterizer_set_modern_model_test(bool enabled) noexcept {
+        rasterizer_modern_model_test_state() = enabled;
+    }
+
+    inline bool rasterizer_modern_model_test_enabled() noexcept {
+        return rasterizer_modern_model_test_state();
+    }
+
 }
 
 #endif
