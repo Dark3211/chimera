@@ -11,6 +11,7 @@
 #include "d3d9_model_shader_compat.hpp"
 #include "d3d9_model_shader_primary_v2.hpp"
 #include "d3d9_model_material_diag.hpp"
+#include "d3d9_model_vertex_input_diag.hpp"
 #include "../chimera.hpp"
 #include "../config/ini.hpp"
 #include "../signature/hook.hpp"
@@ -93,7 +94,7 @@ namespace Chimera {
         create_pixel_shader(decal_multiply, &chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_DECAL_MULTIPLY]);
         create_pixel_shader(decal_multiply2x, &chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_DECAL_MULTIPLY2X]);
         create_pixel_shader(decal_alpha_blend, &chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_DECAL_ALPHA_BLEND]);
-        create_pixel_shader(decal_alpha_madd, &chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_DECAL_ALPHA_MULTIPLY_ADD]);
+        create_pixel_shader(decal_alpha_madd, &chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_DECAL_MULTIPLY_ADD]);
 
     }
 
@@ -149,6 +150,7 @@ namespace Chimera {
         // compatibility helpers have mutually exclusive INI modes, so only one of
         // them can arm its vtable hook for a given run. The material diagnostic
         // only hooks SetPixelShader and is safe alongside the primary VS2 test.
+        // The vertex-input diagnostic only observes DrawIndexedPrimitive state.
         set_up_d3d9_diagnostics();
         set_up_d3d9_runtime_diagnostics();
         set_up_d3d9_model_shader_test();
@@ -156,6 +158,7 @@ namespace Chimera {
             set_up_d3d9_model_shader_compat();
             set_up_d3d9_model_shader_primary_v2();
             set_up_d3d9_model_material_diag();
+            set_up_d3d9_model_vertex_input_diag();
         }
         add_game_start_event(set_up_d3d9_diagnostics);
         add_game_start_event(set_up_d3d9_runtime_diagnostics);
@@ -164,6 +167,7 @@ namespace Chimera {
             add_game_start_event(set_up_d3d9_model_shader_compat);
             add_game_start_event(set_up_d3d9_model_shader_primary_v2);
             add_game_start_event(set_up_d3d9_model_material_diag);
+            add_game_start_event(set_up_d3d9_model_vertex_input_diag);
         }
         add_game_exit_event(rasterizer_release_vertex_shaders_3_0);
         add_game_exit_event(rasterizer_release_pixel_shaders, EVENT_PRIORITY_AFTER);
