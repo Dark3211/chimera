@@ -94,6 +94,15 @@ namespace Chimera {
                 && (_stricmp(backend, "9on12") == 0 || _stricmp(backend, "d3d9on12") == 0);
         }
 
+        static bool model_family_ready() noexcept {
+            for(std::uint16_t i = VSH_MODEL_FOGGED; i <= VSH_MODEL_ZBUFFER; i++) {
+                if(!rasterizer_has_modern_vertex_shader(i)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
         static bool dump_shader(
             std::FILE *output,
             IDirect3DVertexShader9 *shader,
@@ -105,80 +114,48 @@ namespace Chimera {
                 return false;
             }
             if(!shader) {
-                std::fprintf(
-                    output,
+                std::fprintf(output,
                     "===== %03u %s %s =====\n<shader unavailable>\n===== END =====\n\n",
-                    static_cast<unsigned>(index),
-                    name,
-                    modern ? "MODERN" : "STOCK"
-                );
+                    static_cast<unsigned>(index), name, modern ? "MODERN" : "STOCK");
                 return false;
             }
 
             UINT byte_count = 0;
             HRESULT result = shader->GetFunction(nullptr, &byte_count);
             if(FAILED(result) || byte_count == 0) {
-                std::fprintf(
-                    output,
+                std::fprintf(output,
                     "===== %03u %s %s =====\nGetFunction(size) failed hr=0x%08lX size=%u\n===== END =====\n\n",
-                    static_cast<unsigned>(index),
-                    name,
-                    modern ? "MODERN" : "STOCK",
-                    static_cast<unsigned long>(result),
-                    byte_count
-                );
+                    static_cast<unsigned>(index), name, modern ? "MODERN" : "STOCK",
+                    static_cast<unsigned long>(result), byte_count);
                 return false;
             }
 
             std::vector<unsigned char> bytecode(byte_count);
             result = shader->GetFunction(bytecode.data(), &byte_count);
             if(FAILED(result)) {
-                std::fprintf(
-                    output,
+                std::fprintf(output,
                     "===== %03u %s %s =====\nGetFunction(data) failed hr=0x%08lX\n===== END =====\n\n",
-                    static_cast<unsigned>(index),
-                    name,
-                    modern ? "MODERN" : "STOCK",
-                    static_cast<unsigned long>(result)
-                );
+                    static_cast<unsigned>(index), name, modern ? "MODERN" : "STOCK",
+                    static_cast<unsigned long>(result));
                 return false;
             }
 
             ID3DBlob *disassembly = nullptr;
-            result = D3DDisassemble(
-                bytecode.data(),
-                byte_count,
-                0,
-                name,
-                &disassembly
-            );
+            result = D3DDisassemble(bytecode.data(), byte_count, 0, name, &disassembly);
             if(FAILED(result) || !disassembly) {
-                std::fprintf(
-                    output,
+                std::fprintf(output,
                     "===== %03u %s %s =====\nD3DDisassemble failed hr=0x%08lX bytes=%u\n===== END =====\n\n",
-                    static_cast<unsigned>(index),
-                    name,
-                    modern ? "MODERN" : "STOCK",
-                    static_cast<unsigned long>(result),
-                    byte_count
-                );
+                    static_cast<unsigned>(index), name, modern ? "MODERN" : "STOCK",
+                    static_cast<unsigned long>(result), byte_count);
                 if(disassembly) disassembly->Release();
                 return false;
             }
 
-            std::fprintf(
-                output,
-                "===== %03u %s %s bytes=%u =====\n",
-                static_cast<unsigned>(index),
-                name,
-                modern ? "MODERN" : "STOCK",
-                byte_count
-            );
+            std::fprintf(output, "===== %03u %s %s bytes=%u =====\n",
+                static_cast<unsigned>(index), name, modern ? "MODERN" : "STOCK", byte_count);
             std::fwrite(disassembly->GetBufferPointer(), 1, disassembly->GetBufferSize(), output);
             std::fprintf(output, "\n===== END %03u %s %s =====\n\n",
-                static_cast<unsigned>(index),
-                name,
-                modern ? "MODERN" : "STOCK");
+                static_cast<unsigned>(index), name, modern ? "MODERN" : "STOCK");
             disassembly->Release();
             return true;
         }
@@ -220,38 +197,31 @@ namespace Chimera {
                     }
                 }
                 else {
-                    std::fprintf(
-                        output,
+                    std::fprintf(output,
                         "===== %03u %s MODERN =====\n<not converted yet>\n===== END =====\n\n",
-                        static_cast<unsigned>(i),
-                        name
-                    );
+                        static_cast<unsigned>(i), name);
                 }
             }
 
             std::fprintf(output, "# SUMMARY stock_dumped=%u/%u modern_dumped=%u/%u\n",
-                stock_ok,
-                static_cast<unsigned>(NUM_OF_VERTEX_SHADERS),
-                modern_ok,
-                static_cast<unsigned>(NUM_OF_VERTEX_SHADERS));
+                stock_ok, static_cast<unsigned>(NUM_OF_VERTEX_SHADERS),
+                modern_ok, static_cast<unsigned>(NUM_OF_VERTEX_SHADERS));
             std::fclose(output);
 
             console_output(
                 "D3D9 modern bank: dumped %u/%u stock VS and %u modern VS -> chimera_d3d9_all_vertex_shaders.asm.log",
-                stock_ok,
-                static_cast<unsigned>(NUM_OF_VERTEX_SHADERS),
-                modern_ok
-            );
+                stock_ok, static_cast<unsigned>(NUM_OF_VERTEX_SHADERS), modern_ok);
             return stock_ok > 0;
         }
 
         static void print_status() noexcept {
             const std::size_t modern_count = rasterizer_modern_vertex_shader_count();
             console_output(
-                "D3D9 modern vertex bank: %lu/%u VS3 slots currently populated; %lu stock fallbacks remain.",
+                "D3D9 modern vertex bank: %lu/%u VS3 slots populated; %lu stock fallbacks remain; MODEL test=%s.",
                 static_cast<unsigned long>(modern_count),
                 static_cast<unsigned>(NUM_OF_VERTEX_SHADERS),
-                static_cast<unsigned long>(NUM_OF_VERTEX_SHADERS - modern_count)
+                static_cast<unsigned long>(NUM_OF_VERTEX_SHADERS - modern_count),
+                rasterizer_modern_model_test_enabled() ? "ON" : "OFF"
             );
             if(modern_count > 0) {
                 for(std::uint16_t i = 0; i < NUM_OF_VERTEX_SHADERS; i++) {
@@ -264,6 +234,7 @@ namespace Chimera {
 
         static void print_help() noexcept {
             console_output("chimera_d3d9_modern status");
+            console_output("chimera_d3d9_modern model on|off");
             console_output("chimera_d3d9_modern dump_all");
         }
 
@@ -278,6 +249,28 @@ namespace Chimera {
             }
             if(_stricmp(argv[0], "dump_all") == 0 || _stricmp(argv[0], "dump") == 0) {
                 return dump_all_vertex_shaders();
+            }
+            if(_stricmp(argv[0], "model") == 0) {
+                if(argc < 2) {
+                    console_output("D3D9 modern MODEL test: %s", rasterizer_modern_model_test_enabled() ? "ON" : "OFF");
+                    return true;
+                }
+                if(_stricmp(argv[1], "on") == 0 || _stricmp(argv[1], "modern") == 0) {
+                    if(!model_family_ready()) {
+                        console_error("D3D9 modern bank: MODEL VS3 family is incomplete; inspect chimera_d3d9_modern_build.log.");
+                        return false;
+                    }
+                    rasterizer_set_modern_model_test(true);
+                    console_output("D3D9 modern MODEL test: ON (VSH_MODEL_FOGGED..VSH_MODEL_ZBUFFER -> VS3 bank).");
+                    return true;
+                }
+                if(_stricmp(argv[1], "off") == 0 || _stricmp(argv[1], "primary_v2") == 0 || _stricmp(argv[1], "stock") == 0) {
+                    rasterizer_set_modern_model_test(false);
+                    console_output("D3D9 modern MODEL test: OFF (restored primary_v2/current compatibility path).");
+                    return true;
+                }
+                console_error("D3D9 modern bank: use model on|off.");
+                return false;
             }
             if(_stricmp(argv[0], "help") == 0) {
                 print_help();
