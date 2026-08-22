@@ -39,6 +39,7 @@ namespace Chimera {
         static bool queued_announced = false;
         static bool installed_announced = false;
         static bool scenery_isolation_announced = false;
+        static bool shadow_isolation_announced = false;
         static bool end_scene_retry_registered = false;
         static std::FILE *input_log = nullptr;
         static std::uint32_t log_flush_counter = 0;
@@ -80,8 +81,22 @@ namespace Chimera {
             );
         }
 
+        static bool shadow_isolation_enabled() noexcept {
+            if(!common_requirements_met()) {
+                return false;
+            }
+
+            auto *value = get_chimera().get_ini()->get_value("video_mode.d3d_model_warthog_test");
+            return value && (
+                _stricmp(value, "no_shadow") == 0
+                || _stricmp(value, "skip_shadow") == 0
+            );
+        }
+
         static bool enabled() noexcept {
-            return trace_enabled() || scenery_isolation_enabled();
+            return trace_enabled()
+                || scenery_isolation_enabled()
+                || shadow_isolation_enabled();
         }
 
         static void ensure_input_log() noexcept {
@@ -93,7 +108,7 @@ namespace Chimera {
             if(input_log) {
                 std::fprintf(
                     input_log,
-                    "# MODEL_VERTEX_INPUT diagnostic. ACTION=DRAW/SKIP; no_scenery intentionally suppresses stock scenery draws.\n"
+                    "# MODEL_VERTEX_INPUT diagnostic. ACTION=DRAW/SKIP; warthog A/B modes intentionally suppress selected model passes.\n"
                 );
                 std::fprintf(
                     input_log,
@@ -350,6 +365,9 @@ namespace Chimera {
 
             const bool skip_scenery = scenery_isolation_enabled()
                 && std::strcmp(pass_name, "VSH_MODEL_SCENERY_STOCK") == 0;
+            const bool skip_shadow = shadow_isolation_enabled()
+                && std::strcmp(pass_name, "PRIMARY_VS2_SHADOW") == 0;
+            const bool skip_draw = skip_scenery || skip_shadow;
 
             if(trace_enabled()) {
                 ensure_input_log();
@@ -437,7 +455,7 @@ namespace Chimera {
                         range_first,
                         range_last,
                         range_ok ? 1U : 0U,
-                        skip_scenery ? "SKIP" : "DRAW"
+                        skip_draw ? "SKIP" : "DRAW"
                     );
 
                     if((++log_flush_counter & 63u) == 0u) {
@@ -452,7 +470,7 @@ namespace Chimera {
                 }
             }
 
-            if(skip_scenery) {
+            if(skip_draw) {
                 return D3D_OK;
             }
 
@@ -524,6 +542,16 @@ namespace Chimera {
                 );
                 scenery_isolation_announced = true;
             }
+
+            if(shadow_isolation_enabled() && !shadow_isolation_announced) {
+                console_output(
+                    "D3D9 Warthog A/B: suppressing PRIMARY_VS2_SHADOW draws on D3D9On12."
+                );
+                console_output(
+                    "D3D9 Warthog A/B: this is diagnostic only; model shadows will disappear."
+                );
+                shadow_isolation_announced = true;
+            }
             return true;
         }
 
@@ -547,6 +575,11 @@ namespace Chimera {
                 if(scenery_isolation_enabled()) {
                     console_output(
                         "D3D9 backend: Warthog no-scenery A/B requested; waiting for live D3D9 device."
+                    );
+                }
+                if(shadow_isolation_enabled()) {
+                    console_output(
+                        "D3D9 backend: Warthog no-shadow A/B requested; waiting for live D3D9 device."
                     );
                 }
                 queued_announced = true;
