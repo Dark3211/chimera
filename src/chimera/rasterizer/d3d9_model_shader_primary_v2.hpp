@@ -30,18 +30,21 @@ namespace Chimera {
         static IDirect3DDevice9 *installed_device = nullptr;
         static IDirect3DVertexShader9 *model_shader = nullptr;
         static IDirect3DVertexShader9 *fogged_shader = nullptr;
+        static IDirect3DVertexShader9 *active_camo_shader = nullptr;
+        static IDirect3DVertexShader9 *shadow_shader = nullptr;
         static bool queued_announced = false;
         static bool installed_announced = false;
         static bool end_scene_retry_registered = false;
         static std::uint32_t hit_mask = 0;
 
-        // This is intentionally limited to MODEL / MODEL_FAST / MODEL_FOGGED.
-        // These three variants all use ModelVS(false, ...), including Halo's
-        // +0.5 node-index convention. Other model-family passes use different
-        // layouts/position helpers and are left stock until this primary path is
-        // validated.
+        // MODEL / MODEL_FAST / MODEL_FOGGED use Halo's ModelVS path, including
+        // the +0.5 node-index convention. Active camouflage and shadow use the
+        // older GetPosition helper and therefore consume the raw node indices.
+        // Keeping both conventions separate is important for matching the stock
+        // Halo CE shaders on D3D9On12.
         static constexpr const char *primary_hlsl = R"HLSL(
 float4x4 c_world_view_projection : register(c0);
+float4 c_eye_position : register(c4);
 float4 c_eye_forward : register(c5);
 float4 c_planar_fog_gradient1 : register(c6);
 float4 c_planar_fog_gradient2 : register(c7);
@@ -49,7 +52,13 @@ float4 c_fog_densities : register(c9);
 float4 c_fog_screen_gradient : register(c10);
 float4 c_base_map_xform_x : register(c11);
 float4 c_base_map_xform_y : register(c12);
+float4 c_screenproj_0 : register(c13);
+float4 c_screenproj_1 : register(c14);
+float4 c_screenproj_2 : register(c15);
+float4 c_screenproj_3 : register(c16);
 float4 c_detail_normal_scales : register(c15);
+float4 c_eye_xform_x : register(c27);
+float4 c_eye_xform_y : register(c28);
 float4x3 c_node_matrices[22] : register(c29);
 
 struct VS_INPUT {
@@ -62,10 +71,6 @@ struct VS_INPUT {
     float2 BlendWeights : BLENDWEIGHT0;
 };
 
-// Do not expose a matrix as an output semantic here. Halo's stock ps_2_x model
-// shaders consume t0..t6 directly. Writing every TEXCOORD register explicitly
-// removes any compiler-dependent matrix packing ambiguity between the old D3DX
-// compiler and the modern D3DCompiler used by Chimera.
 struct MODEL_OUTPUT {
     float4 Position : POSITION0;
     float Fog : FOG;
@@ -78,10 +83,18 @@ struct MODEL_OUTPUT {
     float4 T6 : TEXCOORD6;
 };
 
-float4x3 GetWorldMatrix(VS_INPUT IN) {
+float4x3 GetWorldMatrixModel(VS_INPUT IN) {
     float2 Indices = IN.BlendIndices + c_eye_forward.ww;
     int NodeIndex0 = (int)Indices.x;
     int NodeIndex1 = (int)Indices.y;
+    float4x3 WorldMatrix = c_node_matrices[NodeIndex0] * IN.BlendWeights.x;
+    WorldMatrix += c_node_matrices[NodeIndex1] * IN.BlendWeights.y;
+    return WorldMatrix;
+}
+
+float4x3 GetWorldMatrixRaw(VS_INPUT IN) {
+    int NodeIndex0 = (int)IN.BlendIndices.x;
+    int NodeIndex1 = (int)IN.BlendIndices.y;
     float4x3 WorldMatrix = c_node_matrices[NodeIndex0] * IN.BlendWeights.x;
     WorldMatrix += c_node_matrices[NodeIndex1] * IN.BlendWeights.y;
     return WorldMatrix;
@@ -103,7 +116,7 @@ float CalculatePlanarFog(float3 WorldPosition) {
 
 MODEL_OUTPUT BuildModel(VS_INPUT IN, bool Fogged) {
     MODEL_OUTPUT OUT = (MODEL_OUTPUT)0;
-    float4x3 WorldMatrix = GetWorldMatrix(IN);
+    float4x3 WorldMatrix = GetWorldMatrixModel(IN);
 
     float4 WorldPosition;
     WorldPosition.xyz = mul(IN.Position, WorldMatrix);
@@ -124,8 +137,6 @@ MODEL_OUTPUT BuildModel(VS_INPUT IN, bool Fogged) {
     float3 BiNormal = mul(IN.BiNormal, (float3x3)WorldMatrix);
     float3 Normal = mul(IN.Normal, (float3x3)WorldMatrix) * c_fog_screen_gradient.w;
 
-    // Stock ModelVS builds rows {T, B, N} then outputs transpose(). The pixel
-    // shader therefore receives the matrix columns in t3/t4/t5.
     OUT.T3 = float4(Tangent.x, BiNormal.x, Normal.x, 0.0f);
     OUT.T4 = float4(Tangent.y, BiNormal.y, Normal.y, 0.0f);
     OUT.T5 = float4(Tangent.z, BiNormal.z, Normal.z, 0.0f);
@@ -147,6 +158,66 @@ MODEL_OUTPUT main_model(VS_INPUT IN) {
 
 MODEL_OUTPUT main_fogged(VS_INPUT IN) {
     return BuildModel(IN, true);
+}
+
+struct CAMO_OUTPUT {
+    float4 Position : POSITION0;
+    float4 D0 : COLOR0;
+    float3 T0 : TEXCOORD0;
+    float3 T1 : TEXCOORD1;
+    float3 T2 : TEXCOORD2;
+};
+
+CAMO_OUTPUT main_active_camo(VS_INPUT IN) {
+    CAMO_OUTPUT OUT = (CAMO_OUTPUT)0;
+    float4x3 WorldMatrix = GetWorldMatrixRaw(IN);
+    float3 WorldPosition3 = mul(IN.Position, WorldMatrix);
+    float4 WorldPosition = float4(WorldPosition3, 1.0f);
+    float3 WorldNormal = normalize(mul(IN.Normal, (float3x3)WorldMatrix));
+
+    float3 EyeVector = c_eye_position.xyz - WorldPosition3;
+    float EyeDistance = dot(EyeVector, c_eye_forward.xyz);
+    float CamoFactor = saturate((1.0f / (EyeDistance * EyeDistance)) * c_fog_screen_gradient.y);
+
+    OUT.D0.xyz = c_base_map_xform_y.xyz;
+    OUT.D0.w = CamoFactor;
+    OUT.Position = mul(WorldPosition, c_world_view_projection);
+
+    OUT.T0.x = dot(WorldNormal, c_eye_xform_x.xyz);
+    OUT.T0.y = dot(WorldNormal, c_eye_xform_y.xyz);
+    OUT.T0.z = dot(WorldNormal, c_eye_forward.xyz);
+
+    OUT.T1.x = CamoFactor * c_fog_screen_gradient.x;
+    OUT.T1.y = 0.0f;
+    OUT.T2.x = 0.0f;
+    OUT.T2.y = CamoFactor * c_fog_screen_gradient.x;
+
+    float2 Projected = OUT.Position.xy / OUT.Position.w;
+    Projected = (Projected + float2(1.0f, -1.0f)) * 0.5f;
+    Projected.y *= -1.0f;
+    OUT.T1.z = c_fog_screen_gradient.z * Projected.x;
+    OUT.T2.z = c_fog_screen_gradient.w * Projected.y;
+    return OUT;
+}
+
+struct SHADOW_OUTPUT {
+    float4 Position : POSITION0;
+    float2 T0 : TEXCOORD0;
+};
+
+SHADOW_OUTPUT main_shadow(VS_INPUT IN) {
+    SHADOW_OUTPUT OUT = (SHADOW_OUTPUT)0;
+    float4x3 WorldMatrix = GetWorldMatrixRaw(IN);
+    float4 WorldPosition = float4(mul(IN.Position, WorldMatrix), 1.0f);
+    OUT.Position = float4(
+        dot(WorldPosition, c_screenproj_0),
+        dot(WorldPosition, c_screenproj_1),
+        dot(WorldPosition, c_screenproj_2),
+        dot(WorldPosition, c_screenproj_3)
+    );
+    OUT.T0.x = dot(IN.TexCoord0, c_base_map_xform_x);
+    OUT.T0.y = dot(IN.TexCoord0, c_base_map_xform_y);
+    return OUT;
 }
 )HLSL";
 
@@ -172,6 +243,14 @@ MODEL_OUTPUT main_fogged(VS_INPUT IN) {
             if(fogged_shader) {
                 fogged_shader->Release();
                 fogged_shader = nullptr;
+            }
+            if(active_camo_shader) {
+                active_camo_shader->Release();
+                active_camo_shader = nullptr;
+            }
+            if(shadow_shader) {
+                shadow_shader->Release();
+                shadow_shader = nullptr;
             }
             installed_device = nullptr;
             hit_mask = 0;
@@ -229,18 +308,20 @@ MODEL_OUTPUT main_fogged(VS_INPUT IN) {
         }
 
         static bool ensure_shaders(IDirect3DDevice9 *device) noexcept {
-            if(installed_device == device && model_shader && fogged_shader) {
+            if(installed_device == device && model_shader && fogged_shader && active_camo_shader && shadow_shader) {
                 return true;
             }
 
             release_shaders();
             if(!compile_shader(device, "main_model", &model_shader)
-                || !compile_shader(device, "main_fogged", &fogged_shader)) {
+                || !compile_shader(device, "main_fogged", &fogged_shader)
+                || !compile_shader(device, "main_active_camo", &active_camo_shader)
+                || !compile_shader(device, "main_shadow", &shadow_shader)) {
                 release_shaders();
                 return false;
             }
             installed_device = device;
-            console_output("D3D9 backend: compiled explicit-output VS2 primary model shaders.");
+            console_output("D3D9 backend: compiled VS2 model, fogged, active-camo and shadow compatibility shaders.");
             return true;
         }
 
@@ -272,6 +353,14 @@ MODEL_OUTPUT main_fogged(VS_INPUT IN) {
                 else if(vertex_shaders[VSH_MODEL_FAST].shader && shader == vertex_shaders[VSH_MODEL_FAST].shader) {
                     announce_hit(1u << 2, "VSH_MODEL_FAST");
                     shader = model_shader;
+                }
+                else if(vertex_shaders[VSH_MODEL_ACTIVE_CAMOUFLAGE].shader && shader == vertex_shaders[VSH_MODEL_ACTIVE_CAMOUFLAGE].shader) {
+                    announce_hit(1u << 3, "VSH_MODEL_ACTIVE_CAMOUFLAGE");
+                    shader = active_camo_shader;
+                }
+                else if(vertex_shaders[VSH_MODEL_SHADOW].shader && shader == vertex_shaders[VSH_MODEL_SHADOW].shader) {
+                    announce_hit(1u << 4, "VSH_MODEL_SHADOW");
+                    shader = shadow_shader;
                 }
             }
 
