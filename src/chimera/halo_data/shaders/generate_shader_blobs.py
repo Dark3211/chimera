@@ -20,6 +20,13 @@ D3D9ON12_PATCH_SLOTS = {
     59: 0xFFFE0200,
 }
 
+# Diagnostic isolation for custom-map geometry corruption. Keep the validated
+# replacement present in the patch file so the patch remains self-consistent,
+# but deliberately preserve the base Chimera shader for MODEL_SCENERY (slot 29)
+# in the generated D3D9On12 collection. All other validated replacements remain
+# unchanged.
+D3D9ON12_STOCK_FALLBACK_SLOTS = {29}
+
 
 def output_file_for_type(shader_type):
     if shader_type == 0:
@@ -138,6 +145,9 @@ def build_d3d9on12_vsh_collection(base_path, patch_path):
             )
         )
 
+    if not D3D9ON12_STOCK_FALLBACK_SLOTS.issubset(expected_indices):
+        raise RuntimeError("D3D9On12 stock fallback slots are not in the validated patch set")
+
     for index, bytecode in replacements.items():
         version = struct.unpack_from("<I", bytecode, 0)[0]
         expected_version = D3D9ON12_PATCH_SLOTS[index]
@@ -147,6 +157,12 @@ def build_d3d9on12_vsh_collection(base_path, patch_path):
                     index, version, expected_version
                 )
             )
+
+        # Keep the base shader for diagnostic fallback slots. This isolates a
+        # single shader without changing the patch binary or any other slot.
+        if index in D3D9ON12_STOCK_FALLBACK_SLOTS:
+            continue
+
         shaders[index] = bytecode
 
     rebuilt = build_vsh_collection(shaders)
