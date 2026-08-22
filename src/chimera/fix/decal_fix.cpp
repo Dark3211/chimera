@@ -2,6 +2,7 @@
 
 #include "decal_fix.hpp"
 #include "../chimera.hpp"
+#include "../config/ini.hpp"
 #include "../signature/signature.hpp"
 #include "../signature/hook.hpp"
 #include "../halo_data/shader_defs.hpp"
@@ -31,6 +32,12 @@ namespace Chimera {
     static bool map_loaded = false;
     static bool can_update_cache = false;
     static bool *fog_hack = nullptr;
+
+    static bool d3d9on12_requested() noexcept {
+        auto *backend = get_chimera().get_ini()->get_value("video_mode.d3d_backend");
+        return backend
+            && (_stricmp(backend, "9on12") == 0 || _stricmp(backend, "d3d9on12") == 0);
+    }
 
     extern "C" void set_up_pixel_shader_for_decals(ShaderDecal *shader) noexcept {
         if(!shader || !d3d9_device_caps || !global_d3d9_device || !*global_d3d9_device) {
@@ -110,6 +117,14 @@ namespace Chimera {
             return;
         }
 
+        // The checkpoint decal fix reads Halo's GPU vertex buffer back to the
+        // CPU. Native D3D9 drivers tolerate this path, but it is not safe to
+        // depend on that readback through D3D9On12. Keep all normal decal
+        // rendering fixes enabled and skip only this optional revert cache.
+        if(d3d9on12_requested()) {
+            return;
+        }
+
         void *vertices = nullptr;
         const HRESULT lock_result = IDirect3DVertexBuffer9_Lock(
             *decal_vertex_buffer,
@@ -130,6 +145,12 @@ namespace Chimera {
 
     void restore_decal_vertices() noexcept {
         if(!game_state_globals || !decal_vertex_cache.cache || !decal_vertex_buffer || !*decal_vertex_buffer) {
+            return;
+        }
+
+        // No checkpoint decal cache is produced on D3D9On12, so never attempt
+        // to write that cache back into the translated GPU buffer either.
+        if(d3d9on12_requested()) {
             return;
         }
 
