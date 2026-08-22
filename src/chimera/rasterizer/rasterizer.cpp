@@ -8,6 +8,7 @@
 #include "d3d9_diagnostics.hpp"
 #include "d3d9_runtime_diagnostics.hpp"
 #include "d3d9_model_shader_test.hpp"
+#include "d3d9_model_shader_compat.hpp"
 #include "../chimera.hpp"
 #include "../config/ini.hpp"
 #include "../signature/hook.hpp"
@@ -90,7 +91,7 @@ namespace Chimera {
         create_pixel_shader(decal_multiply, &chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_DECAL_MULTIPLY]);
         create_pixel_shader(decal_multiply2x, &chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_DECAL_MULTIPLY2X]);
         create_pixel_shader(decal_alpha_blend, &chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_DECAL_ALPHA_BLEND]);
-        create_pixel_shader(decal_alpha_madd, &chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_DECAL_ALPHA_MULTIPLY_ADD]);
+        create_pixel_shader(decal_alpha_madd, &chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_DECAL_MULTIPLY_ADD]);
 
     }
 
@@ -143,9 +144,11 @@ namespace Chimera {
         set_up_d3d9_diagnostics();
         set_up_d3d9_runtime_diagnostics();
         set_up_d3d9_model_shader_test();
+        set_up_d3d9_model_shader_compat();
         add_game_start_event(set_up_d3d9_diagnostics);
         add_game_start_event(set_up_d3d9_runtime_diagnostics);
         add_game_start_event(set_up_d3d9_model_shader_test);
+        add_game_start_event(set_up_d3d9_model_shader_compat);
         add_game_exit_event(rasterizer_release_vertex_shaders_3_0);
         add_game_exit_event(rasterizer_release_pixel_shaders, EVENT_PRIORITY_AFTER);
         add_game_start_event(rasterizer_create_pixel_shaders);
