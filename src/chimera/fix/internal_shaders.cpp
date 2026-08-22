@@ -28,6 +28,7 @@ namespace Chimera {
     }
 
     static D3DCAPS9 *d3d9_device_caps = nullptr;
+    static bool internal_d3d9on12_vsh_active = false;
 
     static bool d3d9on12_requested() noexcept {
         auto *backend = get_chimera().get_ini()->get_value("video_mode.d3d_backend");
@@ -36,9 +37,7 @@ namespace Chimera {
     }
 
     bool using_internal_d3d9on12_vertex_shader_collection() noexcept {
-        return get_chimera().feature_present("client_custom_edition")
-            && d3d9on12_requested()
-            && !get_chimera().get_ini()->get_value_bool("debug.use_external_vertex_shader_collection").value_or(false);
+        return internal_d3d9on12_vsh_active;
     }
 
     extern "C" bool effect_load_check_device_caps() {
@@ -47,6 +46,7 @@ namespace Chimera {
 
     void set_up_internal_shaders() noexcept {
         d3d9_device_caps = reinterpret_cast<D3DCAPS9 *>(*reinterpret_cast<std::byte **>(get_chimera().get_signature("d3d9_device_caps_sig").data() + 1));
+
         if(!get_chimera().get_ini()->get_value_bool("debug.use_external_pixel_shader_collection").value_or(false)) {
             static Hook hook;
             // Redirect the effects collection the game tries to load to our patched one.
@@ -66,16 +66,23 @@ namespace Chimera {
             }
         }
 
-        if(!get_chimera().get_ini()->get_value_bool("debug.use_external_vertex_shader_collection").value_or(false)) {
+        const bool use_external_vsh =
+            get_chimera().get_ini()->get_value_bool("debug.use_external_vertex_shader_collection").value_or(false);
+        internal_d3d9on12_vsh_active = false;
+
+        if(!use_external_vsh) {
             // Redirect the VSH collection before Halo creates any vertex shader.
-            // Native D3D9 keeps Chimera's existing internal collection. Custom
-            // Edition on D3D9On12 gets the validated internal hybrid collection,
-            // so MODEL=VS3 and GENERIC_M/PLASMA_M=exact VS2 are effectively the
-            // stock shaders from the first menu draw onward.
+            // Native D3D9 keeps Chimera's normal internal collection. Custom
+            // Edition on D3D9On12 receives the validated stock-like collection:
+            // MODEL family = VS3, GENERIC_M = exact VS2, PLASMA_M = exact VS2.
             static Hook vsh_hook;
             auto *vsh_load_file = get_chimera().get_signature("vsh_collection_load_sig").data();
 
-            if(using_internal_d3d9on12_vertex_shader_collection()) {
+            internal_d3d9on12_vsh_active =
+                get_chimera().feature_present("client_custom_edition")
+                && d3d9on12_requested();
+
+            if(internal_d3d9on12_vsh_active) {
                 patched_vsh_collection_ptr = reinterpret_cast<std::byte *>(&vsh_9on12_collection);
                 patched_vsh_collection_size = vsh_9on12_collection_size;
             }
