@@ -7,6 +7,7 @@
 #include "d3d9_model_shader_compat.hpp"
 #include "d3d9_model_shader_primary_v2.hpp"
 #include "d3d9_model_vertex_input_diag.hpp"
+#include "d3d9_transparent_shader_compat.hpp"
 #include "../chimera.hpp"
 #include "../config/ini.hpp"
 #include "../signature/hook.hpp"
@@ -123,6 +124,10 @@ namespace Chimera {
         return D3D9ModelVertexInputDiag::command(argc, argv);
     }
 
+    bool d3d9_transparent_compat_command(int argc, const char **argv) noexcept {
+        return D3D9TransparentShaderCompat::command(argc, argv);
+    }
+
     void set_up_rasterizer() noexcept {
         global_d3d9_device = reinterpret_cast<IDirect3DDevice9 **>(*reinterpret_cast<std::byte **>(get_chimera().get_signature("model_af_set_sampler_states_sig").data() + 1));
         d3d9_device_caps = reinterpret_cast<D3DCAPS9 *>(*reinterpret_cast<std::byte **>(get_chimera().get_signature("d3d9_device_caps_sig").data() + 1));
@@ -163,8 +168,26 @@ namespace Chimera {
                 );
                 probe_command_registered = true;
             }
+
+            static bool transparent_compat_command_registered = false;
+            if(!transparent_compat_command_registered) {
+                get_chimera().get_commands().emplace_back(
+                    "chimera_d3d9_compat",
+                    "chimera_category_debug",
+                    "client",
+                    "Live D3D9On12 transparent shader compatibility: status/generic_m/dump",
+                    d3d9_transparent_compat_command,
+                    false,
+                    0,
+                    2
+                );
+                transparent_compat_command_registered = true;
+            }
         }
 
+        // Restore any live shader-table replacement before Chimera releases its
+        // VS3 shader objects. This keeps Halo's original shader table intact.
+        add_game_exit_event(D3D9TransparentShaderCompat::on_game_exit, EVENT_PRIORITY_BEFORE);
         add_game_exit_event(rasterizer_release_vertex_shaders_3_0);
         add_game_exit_event(rasterizer_release_pixel_shaders, EVENT_PRIORITY_AFTER);
         add_game_start_event(rasterizer_create_pixel_shaders);
