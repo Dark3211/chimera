@@ -29,6 +29,7 @@ namespace Chimera {
 
     static bool validated_hybrid_auto_enabled = true;
     static bool validated_hybrid_announced = false;
+    static unsigned validated_hybrid_retry_cooldown = 0;
 
     static bool d3d9on12_requested_now() noexcept {
         auto *backend = get_chimera().get_ini()->get_value("video_mode.d3d_backend");
@@ -57,8 +58,64 @@ namespace Chimera {
             || _stricmp(mode, "modern") == 0;
     }
 
+    static bool refresh_hybrid_transparent_baselines() noexcept {
+        using namespace D3D9TransparentShaderCompat;
+        if(!vertex_shaders) {
+            return false;
+        }
+
+        auto *generic_slot = vertex_shaders[VSH_TRANSPARENT_GENERIC_M].shader;
+        auto *plasma_slot = vertex_shaders[VSH_TRANSPARENT_PLASMA_M].shader;
+        if(!generic_slot || !plasma_slot) {
+            return false;
+        }
+
+        // Halo can recreate its shader table on a map transition while the D3D9
+        // device itself remains alive. In that case our AddRef'd stock pointer is
+        // from the previous table generation. Recognize our own installed shader
+        // first; otherwise recapture the current table entry as the new stock
+        // baseline instead of treating it as a foreign/unsafe replacement.
+        if(exact_generic_m && generic_slot == exact_generic_m) {
+            generic_mode = GENERIC_MODE_EXACT_VS2;
+        }
+        else if(legacy_generic_m && generic_slot == legacy_generic_m) {
+            generic_mode = GENERIC_MODE_LEGACY_VS3;
+        }
+        else {
+            if(stock_generic_m != generic_slot) {
+                if(stock_generic_m) {
+                    stock_generic_m->Release();
+                }
+                stock_generic_m = generic_slot;
+                stock_generic_m->AddRef();
+            }
+            generic_mode = GENERIC_MODE_STOCK;
+        }
+
+        if(exact_plasma_m && plasma_slot == exact_plasma_m) {
+            plasma_m_active = true;
+        }
+        else {
+            if(stock_plasma_m != plasma_slot) {
+                if(stock_plasma_m) {
+                    stock_plasma_m->Release();
+                }
+                stock_plasma_m = plasma_slot;
+                stock_plasma_m->AddRef();
+            }
+            plasma_m_active = false;
+        }
+
+        return true;
+    }
+
     static void ensure_validated_hybrid(IDirect3DDevice9 *device) noexcept {
         if(!device || !validated_hybrid_requested()) {
+            return;
+        }
+
+        if(validated_hybrid_retry_cooldown > 0) {
+            validated_hybrid_retry_cooldown--;
             return;
         }
 
@@ -70,26 +127,43 @@ namespace Chimera {
         // both known D3D9On12 spikes in live A/B testing.
         rasterizer_set_modern_model_test(true);
 
-        bool generic_ok = D3D9TransparentShaderCompat::generic_mode
-            == D3D9TransparentShaderCompat::GENERIC_MODE_EXACT_VS2;
+        if(!refresh_hybrid_transparent_baselines()) {
+            validated_hybrid_retry_cooldown = 60;
+            return;
+        }
+
+        using namespace D3D9TransparentShaderCompat;
+        bool generic_ok = exact_generic_m
+            && vertex_shaders[VSH_TRANSPARENT_GENERIC_M].shader == exact_generic_m;
         if(!generic_ok) {
-            generic_ok = D3D9TransparentShaderCompat::enable_generic_m_exact();
+            generic_ok = enable_generic_m_exact();
         }
 
-        bool plasma_ok = D3D9TransparentShaderCompat::plasma_m_active;
+        bool plasma_ok = exact_plasma_m
+            && vertex_shaders[VSH_TRANSPARENT_PLASMA_M].shader == exact_plasma_m;
         if(!plasma_ok) {
-            plasma_ok = D3D9TransparentShaderCompat::enable_plasma_m_exact();
+            plasma_ok = enable_plasma_m_exact();
         }
 
-        if(generic_ok && plasma_ok && !validated_hybrid_announced) {
-            console_output(
-                "D3D9On12 validated hybrid active: MODEL=VS3, GENERIC_M=exact VS2, PLASMA_M=exact VS2."
-            );
-            validated_hybrid_announced = true;
+        if(generic_ok && plasma_ok) {
+            validated_hybrid_retry_cooldown = 0;
+            if(!validated_hybrid_announced) {
+                console_output(
+                    "D3D9On12 validated hybrid active: MODEL=VS3, GENERIC_M=exact VS2, PLASMA_M=exact VS2."
+                );
+                validated_hybrid_announced = true;
+            }
+        }
+        else {
+            // Do not flood the in-game console if the shader table is between
+            // generations for a few frames. Retry at a low rate until stable.
+            validated_hybrid_retry_cooldown = 60;
         }
     }
 
     static void set_up_validated_hybrid() noexcept {
+        validated_hybrid_announced = false;
+        validated_hybrid_retry_cooldown = 0;
         if(global_d3d9_device && *global_d3d9_device) {
             ensure_validated_hybrid(*global_d3d9_device);
         }
@@ -98,6 +172,7 @@ namespace Chimera {
     static void set_validated_hybrid(bool enabled) noexcept {
         validated_hybrid_auto_enabled = enabled;
         validated_hybrid_announced = false;
+        validated_hybrid_retry_cooldown = 0;
 
         if(enabled) {
             set_up_validated_hybrid();
@@ -118,7 +193,7 @@ namespace Chimera {
 
     void rasterizer_set_sampler_state(std::uint16_t sampler, D3DSAMPLERSTATETYPE type, DWORD value) noexcept {
         throw_error(global_d3d9_device, "d3d device missing");
-        IDirect3DDevice9_SetSamplerState(*global_d3d9_device, sampler, type, value);
+        IDirect3DDevice9_SetSamplerState(*global_d3d9_device, state, value);
     }
 
     void rasterizer_create_pixel_shaders() noexcept {
@@ -176,7 +251,7 @@ namespace Chimera {
         create_pixel_shader(decal_multiply, &chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_DECAL_MULTIPLY]);
         create_pixel_shader(decal_multiply2x, &chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_DECAL_MULTIPLY2X]);
         create_pixel_shader(decal_alpha_blend, &chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_DECAL_ALPHA_BLEND]);
-        create_pixel_shader(decal_alpha_madd, &chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_DECAL_ALPHA_MULTIPLY_ADD]);
+        create_pixel_shader(decal_alpha_madd, &chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_DECAL_MULTIPLY_ADD]);
 
     }
 
