@@ -193,7 +193,7 @@ namespace Chimera {
 
     void rasterizer_set_sampler_state(std::uint16_t sampler, D3DSAMPLERSTATETYPE type, DWORD value) noexcept {
         throw_error(global_d3d9_device, "d3d device missing");
-        IDirect3DDevice9_SetSamplerState(*global_d3d9_device, state, value);
+        IDirect3DDevice9_SetSamplerState(*global_d3d9_device, sampler, type, value);
     }
 
     void rasterizer_create_pixel_shaders() noexcept {
@@ -251,7 +251,7 @@ namespace Chimera {
         create_pixel_shader(decal_multiply, &chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_DECAL_MULTIPLY]);
         create_pixel_shader(decal_multiply2x, &chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_DECAL_MULTIPLY2X]);
         create_pixel_shader(decal_alpha_blend, &chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_DECAL_ALPHA_BLEND]);
-        create_pixel_shader(decal_alpha_madd, &chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_DECAL_MULTIPLY_ADD]);
+        create_pixel_shader(decal_alpha_madd, &chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_DECAL_ALPHA_MULTIPLY_ADD]);
 
     }
 
