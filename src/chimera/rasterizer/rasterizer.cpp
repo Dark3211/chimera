@@ -137,18 +137,26 @@ namespace Chimera {
             set_up_environment_transparent_index_buffer_fix();
         }
 
-        // The rasterizer is initialized before Halo has necessarily created its
-        // IDirect3DDevice9. Try immediately, then retry once a map/game starts,
-        // when the device is guaranteed to exist. Helpers are internally safe to
-        // call again after successful installation.
+        auto *model_shader_test = get_chimera().get_ini()->get_value("video_mode.d3d_model_shader_test");
+        const bool model_shader_test_enabled = model_shader_test
+            && model_shader_test[0] != '\0'
+            && _stricmp(model_shader_test, "off") != 0;
+
+        // The diagnostic and compatibility paths both hook SetVertexShader. Never
+        // install both at the same time; the VS2 compatibility path is only armed
+        // when the explicit A/B shader diagnostic is disabled.
         set_up_d3d9_diagnostics();
         set_up_d3d9_runtime_diagnostics();
         set_up_d3d9_model_shader_test();
-        set_up_d3d9_model_shader_compat();
+        if(!model_shader_test_enabled) {
+            set_up_d3d9_model_shader_compat();
+        }
         add_game_start_event(set_up_d3d9_diagnostics);
         add_game_start_event(set_up_d3d9_runtime_diagnostics);
         add_game_start_event(set_up_d3d9_model_shader_test);
-        add_game_start_event(set_up_d3d9_model_shader_compat);
+        if(!model_shader_test_enabled) {
+            add_game_start_event(set_up_d3d9_model_shader_compat);
+        }
         add_game_exit_event(rasterizer_release_vertex_shaders_3_0);
         add_game_exit_event(rasterizer_release_pixel_shaders, EVENT_PRIORITY_AFTER);
         add_game_start_event(rasterizer_create_pixel_shaders);
