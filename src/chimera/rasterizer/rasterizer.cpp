@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 #include <cstring>
+#include <vector>
 
 #include "rasterizer.hpp"
 #include "rasterizer_transparent_geometry.hpp"
@@ -125,7 +126,152 @@ namespace Chimera {
         return D3D9ModelVertexInputDiag::command(argc, argv);
     }
 
+    static bool same_vertex_shader_program(
+        IDirect3DVertexShader9 *first,
+        IDirect3DVertexShader9 *second
+    ) noexcept {
+        if(first == second) {
+            return first != nullptr;
+        }
+        if(!first || !second) {
+            return false;
+        }
+
+        UINT first_size = 0;
+        UINT second_size = 0;
+        if(FAILED(first->GetFunction(nullptr, &first_size))
+            || FAILED(second->GetFunction(nullptr, &second_size))
+            || first_size == 0
+            || first_size != second_size) {
+            return false;
+        }
+
+        std::vector<unsigned char> first_code(first_size);
+        std::vector<unsigned char> second_code(second_size);
+        if(FAILED(first->GetFunction(first_code.data(), &first_size))
+            || FAILED(second->GetFunction(second_code.data(), &second_size))
+            || first_size != second_size) {
+            return false;
+        }
+
+        return std::memcmp(first_code.data(), second_code.data(), first_size) == 0;
+    }
+
+    static bool sync_generic_m_generation(bool report_error = true) noexcept {
+        using namespace D3D9TransparentShaderCompat;
+        if(!vertex_shaders) {
+            return false;
+        }
+
+        IDirect3DVertexShader9 *current = vertex_shaders[VSH_TRANSPARENT_GENERIC_M].shader;
+        if(!current) {
+            return false;
+        }
+
+        if(exact_generic_m && current == exact_generic_m) {
+            generic_mode = GENERIC_MODE_EXACT_VS2;
+            return true;
+        }
+        if(legacy_generic_m && current == legacy_generic_m) {
+            generic_mode = GENERIC_MODE_LEGACY_VS3;
+            return true;
+        }
+
+        if(!stock_generic_m) {
+            stock_generic_m = current;
+            stock_generic_m->AddRef();
+            generic_mode = GENERIC_MODE_STOCK;
+            return true;
+        }
+
+        if(current == stock_generic_m) {
+            generic_mode = GENERIC_MODE_STOCK;
+            return true;
+        }
+
+        // Halo rebuilds the shader table when maps change. Accept a new COM
+        // object only if its bytecode is exactly the same as the previously
+        // captured stock shader. This distinguishes a new stock generation from
+        // an unrelated external replacement and preserves the safety check.
+        if(same_vertex_shader_program(current, stock_generic_m)) {
+            stock_generic_m->Release();
+            stock_generic_m = current;
+            stock_generic_m->AddRef();
+            generic_mode = GENERIC_MODE_STOCK;
+            console_output("D3D9 transparent compat: GENERIC_M stock slot refreshed after map change.");
+            return true;
+        }
+
+        if(report_error) {
+            console_error("D3D9 transparent compat: GENERIC_M slot differs from stock/compat; leaving it untouched.");
+        }
+        return false;
+    }
+
+    static bool sync_plasma_m_generation(bool report_error = true) noexcept {
+        using namespace D3D9TransparentShaderCompat;
+        if(!vertex_shaders) {
+            return false;
+        }
+
+        IDirect3DVertexShader9 *current = vertex_shaders[VSH_TRANSPARENT_PLASMA_M].shader;
+        if(!current) {
+            return false;
+        }
+
+        if(exact_plasma_m && current == exact_plasma_m) {
+            plasma_m_active = true;
+            return true;
+        }
+
+        if(!stock_plasma_m) {
+            stock_plasma_m = current;
+            stock_plasma_m->AddRef();
+            plasma_m_active = false;
+            return true;
+        }
+
+        if(current == stock_plasma_m) {
+            plasma_m_active = false;
+            return true;
+        }
+
+        if(same_vertex_shader_program(current, stock_plasma_m)) {
+            stock_plasma_m->Release();
+            stock_plasma_m = current;
+            stock_plasma_m->AddRef();
+            plasma_m_active = false;
+            console_output("D3D9 transparent compat: PLASMA_M stock slot refreshed after map change.");
+            return true;
+        }
+
+        if(report_error) {
+            console_error("D3D9 transparent compat: PLASMA_M slot differs from stock/compat; leaving it untouched.");
+        }
+        return false;
+    }
+
     bool d3d9_transparent_compat_command(int argc, const char **argv) noexcept {
+        if(argc == 0 || _stricmp(argv[0], "status") == 0) {
+            sync_generic_m_generation(false);
+            sync_plasma_m_generation(false);
+        }
+        else if(_stricmp(argv[0], "generic_m") == 0) {
+            if(!sync_generic_m_generation()) {
+                return false;
+            }
+        }
+        else if(_stricmp(argv[0], "plasma_m") == 0 || _stricmp(argv[0], "plasma") == 0) {
+            if(!sync_plasma_m_generation()) {
+                return false;
+            }
+        }
+        else if(_stricmp(argv[0], "dump") == 0) {
+            if(!sync_generic_m_generation() || !sync_plasma_m_generation()) {
+                return false;
+            }
+        }
+
         return D3D9TransparentShaderCompat::command(argc, argv);
     }
 
@@ -133,6 +279,11 @@ namespace Chimera {
         // Do this only on explicit user request after Halo has entered a map.
         // This is the exact live combination that was validated visually:
         // MODEL family -> VS3 bank, GENERIC_M -> exact VS2, PLASMA_M -> exact VS2.
+        if(!sync_generic_m_generation() || !sync_plasma_m_generation()) {
+            console_error("D3D9 hybrid: transparent shader slots are not in a safe/known state.");
+            return false;
+        }
+
         if(!D3D9ModernShaderBank::model_family_ready()) {
             console_error("D3D9 hybrid: MODEL VS3 family is not ready; inspect chimera_d3d9_modern_build.log.");
             return false;
@@ -155,14 +306,37 @@ namespace Chimera {
     }
 
     static bool d3d9_hybrid_disable() noexcept {
+        const bool generic_known = sync_generic_m_generation();
+        const bool plasma_known = sync_plasma_m_generation();
+
         rasterizer_set_modern_model_test(false);
-        D3D9TransparentShaderCompat::restore_generic_m();
-        D3D9TransparentShaderCompat::restore_plasma_m();
-        console_output("D3D9 hybrid: OFF (restored primary_v2/current fallback path).");
-        return true;
+        bool ok = true;
+        if(generic_known) {
+            ok = D3D9TransparentShaderCompat::restore_generic_m() && ok;
+        }
+        else {
+            ok = false;
+        }
+        if(plasma_known) {
+            ok = D3D9TransparentShaderCompat::restore_plasma_m() && ok;
+        }
+        else {
+            ok = false;
+        }
+
+        if(ok) {
+            console_output("D3D9 hybrid: OFF (restored primary_v2/current fallback path).");
+        }
+        else {
+            console_error("D3D9 hybrid: MODEL fallback restored, but an unknown transparent slot was left untouched.");
+        }
+        return ok;
     }
 
     static void d3d9_hybrid_status() noexcept {
+        sync_generic_m_generation(false);
+        sync_plasma_m_generation(false);
+
         const bool model = rasterizer_modern_model_test_enabled();
         const bool generic = D3D9TransparentShaderCompat::generic_mode
             == D3D9TransparentShaderCompat::GENERIC_MODE_EXACT_VS2;
