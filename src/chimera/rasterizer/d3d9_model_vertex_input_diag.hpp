@@ -24,6 +24,8 @@ namespace Chimera {
         constexpr std::size_t DEVICE_DRAW_PRIMITIVE = 81;
         constexpr std::size_t DEVICE_DRAW_INDEXED_PRIMITIVE = 82;
         constexpr std::size_t MAX_SEEN_DECLARATIONS = 64;
+        constexpr std::size_t MAX_SEEN_SIGNATURES = 4096;
+        constexpr long long HEARTBEAT_FRAME_INTERVAL = 100;
 
         using DrawPrimitiveFunction = HRESULT (STDMETHODCALLTYPE *)(
             IDirect3DDevice9 *, D3DPRIMITIVETYPE, UINT, UINT
@@ -37,6 +39,13 @@ namespace Chimera {
             std::uint32_t id = 0;
         };
 
+        struct SeenSignature {
+            std::uint64_t hash = 0;
+            std::uint32_t id = 0;
+            long long last_log_frame = -1;
+            unsigned long long hits_since_log = 0;
+        };
+
         static DrawPrimitiveFunction original_draw_primitive = nullptr;
         static DrawIndexedPrimitiveFunction original_draw_indexed_primitive = nullptr;
         static IDirect3DDevice9 *installed_device = nullptr;
@@ -48,6 +57,8 @@ namespace Chimera {
         static unsigned long long draw_counter = 0;
         static SeenDeclaration seen_declarations[MAX_SEEN_DECLARATIONS] = {};
         static std::size_t seen_declaration_count = 0;
+        static SeenSignature seen_signatures[MAX_SEEN_SIGNATURES] = {};
+        static std::size_t seen_signature_count = 0;
 
         static bool d3d9on12_requested() noexcept {
             auto *backend = get_chimera().get_ini()->get_value("video_mode.d3d_backend");
@@ -64,6 +75,7 @@ namespace Chimera {
             return value && (
                 _stricmp(value, "log") == 0
                 || _stricmp(value, "trace") == 0
+                || _stricmp(value, "compact") == 0
             );
         }
 
@@ -76,17 +88,23 @@ namespace Chimera {
             if(input_log) {
                 std::fprintf(
                     input_log,
-                    "# D3D9_DRAW_INPUT diagnostic: observational only; captures model/effect/transparent DrawPrimitive and DrawIndexedPrimitive calls.\n"
+                    "# D3D9 compact draw-input diagnostic. Observational only.\n"
+                    "# SIG_DEF = first occurrence of a unique draw-state signature.\n"
+                    "# SIG_HIT = compact heartbeat for an already-known signature (roughly every 100 rasterizer frames).\n"
+                    "# RANGE_BAD = draw whose declared vertex range is outside VB0 capacity.\n"
                 );
                 std::fprintf(
                     input_log,
-                    "# kind frame draw pass PS prim VB0 OFFSET0 STRIDE0 VB0_SIZE VB0_CAP VB1 OFFSET1 STRIDE1 VB1_SIZE IB IB_SIZE IB_FMT DECL DECL_ID DECL_STOCK FVF BASE_VERTEX MIN_VERTEX NUM_VERTICES START_INDEX START_VERTEX PRIMITIVE_COUNT RANGE_FIRST RANGE_LAST RANGE_OK ALPHABLEND SRCBLEND DESTBLEND ZWRITE CULLMODE\n"
+                    "# SIG_DEF id frame draw kind pass PS prim VB0 OFFSET0 STRIDE0 VB0_SIZE VB0_CAP "
+                    "VB1 OFFSET1 STRIDE1 VB1_SIZE IB IB_SIZE IB_FMT DECL DECL_ID DECL_STOCK FVF "
+                    "BASE_VERTEX MIN_VERTEX NUM_VERTICES START_INDEX START_VERTEX PRIMITIVE_COUNT "
+                    "RANGE_FIRST RANGE_LAST RANGE_OK ALPHABLEND SRCBLEND DESTBLEND ZWRITE CULLMODE\n"
                 );
                 std::fflush(input_log);
             }
             else {
                 console_output(
-                    "D3D9 draw-input diagnostic: could not create chimera_d3d9_model_vertex_input.log."
+                    "D3D9 compact draw-input diagnostic: could not create chimera_d3d9_model_vertex_input.log."
                 );
             }
         }
@@ -320,6 +338,52 @@ namespace Chimera {
             }
         }
 
+        static void hash_bytes(std::uint64_t &hash, const void *data, std::size_t size) noexcept {
+            const auto *bytes = static_cast<const unsigned char *>(data);
+            for(std::size_t i = 0; i < size; i++) {
+                hash ^= static_cast<std::uint64_t>(bytes[i]);
+                hash *= 1099511628211ULL;
+            }
+        }
+
+        template<typename T>
+        static void hash_value(std::uint64_t &hash, const T &value) noexcept {
+            hash_bytes(hash, &value, sizeof(value));
+        }
+
+        static void hash_string(std::uint64_t &hash, const char *value) noexcept {
+            if(value) {
+                hash_bytes(hash, value, std::strlen(value));
+            }
+        }
+
+        static SeenSignature *signature_for(std::uint64_t hash, bool &created) noexcept {
+            created = false;
+            for(std::size_t i = 0; i < seen_signature_count; i++) {
+                if(seen_signatures[i].hash == hash) {
+                    return &seen_signatures[i];
+                }
+            }
+
+            if(seen_signature_count >= MAX_SEEN_SIGNATURES) {
+                return nullptr;
+            }
+
+            auto &entry = seen_signatures[seen_signature_count++];
+            entry.hash = hash;
+            entry.id = static_cast<std::uint32_t>(seen_signature_count);
+            entry.last_log_frame = -1;
+            entry.hits_since_log = 0;
+            created = true;
+            return &entry;
+        }
+
+        static void maybe_flush() noexcept {
+            if((++log_flush_counter & 63u) == 0u && input_log) {
+                std::fflush(input_log);
+            }
+        }
+
         static void log_draw(
             IDirect3DDevice9 *device,
             const char *kind,
@@ -408,56 +472,122 @@ namespace Chimera {
                 : -1LL;
             const unsigned long long draw = ++draw_counter;
 
-            std::fprintf(
-                input_log,
-                "D3D9_DRAW_INPUT kind=%s frame=%lld draw=%llu pass=%s PS=%p prim=%u "
-                "VB0=%p OFFSET0=%u STRIDE0=%u VB0_SIZE=%u VB0_CAP=%llu "
-                "VB1=%p OFFSET1=%u STRIDE1=%u VB1_SIZE=%u "
-                "IB=%p IB_SIZE=%u IB_FMT=%u DECL=%p DECL_ID=%lu DECL_STOCK=%d DECL_NAME=%s FVF=0x%08lX "
-                "BASE_VERTEX=%d MIN_VERTEX=%u NUM_VERTICES=%u START_INDEX=%u START_VERTEX=%u PRIMITIVE_COUNT=%u "
-                "RANGE_FIRST=%lld RANGE_LAST=%lld RANGE_OK=%u "
-                "ALPHABLEND=%lu SRCBLEND=%lu DESTBLEND=%lu ZWRITE=%lu CULLMODE=%lu\n",
-                kind,
-                frame,
-                draw,
-                pass_name,
-                static_cast<void *>(pixel_shader),
-                static_cast<unsigned>(primitive_type),
-                static_cast<void *>(vb0),
-                offset0,
-                stride0,
-                vb0_size,
-                vb0_capacity,
-                static_cast<void *>(vb1),
-                offset1,
-                stride1,
-                vb1_size,
-                static_cast<void *>(ib),
-                ib_size,
-                static_cast<unsigned>(ib_format),
-                static_cast<void *>(declaration),
-                static_cast<unsigned long>(decl_id),
-                stock_decl,
-                stock_declaration_name(stock_decl),
-                static_cast<unsigned long>(fvf),
-                base_vertex_index,
-                min_vertex_index,
-                num_vertices,
-                start_index,
-                start_vertex,
-                primitive_count,
-                range_first,
-                range_last,
-                range_ok ? 1U : 0U,
-                static_cast<unsigned long>(alpha_blend),
-                static_cast<unsigned long>(src_blend),
-                static_cast<unsigned long>(dest_blend),
-                static_cast<unsigned long>(zwrite),
-                static_cast<unsigned long>(cull_mode)
-            );
+            std::uint64_t signature_hash = 1469598103934665603ULL;
+            hash_string(signature_hash, kind);
+            hash_string(signature_hash, pass_name);
+            const std::uintptr_t ps_value = reinterpret_cast<std::uintptr_t>(pixel_shader);
+            const std::uintptr_t vb0_value = reinterpret_cast<std::uintptr_t>(vb0);
+            const std::uintptr_t vb1_value = reinterpret_cast<std::uintptr_t>(vb1);
+            const std::uintptr_t ib_value = reinterpret_cast<std::uintptr_t>(ib);
+            const std::uintptr_t decl_value = reinterpret_cast<std::uintptr_t>(declaration);
+            hash_value(signature_hash, ps_value);
+            hash_value(signature_hash, primitive_type);
+            hash_value(signature_hash, vb0_value);
+            hash_value(signature_hash, offset0);
+            hash_value(signature_hash, stride0);
+            hash_value(signature_hash, vb0_size);
+            hash_value(signature_hash, vb1_value);
+            hash_value(signature_hash, offset1);
+            hash_value(signature_hash, stride1);
+            hash_value(signature_hash, vb1_size);
+            hash_value(signature_hash, ib_value);
+            hash_value(signature_hash, ib_size);
+            hash_value(signature_hash, ib_format);
+            hash_value(signature_hash, decl_value);
+            hash_value(signature_hash, decl_id);
+            hash_value(signature_hash, fvf);
+            hash_value(signature_hash, base_vertex_index);
+            hash_value(signature_hash, min_vertex_index);
+            hash_value(signature_hash, num_vertices);
+            hash_value(signature_hash, start_index);
+            hash_value(signature_hash, start_vertex);
+            hash_value(signature_hash, primitive_count);
+            hash_value(signature_hash, alpha_blend);
+            hash_value(signature_hash, src_blend);
+            hash_value(signature_hash, dest_blend);
+            hash_value(signature_hash, zwrite);
+            hash_value(signature_hash, cull_mode);
 
-            if((++log_flush_counter & 63u) == 0u) {
-                std::fflush(input_log);
+            bool created = false;
+            SeenSignature *signature = signature_for(signature_hash, created);
+            if(signature) {
+                signature->hits_since_log++;
+
+                const bool heartbeat_due = !created
+                    && frame >= 0
+                    && (
+                        signature->last_log_frame < 0
+                        || frame < signature->last_log_frame
+                        || frame - signature->last_log_frame >= HEARTBEAT_FRAME_INTERVAL
+                    );
+
+                if(created || !range_ok) {
+                    std::fprintf(
+                        input_log,
+                        "%s id=%lu frame=%lld draw=%llu kind=%s pass=%s PS=%p prim=%u "
+                        "VB0=%p OFFSET0=%u STRIDE0=%u VB0_SIZE=%u VB0_CAP=%llu "
+                        "VB1=%p OFFSET1=%u STRIDE1=%u VB1_SIZE=%u "
+                        "IB=%p IB_SIZE=%u IB_FMT=%u DECL=%p DECL_ID=%lu DECL_STOCK=%d DECL_NAME=%s FVF=0x%08lX "
+                        "BASE_VERTEX=%d MIN_VERTEX=%u NUM_VERTICES=%u START_INDEX=%u START_VERTEX=%u PRIMITIVE_COUNT=%u "
+                        "RANGE_FIRST=%lld RANGE_LAST=%lld RANGE_OK=%u "
+                        "ALPHABLEND=%lu SRCBLEND=%lu DESTBLEND=%lu ZWRITE=%lu CULLMODE=%lu\n",
+                        range_ok ? "SIG_DEF" : "RANGE_BAD",
+                        static_cast<unsigned long>(signature->id),
+                        frame,
+                        draw,
+                        kind,
+                        pass_name,
+                        static_cast<void *>(pixel_shader),
+                        static_cast<unsigned>(primitive_type),
+                        static_cast<void *>(vb0),
+                        offset0,
+                        stride0,
+                        vb0_size,
+                        vb0_capacity,
+                        static_cast<void *>(vb1),
+                        offset1,
+                        stride1,
+                        vb1_size,
+                        static_cast<void *>(ib),
+                        ib_size,
+                        static_cast<unsigned>(ib_format),
+                        static_cast<void *>(declaration),
+                        static_cast<unsigned long>(decl_id),
+                        stock_decl,
+                        stock_declaration_name(stock_decl),
+                        static_cast<unsigned long>(fvf),
+                        base_vertex_index,
+                        min_vertex_index,
+                        num_vertices,
+                        start_index,
+                        start_vertex,
+                        primitive_count,
+                        range_first,
+                        range_last,
+                        range_ok ? 1U : 0U,
+                        static_cast<unsigned long>(alpha_blend),
+                        static_cast<unsigned long>(src_blend),
+                        static_cast<unsigned long>(dest_blend),
+                        static_cast<unsigned long>(zwrite),
+                        static_cast<unsigned long>(cull_mode)
+                    );
+                    signature->last_log_frame = frame;
+                    signature->hits_since_log = 0;
+                    maybe_flush();
+                }
+                else if(heartbeat_due) {
+                    std::fprintf(
+                        input_log,
+                        "SIG_HIT id=%lu frame=%lld draws=%llu pass=%s\n",
+                        static_cast<unsigned long>(signature->id),
+                        frame,
+                        signature->hits_since_log,
+                        pass_name
+                    );
+                    signature->last_log_frame = frame;
+                    signature->hits_since_log = 0;
+                    maybe_flush();
+                }
             }
 
             if(pixel_shader) pixel_shader->Release();
@@ -619,10 +749,10 @@ namespace Chimera {
 
             if(!installed_announced) {
                 console_output(
-                    "D3D9 backend: model/effect/transparent draw-input trace enabled on D3D9On12."
+                    "D3D9 backend: compact model/effect/transparent draw trace enabled on D3D9On12."
                 );
                 console_output(
-                    "D3D9 draw-input trace -> chimera_d3d9_model_vertex_input.log."
+                    "D3D9 compact draw trace -> chimera_d3d9_model_vertex_input.log."
                 );
                 installed_announced = true;
             }
@@ -642,7 +772,7 @@ namespace Chimera {
 
             if(!queued_announced) {
                 console_output(
-                    "D3D9 backend: model/effect/transparent draw-input diagnostic requested; waiting for live D3D9 device."
+                    "D3D9 backend: compact model/effect/transparent diagnostic requested; waiting for live D3D9 device."
                 );
                 queued_announced = true;
             }
