@@ -27,11 +27,50 @@ namespace Chimera {
         function(EVENT_PRIORITY_AFTER); \
         function(EVENT_PRIORITY_FINAL) \
 
+    static int traceback_handler(lua_State *state) noexcept {
+        const char *message = lua_tostring(state, 1);
+        if(message) {
+            luaL_traceback(state, state, message, 1);
+        }
+        else {
+            lua_pushliteral(state, "Lua callback failed with a non-string error object");
+        }
+        return 1;
+    }
+
+    static const char *script_name_from_state(lua_State *state) noexcept {
+        for(std::size_t i = 0; i < scripts.size(); i++) {
+            if(scripts[i] && scripts[i]->state == state) {
+                return scripts[i]->name.c_str();
+            }
+        }
+        return "<unknown>";
+    }
+
     static int pcall(lua_State *state, int args, int result_count) noexcept {
-        auto result = lua_pcall(state, args, result_count, 0);
+        // Install a message handler immediately below the function being called.
+        // Lua otherwise gives Chimera only the final error string after the stack
+        // has unwound, which made errors such as "invalid key to 'next'" impossible
+        // to attribute to a script or source line.
+        const int function_index = lua_gettop(state) - args;
+        if(function_index <= 0) {
+            console_error("Lua callback failed: invalid call stack");
+            return LUA_ERRRUN;
+        }
+
+        lua_pushcfunction(state, traceback_handler);
+        lua_insert(state, function_index);
+
+        auto result = lua_pcall(state, args, result_count, function_index);
         if(result != LUA_OK) {
+            console_error("Lua callback error in [%s]", script_name_from_state(state));
             print_error(state);
         }
+
+        // lua_pcall leaves the message handler below either its results or the
+        // error object. print_error() consumes the latter, so removing this slot
+        // restores the exact stack shape callers expect.
+        lua_remove(state, function_index);
         return result;
     }
 
