@@ -12,6 +12,7 @@
 #include <cstring>
 
 #include "rasterizer_vertex_shaders.hpp"
+#include "d3d9_transparent_shader_compat.hpp"
 #include "../chimera.hpp"
 #include "../config/ini.hpp"
 #include "../event/d3d9_end_scene.hpp"
@@ -36,6 +37,7 @@ namespace Chimera {
         static bool queued_announced = false;
         static bool installed_announced = false;
         static bool end_scene_retry_registered = false;
+        static bool hybrid_bind_routing = false;
         static std::uint32_t hit_mask = 0;
 
         // MODEL / MODEL_FAST / MODEL_FOGGED use Halo's ModelVS path, including
@@ -236,6 +238,14 @@ SHADOW_OUTPUT main_shadow(VS_INPUT IN) {
             return value && (_stricmp(value, "vs2_primary_v2") == 0 || _stricmp(value, "primary_v2") == 0);
         }
 
+        static void set_hybrid_bind_routing(bool enabled) noexcept {
+            hybrid_bind_routing = enabled;
+        }
+
+        static bool hybrid_bind_routing_enabled() noexcept {
+            return hybrid_bind_routing;
+        }
+
         static void release_shaders() noexcept {
             if(model_shader) {
                 model_shader->Release();
@@ -343,40 +353,80 @@ SHADOW_OUTPUT main_shadow(VS_INPUT IN) {
             }
 
             if(enabled() && vertex_shaders && installed_device == device) {
-                // Live A/B path: replace the complete Halo MODEL shader family
-                // with the stock-equivalent VS3 bank. This takes priority over
-                // primary_v2 only while explicitly enabled by the console
-                // command; turning it off restores the already-proven path.
-                if(rasterizer_modern_model_test_enabled()) {
+                bool routed = false;
+
+                // Permanent D3D9On12 hybrid path: leave Halo's vertex_shaders[]
+                // table untouched and only substitute the shader passed to the
+                // device. This is safe across menu/map generations because Halo
+                // always keeps ownership of its original COM shader objects.
+                if(hybrid_bind_routing) {
+                    IDirect3DVertexShader9 *stock_generic_m = vertex_shaders[VSH_TRANSPARENT_GENERIC_M].shader;
+                    IDirect3DVertexShader9 *stock_plasma_m = vertex_shaders[VSH_TRANSPARENT_PLASMA_M].shader;
+
+                    if(stock_generic_m && shader == stock_generic_m) {
+                        if(D3D9TransparentShaderCompat::prepare_exact_shaders()
+                            && D3D9TransparentShaderCompat::exact_generic_m) {
+                            shader = D3D9TransparentShaderCompat::exact_generic_m;
+                            routed = true;
+                        }
+                    }
+                    else if(stock_plasma_m && shader == stock_plasma_m) {
+                        if(D3D9TransparentShaderCompat::prepare_exact_shaders()
+                            && D3D9TransparentShaderCompat::exact_plasma_m) {
+                            shader = D3D9TransparentShaderCompat::exact_plasma_m;
+                            routed = true;
+                        }
+                    }
+
+                    if(!routed) {
+                        for(std::uint16_t i = VSH_MODEL_FOGGED; i <= VSH_MODEL_ZBUFFER; i++) {
+                            IDirect3DVertexShader9 *stock = vertex_shaders[i].shader;
+                            if(stock && shader == stock) {
+                                if(IDirect3DVertexShader9 *modern = rasterizer_get_modern_vertex_shader(i)) {
+                                    shader = modern;
+                                }
+                                routed = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                // Keep the old MODEL-only switch for diagnostics. It does not
+                // touch GENERIC_M or PLASMA_M unless full hybrid routing is on.
+                else if(rasterizer_modern_model_test_enabled()) {
                     for(std::uint16_t i = VSH_MODEL_FOGGED; i <= VSH_MODEL_ZBUFFER; i++) {
                         IDirect3DVertexShader9 *stock = vertex_shaders[i].shader;
                         if(stock && shader == stock) {
                             if(IDirect3DVertexShader9 *modern = rasterizer_get_modern_vertex_shader(i)) {
                                 shader = modern;
                             }
+                            routed = true;
                             break;
                         }
                     }
                 }
-                else if(vertex_shaders[VSH_MODEL_FOGGED].shader && shader == vertex_shaders[VSH_MODEL_FOGGED].shader) {
-                    announce_hit(1u << 0, "VSH_MODEL_FOGGED");
-                    shader = fogged_shader;
-                }
-                else if(vertex_shaders[VSH_MODEL].shader && shader == vertex_shaders[VSH_MODEL].shader) {
-                    announce_hit(1u << 1, "VSH_MODEL");
-                    shader = model_shader;
-                }
-                else if(vertex_shaders[VSH_MODEL_FAST].shader && shader == vertex_shaders[VSH_MODEL_FAST].shader) {
-                    announce_hit(1u << 2, "VSH_MODEL_FAST");
-                    shader = model_shader;
-                }
-                else if(vertex_shaders[VSH_MODEL_ACTIVE_CAMOUFLAGE].shader && shader == vertex_shaders[VSH_MODEL_ACTIVE_CAMOUFLAGE].shader) {
-                    announce_hit(1u << 3, "VSH_MODEL_ACTIVE_CAMOUFLAGE");
-                    shader = active_camo_shader;
-                }
-                else if(vertex_shaders[VSH_MODEL_SHADOW].shader && shader == vertex_shaders[VSH_MODEL_SHADOW].shader) {
-                    announce_hit(1u << 4, "VSH_MODEL_SHADOW");
-                    shader = shadow_shader;
+
+                if(!routed) {
+                    if(vertex_shaders[VSH_MODEL_FOGGED].shader && shader == vertex_shaders[VSH_MODEL_FOGGED].shader) {
+                        announce_hit(1u << 0, "VSH_MODEL_FOGGED");
+                        shader = fogged_shader;
+                    }
+                    else if(vertex_shaders[VSH_MODEL].shader && shader == vertex_shaders[VSH_MODEL].shader) {
+                        announce_hit(1u << 1, "VSH_MODEL");
+                        shader = model_shader;
+                    }
+                    else if(vertex_shaders[VSH_MODEL_FAST].shader && shader == vertex_shaders[VSH_MODEL_FAST].shader) {
+                        announce_hit(1u << 2, "VSH_MODEL_FAST");
+                        shader = model_shader;
+                    }
+                    else if(vertex_shaders[VSH_MODEL_ACTIVE_CAMOUFLAGE].shader && shader == vertex_shaders[VSH_MODEL_ACTIVE_CAMOUFLAGE].shader) {
+                        announce_hit(1u << 3, "VSH_MODEL_ACTIVE_CAMOUFLAGE");
+                        shader = active_camo_shader;
+                    }
+                    else if(vertex_shaders[VSH_MODEL_SHADOW].shader && shader == vertex_shaders[VSH_MODEL_SHADOW].shader) {
+                        announce_hit(1u << 4, "VSH_MODEL_SHADOW");
+                        shader = shadow_shader;
+                    }
                 }
             }
 

@@ -17,7 +17,6 @@
 #include "../halo_data/shaders/shader_blob.hpp"
 #include "../output/error_box.hpp"
 #include "../event/game_loop.hpp"
-#include "../event/d3d9_end_scene.hpp"
 
 
 namespace Chimera {
@@ -28,25 +27,15 @@ namespace Chimera {
 
     IDirect3DPixelShader9 *chimera_pixel_shaders[NUMBER_OF_CHIMERA_PIXEL_SHADERS] = { nullptr };
 
-    // Never touch Halo's shader table during Chimera/D3D startup. Instead, arm
-    // the validated hybrid at game_start and install it only after a few rendered
-    // frames of the newly loaded map. This preserves the stable startup path that
-    // was validated after the earlier eager-startup experiment crashed Halo.
-    static bool d3d9_hybrid_auto_pending = false;
-    static unsigned d3d9_hybrid_auto_wait_frames = 0;
-    static unsigned d3d9_hybrid_auto_retry_frames = 0;
-    static constexpr unsigned D3D9_HYBRID_AUTO_STABLE_FRAMES = 3;
-    static constexpr unsigned D3D9_HYBRID_AUTO_RETRY_FRAMES = 30;
-
-    static bool d3d9_hybrid_auto_requested() noexcept {
+    static bool d3d9_hybrid_default_requested() noexcept {
         auto *backend = get_chimera().get_ini()->get_value("video_mode.d3d_backend");
         if(!backend
             || (_stricmp(backend, "9on12") != 0 && _stricmp(backend, "d3d9on12") != 0)) {
             return false;
         }
 
-        // Hybrid is the D3D9On12 default. Keep explicit escape hatches so the
-        // proven primary_v2/stock path remains available without reverting code.
+        // Bind-time hybrid routing is the D3D9On12 default. These values retain
+        // a reversible escape hatch without changing Halo's stock shader table.
         auto *mode = get_chimera().get_ini()->get_value("video_mode.d3d_shader_backend");
         if(!mode || !*mode) {
             return true;
@@ -309,58 +298,55 @@ namespace Chimera {
     }
 
     static bool d3d9_hybrid_enable() noexcept {
-        // Exact live combination validated in-game:
-        // MODEL family -> VS3 bank, GENERIC_M -> exact VS2, PLASMA_M -> exact VS2.
-        if(!sync_generic_m_generation() || !sync_plasma_m_generation()) {
-            console_error("D3D9 hybrid: transparent shader slots are not in a safe/known state.");
-            return false;
+        // Do not replace Halo's stock vertex_shaders[] entries. Build the
+        // validated alternatives, then let SetVertexShader route each stock
+        // object to the correct D3D9On12 shader at bind time.
+        sync_generic_m_generation(false);
+        sync_plasma_m_generation(false);
+
+        if(D3D9TransparentShaderCompat::generic_mode != D3D9TransparentShaderCompat::GENERIC_MODE_STOCK) {
+            D3D9TransparentShaderCompat::restore_generic_m();
+        }
+        if(D3D9TransparentShaderCompat::plasma_m_active) {
+            D3D9TransparentShaderCompat::restore_plasma_m();
         }
 
         if(!D3D9ModernShaderBank::model_family_ready()) {
             console_error("D3D9 hybrid: MODEL VS3 family is not ready; inspect chimera_d3d9_modern_build.log.");
             return false;
         }
-
-        if(!D3D9TransparentShaderCompat::enable_generic_m_exact()) {
-            console_error("D3D9 hybrid: could not enable GENERIC_M exact VS2.");
+        if(!D3D9TransparentShaderCompat::prepare_exact_shaders()) {
+            console_error("D3D9 hybrid: exact GENERIC_M/PLASMA_M VS2 shaders are not ready.");
             return false;
         }
 
-        if(!D3D9TransparentShaderCompat::enable_plasma_m_exact()) {
-            D3D9TransparentShaderCompat::restore_generic_m();
-            console_error("D3D9 hybrid: could not enable PLASMA_M exact VS2; GENERIC_M restored.");
-            return false;
-        }
-
+        D3D9ModelShaderPrimaryV2::set_hybrid_bind_routing(true);
         rasterizer_set_modern_model_test(true);
-        console_output("D3D9 hybrid: ON (MODEL=VS3, GENERIC_M=exact VS2, PLASMA_M=exact VS2).");
+        console_output("D3D9 hybrid: ON (bind routing; MODEL=VS3, GENERIC_M=exact VS2, PLASMA_M=exact VS2; stock table untouched).");
         return true;
     }
 
     static bool d3d9_hybrid_disable() noexcept {
-        const bool generic_known = sync_generic_m_generation();
-        const bool plasma_known = sync_plasma_m_generation();
-
+        D3D9ModelShaderPrimaryV2::set_hybrid_bind_routing(false);
         rasterizer_set_modern_model_test(false);
+
+        // Also clean up a direct diagnostic replacement if one was enabled
+        // manually through chimera_d3d9_compat.
+        sync_generic_m_generation(false);
+        sync_plasma_m_generation(false);
         bool ok = true;
-        if(generic_known) {
+        if(D3D9TransparentShaderCompat::generic_mode != D3D9TransparentShaderCompat::GENERIC_MODE_STOCK) {
             ok = D3D9TransparentShaderCompat::restore_generic_m() && ok;
         }
-        else {
-            ok = false;
-        }
-        if(plasma_known) {
+        if(D3D9TransparentShaderCompat::plasma_m_active) {
             ok = D3D9TransparentShaderCompat::restore_plasma_m() && ok;
-        }
-        else {
-            ok = false;
         }
 
         if(ok) {
-            console_output("D3D9 hybrid: OFF (restored primary_v2/current fallback path).");
+            console_output("D3D9 hybrid: OFF (bind routing disabled; primary_v2/current fallback path active).");
         }
         else {
-            console_error("D3D9 hybrid: MODEL fallback restored, but an unknown transparent slot was left untouched.");
+            console_error("D3D9 hybrid: bind routing disabled, but an unknown diagnostic slot was left untouched.");
         }
         return ok;
     }
@@ -369,72 +355,19 @@ namespace Chimera {
         sync_generic_m_generation(false);
         sync_plasma_m_generation(false);
 
-        const bool model = rasterizer_modern_model_test_enabled();
-        const bool generic = D3D9TransparentShaderCompat::generic_mode
-            == D3D9TransparentShaderCompat::GENERIC_MODE_EXACT_VS2;
-        const bool plasma = D3D9TransparentShaderCompat::plasma_m_active;
+        const bool bind_route = D3D9ModelShaderPrimaryV2::hybrid_bind_routing_enabled();
+        const bool model = bind_route || rasterizer_modern_model_test_enabled();
+        const bool generic = bind_route
+            || D3D9TransparentShaderCompat::generic_mode == D3D9TransparentShaderCompat::GENERIC_MODE_EXACT_VS2;
+        const bool plasma = bind_route || D3D9TransparentShaderCompat::plasma_m_active;
         console_output(
-            "D3D9 hybrid status: MODEL=%s GENERIC_M=%s PLASMA_M=%s AUTO=%s%s",
+            "D3D9 hybrid status: MODEL=%s GENERIC_M=%s PLASMA_M=%s BIND_ROUTE=%s DEFAULT=%s",
             model ? "VS3" : "fallback",
             generic ? "exact-vs2" : "stock/other",
             plasma ? "exact-vs2" : "stock",
-            d3d9_hybrid_auto_requested() ? "ON" : "OFF",
-            d3d9_hybrid_auto_pending ? " (pending)" : ""
+            bind_route ? "ON" : "OFF",
+            d3d9_hybrid_default_requested() ? "ON" : "OFF"
         );
-    }
-
-    static void schedule_d3d9_hybrid_auto() noexcept {
-        // The previous map may have left the MODEL test flag set while Halo is
-        // rebuilding its shader table. Keep the new map on the proven fallback
-        // for its first few frames, then install the validated complete trio.
-        rasterizer_set_modern_model_test(false);
-        d3d9_hybrid_auto_pending = d3d9_hybrid_auto_requested();
-        d3d9_hybrid_auto_wait_frames = D3D9_HYBRID_AUTO_STABLE_FRAMES;
-        d3d9_hybrid_auto_retry_frames = 0;
-    }
-
-    static void reset_d3d9_hybrid_auto() noexcept {
-        d3d9_hybrid_auto_pending = false;
-        d3d9_hybrid_auto_wait_frames = 0;
-        d3d9_hybrid_auto_retry_frames = 0;
-        rasterizer_set_modern_model_test(false);
-    }
-
-    static void d3d9_hybrid_auto_end_scene(IDirect3DDevice9 *device) noexcept {
-        if(!d3d9_hybrid_auto_pending || !d3d9_hybrid_auto_requested()) {
-            return;
-        }
-        if(!device || !global_d3d9_device || !*global_d3d9_device || device != *global_d3d9_device) {
-            return;
-        }
-
-        if(d3d9_hybrid_auto_wait_frames > 0) {
-            d3d9_hybrid_auto_wait_frames--;
-            return;
-        }
-        if(d3d9_hybrid_auto_retry_frames > 0) {
-            d3d9_hybrid_auto_retry_frames--;
-            return;
-        }
-
-        // Probe readiness silently. This callback may land between Halo's shader
-        // table generations during a transition, so a temporary mismatch is a
-        // reason to wait, not an in-game error flood.
-        if(!vertex_shaders
-            || !sync_generic_m_generation(false)
-            || !sync_plasma_m_generation(false)
-            || !D3D9ModernShaderBank::model_family_ready()) {
-            d3d9_hybrid_auto_retry_frames = D3D9_HYBRID_AUTO_RETRY_FRAMES;
-            return;
-        }
-
-        if(d3d9_hybrid_enable()) {
-            d3d9_hybrid_auto_pending = false;
-            console_output("D3D9 hybrid auto: active for current map.");
-        }
-        else {
-            d3d9_hybrid_auto_retry_frames = D3D9_HYBRID_AUTO_RETRY_FRAMES;
-        }
     }
 
     bool d3d9_modern_shader_command(int argc, const char **argv) noexcept {
@@ -444,16 +377,9 @@ namespace Chimera {
                 return true;
             }
             if(_stricmp(argv[1], "on") == 0) {
-                const bool result = d3d9_hybrid_enable();
-                if(result) {
-                    d3d9_hybrid_auto_pending = false;
-                }
-                return result;
+                return d3d9_hybrid_enable();
             }
             if(_stricmp(argv[1], "off") == 0) {
-                // Manual OFF remains off for the current map. The next game_start
-                // will arm the automatic validated pipeline again.
-                d3d9_hybrid_auto_pending = false;
                 return d3d9_hybrid_disable();
             }
             console_error("D3D9 modern bank: use hybrid on|off|status.");
@@ -486,11 +412,15 @@ namespace Chimera {
         add_game_start_event(set_up_d3d9_model_vertex_input_diag);
 
         if(d3d9on12_requested) {
-            // Arm only from game_start. Merely registering the EndScene callback
-            // at startup is harmless because it is dormant until a map starts.
-            add_game_start_event(schedule_d3d9_hybrid_auto, EVENT_PRIORITY_AFTER);
-            add_game_exit_event(reset_d3d9_hybrid_auto, EVENT_PRIORITY_BEFORE);
-            add_d3d9_end_scene_event(d3d9_hybrid_auto_end_scene);
+            // Enable the validated hybrid before the first render call. Unlike
+            // the old startup experiment this does not write vertex_shaders[];
+            // SetVertexShader performs a temporary bind-time substitution only.
+            const bool startup_hybrid = d3d9_hybrid_default_requested();
+            D3D9ModelShaderPrimaryV2::set_hybrid_bind_routing(startup_hybrid);
+            rasterizer_set_modern_model_test(startup_hybrid);
+            if(startup_hybrid) {
+                console_output("D3D9 hybrid: startup bind routing armed (stock shader table untouched).");
+            }
 
             static bool probe_command_registered = false;
             if(!probe_command_registered) {
@@ -538,9 +468,9 @@ namespace Chimera {
             }
         }
 
-        // Restore any live shader-table replacement before Chimera releases its
-        // VS3 shader objects. reset_d3d9_hybrid_auto is registered above with
-        // BEFORE priority so MODEL routing is already disabled at this point.
+        // Exact/modern shader objects may be recreated between Halo game loops,
+        // but bind routing stays armed. The first subsequent stock bind rebuilds
+        // any released candidate before forwarding it to the device.
         add_game_exit_event(D3D9TransparentShaderCompat::on_game_exit, EVENT_PRIORITY_BEFORE);
         add_game_exit_event(rasterizer_release_vertex_shaders_3_0);
         add_game_exit_event(rasterizer_release_pixel_shaders, EVENT_PRIORITY_AFTER);
