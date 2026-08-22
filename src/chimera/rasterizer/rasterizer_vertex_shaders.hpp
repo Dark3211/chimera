@@ -6,6 +6,8 @@
 #include <windows.h>
 #include <d3dcompiler.h>
 
+#include <cstring>
+
 #include "rasterizer.hpp"
 #include "../halo_data/shader_defs.hpp"
 
@@ -57,9 +59,13 @@ namespace Chimera {
                     continue;
                 }
 
-                auto *address = GetProcAddress(module, "D3DAssemble");
+                FARPROC address = GetProcAddress(module, "D3DAssemble");
                 if(address) {
-                    return reinterpret_cast<D3DAssembleFunction>(address);
+                    static_assert(sizeof(D3DAssembleFunction) == sizeof(FARPROC),
+                        "Windows function pointers must have matching sizes");
+                    D3DAssembleFunction typed_address = nullptr;
+                    std::memcpy(&typed_address, &address, sizeof(typed_address));
+                    return typed_address;
                 }
             }
             return nullptr;
