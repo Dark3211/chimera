@@ -55,27 +55,29 @@ namespace Chimera {
             effect_shader_permutation_index += 6;
         }
 
-        switch(shader->effect.framebuffer_blend_function) {
-            case SHADER_FRAMEBUFFER_BLEND_FUNCTION_ALPHA_BLEND:
-                effect_shader_permutation_index += 2;
-                break;
-            case SHADER_FRAMEBUFFER_BLEND_FUNCTION_MULTIPLY:
-            case SHADER_FRAMEBUFFER_BLEND_FUNCTION_MIN:
-                effect_shader_permutation_index += 4;
-                break;
-            case SHADER_FRAMEBUFFER_BLEND_FUNCTION_DOUBLE_MULTIPLY:
-                effect_shader_permutation_index += 3;
-                break;
-            case SHADER_FRAMEBUFFER_BLEND_FUNCTION_ADD:
-            case SHADER_FRAMEBUFFER_BLEND_FUNCTION_REVERSE_SUBTRACT:
-            case SHADER_FRAMEBUFFER_BLEND_FUNCTION_MAX:
-                effect_shader_permutation_index += 1;
-                break;
-            case SHADER_FRAMEBUFFER_BLEND_FUNCTION_ALPHA_MULTIPLY_ADD:
-                effect_shader_permutation_index += 5;
-                break;
-            default:
-                break;
+        if(!TEST_FLAG(group->geometry_flags, RASTERIZER_GEOMETRY_FLAGS_NO_FOG_BIT)) {
+            switch(shader->effect.framebuffer_blend_function) {
+                case SHADER_FRAMEBUFFER_BLEND_FUNCTION_ALPHA_BLEND:
+                    effect_shader_permutation_index += 2;
+                    break;
+                case SHADER_FRAMEBUFFER_BLEND_FUNCTION_MULTIPLY:
+                case SHADER_FRAMEBUFFER_BLEND_FUNCTION_MIN:
+                    effect_shader_permutation_index += 4;
+                    break;
+                case SHADER_FRAMEBUFFER_BLEND_FUNCTION_DOUBLE_MULTIPLY:
+                    effect_shader_permutation_index += 3;
+                    break;
+                case SHADER_FRAMEBUFFER_BLEND_FUNCTION_ADD:
+                case SHADER_FRAMEBUFFER_BLEND_FUNCTION_REVERSE_SUBTRACT:
+                case SHADER_FRAMEBUFFER_BLEND_FUNCTION_MAX:
+                    effect_shader_permutation_index += 1;
+                    break;
+                case SHADER_FRAMEBUFFER_BLEND_FUNCTION_ALPHA_MULTIPLY_ADD:
+                    effect_shader_permutation_index += 5;
+                    break;
+                default:
+                    break;
+            }
         }
 
         // +1 on retail/demo
