@@ -130,13 +130,20 @@ namespace Chimera {
         auto &data = camera_data();
         data.position = current_tick->data.position;
         if(rollback) {
-            std::copy(current_tick->data.orientation, current_tick->data.orientation + 1, data.orientation);
+            // Both camera orientation vectors are interpolated above, so both must be
+            // restored after rendering. Restoring only the first vector contaminates
+            // the next tick's camera basis and can destabilize frustum culling at high FPS.
+            std::copy(current_tick->data.orientation, current_tick->data.orientation + 2, data.orientation);
             rollback = false;
         }
     }
 
     void interpolate_camera_clear() noexcept {
         skip = true;
+        rollback = false;
+        tick_passed = false;
+        current_tick = camera_buffers + 0;
+        previous_tick = camera_buffers + 1;
         std::memset(camera_buffers, 0, sizeof(camera_buffers));
     }
 

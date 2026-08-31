@@ -22,7 +22,7 @@ namespace Chimera {
         if(player_id.is_null()) {
             return nullptr;
         }
-        if(player_id.index.index >= this->current_size) {
+        if(!this->first_element || player_id.index.index >= this->current_size) {
             return nullptr;
         }
         auto &player = this->first_element[player_id.index.index];
@@ -56,10 +56,7 @@ namespace Chimera {
     }
 
     PlayerTable &PlayerTable::get_player_table() noexcept {
-        static PlayerTable *table = nullptr;
-        if(!table) {
-            table = *reinterpret_cast<PlayerTable **>(*reinterpret_cast<std::byte **>(get_chimera().get_signature("player_table_sig").data() + 1));
-        }
+        static auto *table = *reinterpret_cast<PlayerTable **>(*reinterpret_cast<std::byte **>(get_chimera().get_signature("player_table_sig").data() + 1));
         return *table;
     }
 }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 #include <filesystem>
+#include <cstdint>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -40,6 +41,10 @@ namespace Chimera {
     static void load_lua_script(const char *script_name, const char *lua_script_data, size_t lua_script_data_size, bool sandbox, bool global) noexcept {
         // Create a new state for this script
         auto *state = luaL_newstate();
+        if(!state) {
+            console_error("Unable to create Lua state for script %s", script_name ? script_name : "<unknown>");
+            return;
+        }
 
         luaL_openlibs(state);
 
@@ -97,7 +102,14 @@ namespace Chimera {
         lua_pushstring(state, CHIMERA_VERSION_STRING);
         lua_setglobal(state, "full_build");
 
-        scripts.push_back(std::make_unique<LuaScript>(state, script_name, global, sandbox));
+        try {
+            scripts.push_back(std::make_unique<LuaScript>(state, script_name, global, sandbox));
+        }
+        catch(...) {
+            console_error("Unable to allocate Lua script state for %s", script_name ? script_name : "<unknown>");
+            lua_close(state);
+            return;
+        }
 
         // Load script into Lua state
         auto script_load_result = luaL_loadbuffer(state, lua_script_data, lua_script_data_size, script_name);
@@ -154,23 +166,33 @@ namespace Chimera {
         auto &map_header = get_map_header();
         auto lua_directory = get_chimera().get_path() / "lua";
         auto script_path = lua_directory / "scripts" / "map" / (std::string(map_header.name) + ".lua");
-        if(fs::exists(script_path)) {
+        std::error_code filesystem_error;
+        if(fs::is_regular_file(script_path, filesystem_error) && !filesystem_error) {
             auto script = read_script_file(script_path);
             if(!script.empty()) {
                 auto script_name = script_path.filename().string();
                 load_lua_script(script_name.c_str(), script.c_str(), script.size(), false, false);
             }
         }
-        // Load script embbended in tag data if allowed. We do not support this on Halo Trial.
+        // Load script embedded in tag data if allowed. We do not support this on Halo Trial.
         else if((global_fix_flags.embedded_lua || get_chimera().get_ini()->get_value_bool("memory.load_embedded_lua").value_or(false)) && game_engine() != GameEngine::GAME_ENGINE_DEMO) {
             auto *script = reinterpret_cast<const char *>(map_header.lua_script_data);
             auto script_size = map_header.lua_script_size;
             if(script && script_size) {
-                // Check that the TNT is where we expect it to be.
+                // Validate the script using integer offsets to avoid overflowing pointer arithmetic.
                 auto &tag_data_header = get_tag_data_header();
-                auto *tag_data_address = reinterpret_cast<const char *>(&tag_data_header);
-                auto *tag_data_address_end = tag_data_address + (64 * 1024 * 1024);
-                if (script >= tag_data_address && script + script_size < tag_data_address_end) {
+                constexpr std::uintptr_t MAXIMUM_TAG_DATA_SIZE = 64u * 1024u * 1024u;
+                auto tag_data_address = reinterpret_cast<std::uintptr_t>(&tag_data_header);
+                auto script_address = reinterpret_cast<std::uintptr_t>(script);
+
+                bool valid_script_location = false;
+                if(script_address >= tag_data_address) {
+                    auto script_offset = script_address - tag_data_address;
+                    valid_script_location = script_offset <= MAXIMUM_TAG_DATA_SIZE
+                                         && static_cast<std::uintptr_t>(script_size) <= MAXIMUM_TAG_DATA_SIZE - script_offset;
+                }
+
+                if(valid_script_location) {
                     // Light the fuse.
                     auto map_filename = std::string(map_header.name) + ".map";
                     load_lua_script(map_filename.c_str(), script, script_size, true, false);
@@ -183,16 +205,26 @@ namespace Chimera {
     }
 
     void load_global_scripts() noexcept {
-        auto lua_directory = get_chimera().get_path() / "lua";
-        for(auto &entry : fs::directory_iterator(lua_directory / "scripts" / "global")) {
-            auto file_path = entry.path();
-            if(file_path.extension() == ".lua") {
-                auto script = read_script_file(file_path);
-                if(!script.empty()) {
-                    auto script_name = file_path.filename().string();
-                    load_lua_script(script_name.c_str(), script.c_str(), script.size(), false, true);
+        auto global_script_directory = get_chimera().get_path() / "lua" / "scripts" / "global";
+        std::error_code filesystem_error;
+
+        fs::directory_iterator iterator(global_script_directory, filesystem_error);
+        fs::directory_iterator end;
+        while(!filesystem_error && iterator != end) {
+            const auto &entry = *iterator;
+            std::error_code entry_error;
+            if(entry.is_regular_file(entry_error) && !entry_error) {
+                auto file_path = entry.path();
+                if(file_path.extension() == ".lua") {
+                    auto script = read_script_file(file_path);
+                    if(!script.empty()) {
+                        auto script_name = file_path.filename().string();
+                        load_lua_script(script_name.c_str(), script.c_str(), script.size(), false, true);
+                    }
                 }
             }
+
+            iterator.increment(filesystem_error);
         }
     }
 
@@ -212,19 +244,31 @@ namespace Chimera {
     }
 
     void print_error(lua_State *state) noexcept {
-        std::string error = lua_tostring(state, -1);
-        std::stringstream ss(error);
-        std::string line;
-        while(std::getline(ss, line, '\n')) {
-            console_error(line.c_str());
+        if(!state) {
+            return;
         }
-        lua_pop(state, 1);
+
+        const char *error_message = lua_tostring(state, -1);
+        if(error_message) {
+            std::stringstream ss(error_message);
+            std::string line;
+            while(std::getline(ss, line, '\n')) {
+                console_error("%s", line.c_str());
+            }
+        }
+        else {
+            console_error("Lua error: non-string error object");
+        }
+
+        if(lua_gettop(state) > 0) {
+            lua_pop(state, 1);
+        }
     }
 
-    LuaScript::LuaScript(lua_State *state, const char *name, const bool &global, const bool &sandbox) noexcept : state(state), name(name), sandbox(sandbox), global(global) {}
+    LuaScript::LuaScript(lua_State *state, const char *name, const bool &global, const bool &sandbox) : state(state), name(name ? name : ""), sandbox(sandbox), global(global) {}
 
     LuaScript::~LuaScript() noexcept {
-        if(this->loaded) {
+        if(this->loaded && this->state) {
             lua_getglobal(this->state, this->c_unload.callback_function.data());
             if(!lua_isnil(this->state, -1) && lua_pcall(this->state, 0, 0, 0) != LUA_OK) {
                 print_error(this->state);

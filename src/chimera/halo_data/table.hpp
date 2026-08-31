@@ -41,7 +41,7 @@ namespace Chimera {
          * @return       pointer to the element or nullptr if out of bounds
          */
         T *get_element(std::size_t index) {
-            if(index >= this->current_size) {
+            if(!this->first_element || index >= this->current_size) {
                 return nullptr;
             }
             else {

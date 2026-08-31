@@ -33,6 +33,10 @@ namespace Chimera {
     static bool *fog_hack = nullptr;
 
     extern "C" void set_up_pixel_shader_for_decals(ShaderDecal *shader) noexcept {
+        if(!shader || !d3d9_device_caps || !global_d3d9_device || !*global_d3d9_device) {
+            return;
+        }
+
         // If we can, use a ps2.0 pixel shader instead of the fixed function texture blending.
         if(d3d9_device_caps->PixelShaderVersion < 0xffff0200) {
             return;
@@ -60,12 +64,18 @@ namespace Chimera {
                 break;
             case SHADER_FRAMEBUFFER_BLEND_FUNCTION_ALPHA_MULTIPLY_ADD:
                 pixel_shader = chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_DECAL_ALPHA_MULTIPLY_ADD];
-            break;
+                break;
             default:
                 break;
         }
+
+        // If Chimera could not create the replacement pixel shader, leave the
+        // game's existing fixed-function decal path untouched.
+        if(!pixel_shader) {
+            return;
+        }
         
-        ps_constants[3] = *fog_hack ? (1.0f / 255.0f) : 0.0f;
+        ps_constants[3] = fog_hack && *fog_hack ? (1.0f / 255.0f) : 0.0f;
 
         IDirect3DDevice9_SetPixelShader(*global_d3d9_device, pixel_shader);
         IDirect3DDevice9_SetPixelShaderConstantF(*global_d3d9_device, 0, ps_constants, 1);
@@ -75,6 +85,9 @@ namespace Chimera {
 
     void flush_vertex_cache(DecalVertexBufferCache *vertex_cache) noexcept {
         static bool initialized = false;
+        if(!vertex_cache || !vertex_cache->cache) {
+            return;
+        }
 
         if(!initialized) {
             memset(vertex_cache->cache, 0, DECAL_VERTEX_BUFFER_SIZE);
@@ -93,21 +106,33 @@ namespace Chimera {
     }
 
     void back_up_decal_vertices() noexcept {
-        if(!can_update_cache) {
+        if(!can_update_cache || !decal_vertex_cache.cache || !decal_vertex_buffer || !*decal_vertex_buffer) {
             return;
         }
 
         void *vertices = nullptr;
-        IDirect3DVertexBuffer9_Lock(*decal_vertex_buffer, 0, DECAL_VERTEX_BUFFER_SIZE, &vertices, D3DLOCK_READONLY);
-        if(vertices) {
-            memcpy(decal_vertex_cache.cache, vertices, DECAL_VERTEX_BUFFER_SIZE);
-            decal_vertex_cache.tick_count = get_tick_count();
-            memcpy(decal_vertex_cache.map_name, get_map_name(), 32);
+        const HRESULT lock_result = IDirect3DVertexBuffer9_Lock(
+            *decal_vertex_buffer,
+            0,
+            DECAL_VERTEX_BUFFER_SIZE,
+            &vertices,
+            D3DLOCK_READONLY
+        );
+        if(SUCCEEDED(lock_result)) {
+            if(vertices) {
+                memcpy(decal_vertex_cache.cache, vertices, DECAL_VERTEX_BUFFER_SIZE);
+                decal_vertex_cache.tick_count = get_tick_count();
+                memcpy(decal_vertex_cache.map_name, get_map_name(), 32);
+            }
+            IDirect3DVertexBuffer9_Unlock(*decal_vertex_buffer);
         }
-        IDirect3DVertexBuffer9_Unlock(*decal_vertex_buffer);
     }
 
     void restore_decal_vertices() noexcept {
+        if(!game_state_globals || !decal_vertex_cache.cache || !decal_vertex_buffer || !*decal_vertex_buffer) {
+            return;
+        }
+
         std::int32_t tick_count = get_tick_count();
         if(game_state_globals->revert_time == tick_count && tick_count > 0) {
             if(strncmp(decal_vertex_cache.map_name, get_map_name(), 32) != 0 || decal_vertex_cache.tick_count != tick_count) {
@@ -115,11 +140,19 @@ namespace Chimera {
                 flush_vertex_cache(&decal_vertex_cache);
             }
             void *vertices = nullptr;
-            IDirect3DVertexBuffer9_Lock(*decal_vertex_buffer, 0, DECAL_VERTEX_BUFFER_SIZE, &vertices, 0);
-            if(vertices) {
-                memcpy(vertices, decal_vertex_cache.cache, DECAL_VERTEX_BUFFER_SIZE);
+            const HRESULT lock_result = IDirect3DVertexBuffer9_Lock(
+                *decal_vertex_buffer,
+                0,
+                DECAL_VERTEX_BUFFER_SIZE,
+                &vertices,
+                0
+            );
+            if(SUCCEEDED(lock_result)) {
+                if(vertices) {
+                    memcpy(vertices, decal_vertex_cache.cache, DECAL_VERTEX_BUFFER_SIZE);
+                }
+                IDirect3DVertexBuffer9_Unlock(*decal_vertex_buffer);
             }
-            IDirect3DVertexBuffer9_Unlock(*decal_vertex_buffer);
         }
     }
 
@@ -138,7 +171,10 @@ namespace Chimera {
     void dispose_vertex_cache() noexcept {
         if(decal_vertex_cache.cache) {
             GlobalFree(decal_vertex_cache.cache);
+            decal_vertex_cache.cache = nullptr;
         }
+        can_update_cache = false;
+        map_loaded = false;
     }
 
     void set_up_decals_fix() noexcept {

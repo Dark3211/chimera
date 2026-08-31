@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+#include <cstdio>
+#include <chrono>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include "bookmark.hpp"
@@ -12,10 +14,12 @@
 #include "../event/connect.hpp"
 #include "../output/output.hpp"
 #include "../halo_data/script.hpp"
+#include "../halo_data/multiplayer.hpp"
 #include "../halo_data/resolution.hpp"
 #include "../localization/localization.hpp"
 #include <mutex>
 #include <thread>
+#include <atomic>
 
 namespace Chimera {
     #define MAX_HISTORY_SIZE 20
@@ -27,56 +31,86 @@ namespace Chimera {
     }
 
     static std::optional<Bookmark> parse_bookmark(const char *line) {
-        Bookmark b = {};
-        std::size_t line_length = std::strlen(line);
-
-        // Get the address
-        std::size_t i;
-        std::string address;
-        std::size_t address_length = 0;
-        for(i = 0; i < sizeof(b.address) - 1 && i < line_length && line[i] != '\r' && line[i] != '\n' && line[i] != ':' && line[i] != ' '; i++, address_length++);
-        if(address_length < 2) {
+        if(!line) {
             return std::nullopt;
         }
-        else if(line[0] == '[' && line[address_length - 1] == ']') {
-            address = std::string(line + 1, address_length - 1);
+
+        Bookmark b = {};
+        std::string input(line);
+        while(!input.empty() && (input.back() == '\r' || input.back() == '\n')) {
+            input.pop_back();
+        }
+        if(input.empty()) {
+            return std::nullopt;
+        }
+
+        std::size_t address_start = 0;
+        std::size_t address_end = 0;
+        if(input.front() == '[') {
+            const auto close = input.find(']');
+            if(close == std::string::npos || close <= 1) {
+                return std::nullopt;
+            }
             b.brackets = true;
+            address_start = 1;
+            address_end = close;
         }
         else {
-            address = std::string(line, address_length);
+            address_start = 0;
+            const auto colon = input.find(':');
+            const auto space = input.find(' ');
+            address_end = colon == std::string::npos || (space != std::string::npos && space < colon)
+                ? (space == std::string::npos ? input.size() : space)
+                : colon;
         }
-        std::strncpy(b.address, address.data(), sizeof(b.address) - 1);
 
-        // Now the port
-        if(line[i++] == ':') {
-            // Increment port_length until we get to the end
-            std::size_t port_length;
-            for(port_length = 0; i < line_length && line[i] != '\r' && line[i] != '\n' && line[i] != ' '; i++, port_length++);
+        if(address_end <= address_start) {
+            return std::nullopt;
+        }
+        const std::string address = input.substr(address_start, address_end - address_start);
+        if(address.size() < 2 || address.size() >= sizeof(b.address)) {
+            return std::nullopt;
+        }
+        std::snprintf(b.address, sizeof(b.address), "%s", address.c_str());
 
-            // Attempt to convert to port
-            try {
-                b.port = static_cast<std::uint16_t>(std::stoi(std::string(line + address_length + 1, port_length)));
+        std::size_t cursor = b.brackets ? address_end + 1 : address_end;
+        if(cursor < input.size() && input[cursor] == ':') {
+            cursor++;
+            const std::size_t port_begin = cursor;
+            while(cursor < input.size() && input[cursor] != ' ') {
+                if(input[cursor] < '0' || input[cursor] > '9') {
+                    return std::nullopt;
+                }
+                cursor++;
             }
-            catch(std::exception &) {
+            if(cursor == port_begin) {
+                return std::nullopt;
+            }
+            try {
+                const unsigned long port = std::stoul(input.substr(port_begin, cursor - port_begin));
+                if(port == 0 || port > 65535UL) {
+                    return std::nullopt;
+                }
+                b.port = static_cast<std::uint16_t>(port);
+            }
+            catch(const std::exception &) {
                 return std::nullopt;
             }
         }
-
-        // Default to 2302 otherwise
         else {
             b.port = 2302;
-            i--;
         }
 
-        // Lastly, the password (if present)
-        if(line[i++] == ' ') {
-            std::size_t s;
-            for(s = 0; s < sizeof(b.password) - 1 && i < line_length && line[i] != '\r' && line[i] != '\n'; i++, s++) {
-                b.password[s] = line[i];
+        while(cursor < input.size() && input[cursor] == ' ') {
+            cursor++;
+        }
+        if(cursor < input.size()) {
+            const auto password = input.substr(cursor);
+            if(password.size() >= sizeof(b.password)) {
+                return std::nullopt;
             }
-            b.password[s] = 0;
+            std::snprintf(b.password, sizeof(b.password), "%s", password.c_str());
         }
-
         return b;
     }
 
@@ -86,7 +120,7 @@ namespace Chimera {
         Bookmark x = {};
         std::snprintf(x.address, sizeof(x.address), "%i.%i.%i.%i", ip_chars[3], ip_chars[2], ip_chars[1], ip_chars[0]);
         x.port = port;
-        std::snprintf(x.password, sizeof(x.password), "%s", password);
+        std::snprintf(x.password, sizeof(x.password), "%s", password ? password : "");
 
         // See if it's already in the history. If so, remove it
         auto history = load_bookmarks_file("history.txt");
@@ -158,52 +192,62 @@ namespace Chimera {
         f.close();
     }
     static std::vector<QueryPacketDone> finished_packets;
-
-    static std::mutex querying;
+    static std::mutex finished_packets_mutex;
+    static std::atomic_bool query_in_progress { false };
 
     QueryPacketDone query_server(const Bookmark &what) {
-        QueryPacketDone finished_packet;
+        QueryPacketDone finished_packet{};
         finished_packet.b = what;
-        struct addrinfo *address;
+        finished_packet.error = QueryPacketDone::Error::TIMED_OUT;
 
-        // Lookup it
         char port[6] = {};
         std::snprintf(port, sizeof(port), "%u", what.port);
-        int q = getaddrinfo(what.address, port, nullptr, &address);
-        if(q != 0) {
+
+        addrinfo hints = {};
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_DGRAM;
+        hints.ai_protocol = IPPROTO_UDP;
+        addrinfo *addresses = nullptr;
+        if(getaddrinfo(what.address, port, &hints, &addresses) != 0) {
             finished_packet.error = QueryPacketDone::Error::FAILED_TO_RESOLVE;
             return finished_packet;
         }
-        auto family = address->ai_family;
-        if(family != AF_INET && family != AF_INET6) {
-            freeaddrinfo(address);
-            finished_packet.error = QueryPacketDone::Error::FAILED_TO_RESOLVE;
-            return finished_packet;
-        }
 
-        // Do the thing
-        struct sockaddr_storage saddr = {};
-        std::size_t saddr_size = address->ai_addrlen;
-
-        // Free it all
-        std::memcpy(&saddr, address->ai_addr, saddr_size);
-        freeaddrinfo(address);
-
-        // Do socket things
-        SOCKET s = socket(family, SOCK_DGRAM, IPPROTO_UDP);
-        DWORD opt = 700;
-        setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char *>(&opt), sizeof(opt));
         static constexpr char PACKET_QUERY[] = "\\query";
-        q = sendto(s, PACKET_QUERY, sizeof(PACKET_QUERY) - 1, 0, reinterpret_cast<sockaddr *>(&saddr), saddr_size);
+        for(addrinfo *address = addresses; address; address = address->ai_next) {
+            if((address->ai_family != AF_INET && address->ai_family != AF_INET6) || address->ai_addrlen > sizeof(sockaddr_storage)) {
+                continue;
+            }
 
-        // Receive things
-        char data[4096] = {};
-        struct sockaddr_storage dev_null;
-        socklen_t l = saddr_size;
-        auto start = std::chrono::steady_clock::now();
-        auto data_received = recvfrom(s, data, sizeof(data) - 2, 0, reinterpret_cast<struct sockaddr *>(&dev_null), &l);
-        auto end = std::chrono::steady_clock::now();
-        if(data_received != SOCKET_ERROR) {
+            SOCKET s = socket(address->ai_family, SOCK_DGRAM, IPPROTO_UDP);
+            if(s == INVALID_SOCKET) {
+                continue;
+            }
+
+            DWORD timeout_ms = 700;
+            if(setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char *>(&timeout_ms), sizeof(timeout_ms)) == SOCKET_ERROR) {
+                closesocket(s);
+                continue;
+            }
+
+            if(sendto(s, PACKET_QUERY, sizeof(PACKET_QUERY) - 1, 0, address->ai_addr, static_cast<int>(address->ai_addrlen)) == SOCKET_ERROR) {
+                closesocket(s);
+                continue;
+            }
+
+            char data[4096] = {};
+            sockaddr_storage response_address = {};
+            int response_length = sizeof(response_address);
+            const auto start = std::chrono::steady_clock::now();
+            const int received = recvfrom(s, data, static_cast<int>(sizeof(data) - 1), 0, reinterpret_cast<sockaddr *>(&response_address), &response_length);
+            const auto end = std::chrono::steady_clock::now();
+            closesocket(s);
+
+            if(received <= 1 || received == SOCKET_ERROR) {
+                continue;
+            }
+
+            data[received] = 0;
             finished_packet.ping = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
             std::pair<std::string, std::string> kv;
             bool key = true;
@@ -216,22 +260,16 @@ namespace Chimera {
                 }
                 if(*c == '\\') {
                     if(key) {
-                        kv.first = std::string(str_start, c - str_start);
+                        kv.first.assign(str_start, c - str_start);
                     }
                     else {
-                        // Strip invalid/whitespace characters from the start. If the string is all invalid, don't strip the last character.
                         for(char *k = str_start; k + 1 < c && *k <= 0x20; k++, str_start++);
-
-                        // And here we go!
-                        kv.second = std::string(str_start, c - str_start);
-
-                        // Next, replace any unknown characters with '?'
-                        for(char &c : kv.second) {
-                            if(c < 0x20) {
-                                c = '?';
+                        kv.second.assign(str_start, c - str_start);
+                        for(char &value : kv.second) {
+                            if(static_cast<unsigned char>(value) < 0x20) {
+                                value = '?';
                             }
                         }
-
                         finished_packet.query_data.insert_or_assign(kv.first, kv.second);
                         kv = {};
                     }
@@ -242,33 +280,51 @@ namespace Chimera {
                     break;
                 }
             }
-
-            // = std::vector<char>(data, data + data_received);
             finished_packet.error = QueryPacketDone::Error::NONE;
+            break;
         }
-        else {
-            finished_packet.error = QueryPacketDone::Error::TIMED_OUT;
-        }
-        closesocket(s);
 
+        freeaddrinfo(addresses);
         return finished_packet;
     }
 
     static void query_list(const std::vector<Bookmark> &bookmarks) {
-        finished_packets.clear();
-
-        for(auto &b : bookmarks) {
-            finished_packets.push_back(query_server(b));
+        std::vector<QueryPacketDone> results;
+        try {
+            results.reserve(bookmarks.size());
+            for(const auto &b : bookmarks) {
+                try {
+                    results.push_back(query_server(b));
+                }
+                catch(...) {
+                    QueryPacketDone failed {};
+                    failed.b = b;
+                    failed.error = QueryPacketDone::Error::TIMED_OUT;
+                    results.push_back(std::move(failed));
+                }
+            }
+        }
+        catch(...) {
+            results.clear();
         }
 
-        querying.unlock();
+        {
+            std::lock_guard lock(finished_packets_mutex);
+            finished_packets = std::move(results);
+        }
+        query_in_progress.store(false, std::memory_order_release);
     }
 
     static void show_list() {
-        if(!querying.try_lock()) {
+        if(query_in_progress.load(std::memory_order_acquire)) {
             return;
         }
-        querying.unlock();
+
+        std::vector<QueryPacketDone> packets;
+        {
+            std::lock_guard lock(finished_packets_mutex);
+            packets.swap(finished_packets);
+        }
 
         // Show the results
         auto &resolution = get_resolution();
@@ -278,7 +334,7 @@ namespace Chimera {
         }
         std::size_t q = 0;
 
-        for(auto &p : finished_packets) {
+        for(auto &p : packets) {
             q++;
             switch(p.error) {
                 case QueryPacketDone::Error::NONE: {
@@ -340,24 +396,40 @@ namespace Chimera {
     }
 
     bool history_list_command(int, const char **) {
-        if(!querying.try_lock()) {
+        bool expected = false;
+        if(!query_in_progress.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
             console_error(localize("chimera_bookmark_list_command_busy"));
             return false;
         }
         console_output(localize("chimera_history_list_command_querying"));
         add_preframe_event(show_list);
-        std::thread(query_list, load_bookmarks_file("history.txt")).detach();
+        try {
+            std::thread(query_list, load_bookmarks_file("history.txt")).detach();
+        }
+        catch(...) {
+            query_in_progress.store(false, std::memory_order_release);
+            remove_preframe_event(show_list);
+            return false;
+        }
         return true;
     }
 
     bool bookmark_list_command(int, const char **) {
-        if(!querying.try_lock()) {
+        bool expected = false;
+        if(!query_in_progress.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
             console_error(localize("chimera_bookmark_list_command_busy"));
             return false;
         }
         console_output(localize("chimera_bookmark_list_command_querying"));
         add_preframe_event(show_list);
-        std::thread(query_list, load_bookmarks_file("bookmark.txt")).detach();
+        try {
+            std::thread(query_list, load_bookmarks_file("bookmark.txt")).detach();
+        }
+        catch(...) {
+            query_in_progress.store(false, std::memory_order_release);
+            remove_preframe_event(show_list);
+            return false;
+        }
         return true;
     }
 
@@ -397,6 +469,7 @@ namespace Chimera {
             auto &bookmark = bookmarks[b];
             if(std::strcmp(bookmark.address, new_bookmark.address) == 0 && bookmark.port == new_bookmark.port) {
                 bookmark = new_bookmark;
+                save_bookmarks_file("bookmark.txt", bookmarks);
                 console_output(localize("chimera_bookmark_add_success"), bookmark.brackets ? "[" : "", bookmark.address, bookmark.brackets ? "]" : "", bookmark.port, b);
                 return true;
             }
@@ -463,10 +536,225 @@ namespace Chimera {
     }
 
     static void join_bookmark(const Bookmark &bookmark) {
+        char escaped_password[sizeof(bookmark.password) * 2] = {};
+        std::size_t escaped_length = 0;
+        for(char c : bookmark.password) {
+            if(!c) {
+                break;
+            }
+            if(c == '\\' || c == '"') {
+                if(escaped_length + 1 >= sizeof(escaped_password)) {
+                    return;
+                }
+                escaped_password[escaped_length++] = '\\';
+            }
+            if(escaped_length + 1 >= sizeof(escaped_password)) {
+                return;
+            }
+            escaped_password[escaped_length++] = c;
+        }
+        escaped_password[escaped_length] = 0;
+
         char connect_command[256];
-        std::snprintf(connect_command, sizeof(connect_command), "connect %s%s%s:%u \"%s\"", bookmark.brackets ? "[" : "", bookmark.address, bookmark.brackets ? "]" : "", bookmark.port, bookmark.password);
+        std::snprintf(connect_command, sizeof(connect_command), "connect \"%s%s%s:%u\" \"%s\"", bookmark.brackets ? "[" : "", bookmark.address, bookmark.brackets ? "]" : "", bookmark.port, escaped_password);
         execute_script(connect_command);
     }
+
+    enum class BookmarkConnectionState {
+        IDLE,
+        CONNECTING,
+        WAITING_TO_DISCONNECT,
+        DISCONNECTING
+    };
+
+    using BookmarkClock = std::chrono::steady_clock;
+
+    static BookmarkConnectionState bookmark_connection_state = BookmarkConnectionState::IDLE;
+    static std::optional<Bookmark> current_bookmark_connection;
+    static std::optional<Bookmark> pending_bookmark_connection;
+    static std::optional<BookmarkClock::time_point> connected_since;
+    static std::optional<BookmarkClock::time_point> disconnected_since;
+    static BookmarkClock::time_point bookmark_state_changed;
+
+    static constexpr auto BOOKMARK_CONNECTED_SETTLE_TIME = std::chrono::milliseconds(2000);
+    static constexpr auto BOOKMARK_DISCONNECTED_SETTLE_TIME = std::chrono::milliseconds(1500);
+    static constexpr auto BOOKMARK_CONNECT_TIMEOUT = std::chrono::seconds(15);
+    static constexpr auto BOOKMARK_DISCONNECT_TIMEOUT = std::chrono::seconds(15);
+
+    static void process_bookmark_connection_state();
+
+    static bool same_bookmark(const Bookmark &a, const Bookmark &b) noexcept {
+        return a.port == b.port
+            && a.brackets == b.brackets
+            && std::strcmp(a.address, b.address) == 0
+            && std::strcmp(a.password, b.password) == 0;
+    }
+
+    static void reset_bookmark_connection_state() noexcept {
+        bookmark_connection_state = BookmarkConnectionState::IDLE;
+        current_bookmark_connection.reset();
+        pending_bookmark_connection.reset();
+        connected_since.reset();
+        disconnected_since.reset();
+        remove_preframe_event(process_bookmark_connection_state);
+    }
+
+    static void begin_bookmark_connection(const Bookmark &bookmark) {
+        current_bookmark_connection = bookmark;
+        bookmark_connection_state = BookmarkConnectionState::CONNECTING;
+        bookmark_state_changed = BookmarkClock::now();
+        connected_since.reset();
+        disconnected_since.reset();
+        join_bookmark(bookmark);
+    }
+
+    static void begin_bookmark_disconnect_wait() {
+        bookmark_connection_state = BookmarkConnectionState::WAITING_TO_DISCONNECT;
+        bookmark_state_changed = BookmarkClock::now();
+        connected_since.reset();
+        disconnected_since.reset();
+    }
+
+    static void process_bookmark_connection_state() {
+        const auto now = BookmarkClock::now();
+        const auto type = server_type();
+
+        switch(bookmark_connection_state) {
+            case BookmarkConnectionState::IDLE:
+                remove_preframe_event(process_bookmark_connection_state);
+                return;
+
+            case BookmarkConnectionState::CONNECTING:
+                if(type != ServerType::SERVER_NONE) {
+                    if(!connected_since.has_value()) {
+                        connected_since = now;
+                        return;
+                    }
+
+                    if(now - *connected_since < BOOKMARK_CONNECTED_SETTLE_TIME) {
+                        return;
+                    }
+
+                    if(pending_bookmark_connection.has_value()) {
+                        if(current_bookmark_connection.has_value()
+                        && same_bookmark(*current_bookmark_connection, *pending_bookmark_connection)) {
+                            pending_bookmark_connection.reset();
+                            reset_bookmark_connection_state();
+                            return;
+                        }
+
+                        execute_script("disconnect");
+                        bookmark_connection_state = BookmarkConnectionState::DISCONNECTING;
+                        bookmark_state_changed = now;
+                        connected_since.reset();
+                        disconnected_since.reset();
+                        return;
+                    }
+
+                    reset_bookmark_connection_state();
+                    return;
+                }
+
+                connected_since.reset();
+
+                // Never launch a second connection automatically after a timeout.
+                // If Halo is still reporting SERVER_NONE, abort the queued request
+                // and require the user to try again. This favors a safe failure over
+                // re-entering Halo's networking state machine.
+                if(now - bookmark_state_changed >= BOOKMARK_CONNECT_TIMEOUT) {
+                    reset_bookmark_connection_state();
+                }
+                return;
+
+            case BookmarkConnectionState::WAITING_TO_DISCONNECT:
+                if(type == ServerType::SERVER_NONE) {
+                    bookmark_connection_state = BookmarkConnectionState::DISCONNECTING;
+                    bookmark_state_changed = now;
+                    disconnected_since = now;
+                    return;
+                }
+
+                // Wait for the current server state to be stable before issuing the
+                // game's normal disconnect command. This avoids disconnecting on the
+                // same frame in which Halo has just completed a connection.
+                if(now - bookmark_state_changed < BOOKMARK_CONNECTED_SETTLE_TIME) {
+                    return;
+                }
+
+                execute_script("disconnect");
+                bookmark_connection_state = BookmarkConnectionState::DISCONNECTING;
+                bookmark_state_changed = now;
+                disconnected_since.reset();
+                return;
+
+            case BookmarkConnectionState::DISCONNECTING:
+                if(type != ServerType::SERVER_NONE) {
+                    disconnected_since.reset();
+
+                    // Do not force another connect if Halo did not finish its normal
+                    // disconnect sequence. Drop the pending switch instead.
+                    if(now - bookmark_state_changed >= BOOKMARK_DISCONNECT_TIMEOUT) {
+                        reset_bookmark_connection_state();
+                    }
+                    return;
+                }
+
+                if(!disconnected_since.has_value()) {
+                    disconnected_since = now;
+                    return;
+                }
+
+                if(now - *disconnected_since < BOOKMARK_DISCONNECTED_SETTLE_TIME) {
+                    return;
+                }
+
+                if(!pending_bookmark_connection.has_value()) {
+                    reset_bookmark_connection_state();
+                    return;
+                }
+
+                {
+                    const Bookmark next = *pending_bookmark_connection;
+                    pending_bookmark_connection.reset();
+                    begin_bookmark_connection(next);
+                }
+                return;
+        }
+    }
+
+    static void request_bookmark_connection(const Bookmark &bookmark) {
+        switch(bookmark_connection_state) {
+            case BookmarkConnectionState::IDLE:
+                add_preframe_event(process_bookmark_connection_state, EVENT_PRIORITY_AFTER);
+
+                if(server_type() == ServerType::SERVER_NONE) {
+                    begin_bookmark_connection(bookmark);
+                }
+                else {
+                    pending_bookmark_connection = bookmark;
+                    begin_bookmark_disconnect_wait();
+                }
+                return;
+
+            case BookmarkConnectionState::CONNECTING:
+                // Repeated requests for the same bookmark while Halo is negotiating
+                // are ignored. A different request is queued; it is not passed to
+                // Halo until the current connection has settled and disconnected.
+                if(current_bookmark_connection.has_value()
+                && same_bookmark(*current_bookmark_connection, bookmark)) {
+                    return;
+                }
+                pending_bookmark_connection = bookmark;
+                return;
+
+            case BookmarkConnectionState::WAITING_TO_DISCONNECT:
+            case BookmarkConnectionState::DISCONNECTING:
+                // The newest requested server wins while a switch is in progress.
+                pending_bookmark_connection = bookmark;
+                return;
+        }
+    }
+
 
     bool bookmark_connect_command(int, const char **argv) {
         auto bookmarks = load_bookmarks_file("bookmark.txt");
@@ -482,7 +770,7 @@ namespace Chimera {
             console_error(localize("chimera_bookmark_error_invalid"));
             return false;
         }
-        join_bookmark(bookmarks[index - 1]);
+        request_bookmark_connection(bookmarks[index - 1]);
         return true;
     }
 
@@ -500,7 +788,7 @@ namespace Chimera {
             console_error(localize("chimera_bookmark_error_invalid"));
             return false;
         }
-        join_bookmark(history[index - 1]);
+        request_bookmark_connection(history[index - 1]);
         return true;
     }
 }

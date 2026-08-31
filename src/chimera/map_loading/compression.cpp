@@ -5,12 +5,15 @@
 #include <filesystem>
 #include <cstring>
 #include <zstd.h>
+#include <memory>
+#include <algorithm>
+#include <limits>
 
 #include "../halo_data/map.hpp"
 #include "compression.hpp"
 
 namespace Chimera {
-    template<typename T> static bool decompress_header(const std::byte *header_input, std::byte *header_output) {
+    template<typename T> static bool decompress_header(const std::byte *header_input, std::byte *header_output, std::size_t &decompressed_size) {
         // Check to see if we can't even fit the header
         auto header_copy = *reinterpret_cast<const T *>(header_input);
         if(!header_copy.is_valid()) {
@@ -45,6 +48,7 @@ namespace Chimera {
         if(invader_compression && header_copy.file_size < sizeof(header_copy)) {
             throw std::exception();
         }
+        decompressed_size = static_cast<std::size_t>(header_copy.file_size);
 
         // Set the file size to either the original decompressed size or 0 (if needed) and the engine to the new thing
         header_copy.file_size = stores_uncompressed_size ? header_copy.file_size : 0;
@@ -88,132 +92,150 @@ namespace Chimera {
          * @param path path to the map file
          */
         void decompress_map_file(const char *input, void *user_data) {
-            // Open the input file
+            if(!input || !*input || !write_callback) {
+                throw std::exception();
+            }
+
             std::FILE *input_file = std::fopen(input, "rb");
             if(!input_file) {
                 throw std::exception();
             }
 
-            // Get the size
-            std::size_t total_size = std::filesystem::file_size(input);
-
-            // Read the input file header
-            MapHeader header_input;
-            if(std::fread(&header_input, sizeof(header_input), 1, input_file) != 1) {
-                std::fclose(input_file);
-                throw std::exception();
-            }
-
-            // Make the output header and write it
-            std::byte header_output[HEADER_SIZE];
             try {
-                if(!decompress_header<MapHeader>(reinterpret_cast<std::byte *>(&header_input), header_output)) {
-                    decompress_header<MapHeaderDemo>(reinterpret_cast<std::byte *>(&header_input), header_output);
+                std::error_code size_error;
+                const auto total_size_raw = std::filesystem::file_size(input, size_error);
+                if(size_error || total_size_raw > std::numeric_limits<std::size_t>::max()) {
+                    throw std::exception();
+                }
+                const std::size_t total_size = static_cast<std::size_t>(total_size_raw);
+                if(total_size < HEADER_SIZE) {
+                    throw std::exception();
+                }
+
+                MapHeader header_input;
+                if(std::fread(&header_input, sizeof(header_input), 1, input_file) != 1) {
+                    throw std::exception();
+                }
+
+                std::byte header_output[HEADER_SIZE];
+                std::size_t expected_output_size = 0;
+                if(!decompress_header<MapHeader>(reinterpret_cast<std::byte *>(&header_input), header_output, expected_output_size)) {
+                    if(!decompress_header<MapHeaderDemo>(reinterpret_cast<std::byte *>(&header_input), header_output, expected_output_size)) {
+                        throw std::exception();
+                    }
+                }
+                if(expected_output_size < HEADER_SIZE) {
+                    throw std::exception();
+                }
+
+                std::size_t total_output_written = 0;
+                auto write_output = [&](const std::byte *data, std::size_t size) {
+                    if(total_output_written > expected_output_size || size > expected_output_size - total_output_written) {
+                        throw std::exception();
+                    }
+                    if(size != 0 && !write_callback(data, size, user_data)) {
+                        throw std::exception();
+                    }
+                    total_output_written += size;
+                };
+                write_output(header_output, sizeof(header_output));
+
+                ZSTD_DStream *raw_stream = ZSTD_createDStream();
+                if(!raw_stream) {
+                    throw std::exception();
+                }
+                std::unique_ptr<ZSTD_DStream, decltype(&ZSTD_freeDStream)> decompression_stream(raw_stream, &ZSTD_freeDStream);
+                const std::size_t init = ZSTD_initDStream(decompression_stream.get());
+                if(ZSTD_isError(init) || init == 0) {
+                                        throw std::exception();
+                }
+
+                std::vector<std::byte> input_data(ZSTD_DStreamInSize());
+                std::vector<std::byte> output_data(ZSTD_DStreamOutSize());
+                std::size_t total_read = HEADER_SIZE;
+                std::size_t input_pos = 0;
+                std::size_t input_size = 0;
+                bool stream_finished = false;
+
+                while(!stream_finished) {
+                    if(input_pos == input_size) {
+                        if(total_read >= total_size) {
+                            break;
+                        }
+                        const std::size_t to_read = std::min(input_data.size(), total_size - total_read);
+                        if(std::fread(input_data.data(), 1, to_read, input_file) != to_read) {
+                                                        throw std::exception();
+                        }
+                        total_read += to_read;
+                        input_pos = 0;
+                        input_size = to_read;
+                    }
+
+                    ZSTD_inBuffer input_buffer{input_data.data(), input_size, input_pos};
+                    ZSTD_outBuffer output_buffer{output_data.data(), output_data.size(), 0};
+                    const std::size_t q = ZSTD_decompressStream(decompression_stream.get(), &output_buffer, &input_buffer);
+                    if(ZSTD_isError(q)) {
+                                                throw std::exception();
+                    }
+                    input_pos = input_buffer.pos;
+
+                    if(output_buffer.pos != 0) {
+                        write_output(reinterpret_cast<const std::byte *>(output_buffer.dst), output_buffer.pos);
+                    }
+
+                    if(q == 0) {
+                        // A frame ended. There may already be another frame in the input buffer.
+                        if(input_pos == input_size && total_read >= total_size) {
+                            stream_finished = true;
+                        }
+                    }
+                    else if(input_pos == input_size && total_read >= total_size) {
+                        // The stream says more compressed data is required, but the file ended.
+                                                throw std::exception();
+                    }
+                }
+
+                if(total_read != total_size || !stream_finished || total_output_written != expected_output_size) {
+                    throw std::exception();
                 }
             }
-            catch (std::exception &) {
+            catch(...) {
                 std::fclose(input_file);
                 throw;
             }
 
-            // Write the header
-            if(!write_callback(header_output, sizeof(header_output), user_data)) {
-                std::fclose(input_file);
-                throw std::exception();
-            }
-
-            // Allocate and init a stream
-            auto decompression_stream = ZSTD_createDStream();
-            const std::size_t init = ZSTD_initDStream(decompression_stream);
-
-            std::size_t total_read = HEADER_SIZE;
-            auto read_data = [&input_file, &decompression_stream, &total_read](std::byte *where, std::size_t size) {
-                if(std::fread(where, size, 1, input_file) != 1) {
-                    std::fclose(input_file);
-                    ZSTD_freeDStream(decompression_stream);
-                    throw std::exception();
-                }
-                total_read += size;
-            };
-
-            auto &write_callback = this->write_callback;
-            auto write_data = [&input_file, &write_callback, &decompression_stream, &user_data](const std::byte *where, std::size_t size) {
-                if(!write_callback(where, size, user_data)) {
-                    std::fclose(input_file);
-                    ZSTD_freeDStream(decompression_stream);
-                    throw std::exception();
-                }
-            };
-
-            while(total_read < total_size) {
-                // Make some input/output data thingy
-                std::vector<std::byte> input_data(init);
-                std::vector<std::byte> output_data(ZSTD_DStreamOutSize());
-
-                // Read the first bit
-                read_data(input_data.data(), input_data.size());
-
-                for(;;) {
-                    ZSTD_inBuffer_s input_buffer = {};
-                    ZSTD_outBuffer_s output_buffer = {};
-                    input_buffer.src = input_data.data();
-                    input_buffer.size = input_data.size();
-                    output_buffer.dst = output_data.data();
-                    output_buffer.size = output_data.size();
-
-                    // Get the output
-                    std::size_t q = ZSTD_decompressStream(decompression_stream, &output_buffer, &input_buffer);
-                    if(ZSTD_isError(q)) {
-                        std::fclose(input_file);
-                        ZSTD_freeDStream(decompression_stream);
-                        throw std::exception();
-                    }
-
-                    // Write it
-                    if(output_buffer.pos) {
-                        write_data(reinterpret_cast<std::byte *>(output_buffer.dst), output_buffer.pos);
-                    }
-
-                    // If it's > 0, we need more data
-                    if(q > 0) {
-                        input_data.clear();
-                        input_data.insert(input_data.end(), q, std::byte());
-                        read_data(input_data.data(), q);
-                    }
-                    else {
-                        break;
-                    }
-                }
-            }
-
-            // Close the stream and the files
             std::fclose(input_file);
-            ZSTD_freeDStream(decompression_stream);
         }
     };
 
     std::size_t decompress_map_file(const char *input, const char *output) {
+        if(!input || !*input || !output || !*output) {
+            throw std::exception();
+        }
+
         struct OutputWriter {
             std::FILE *output_file;
             std::size_t output_position = 0;
         } output_writer = { std::fopen(output, "wb") };
 
         if(!output_writer.output_file) {
-            std::fclose(output_writer.output_file);
             throw std::exception();
         }
 
         LowMemoryDecompression decomp;
         decomp.write_callback = [](const std::byte *decompressed_data, std::size_t size, void *user_data) -> bool {
             auto &output_writer = *reinterpret_cast<OutputWriter *>(user_data);
+            if(std::fwrite(decompressed_data, size, 1, reinterpret_cast<std::FILE *>(output_writer.output_file)) != 1) {
+                return false;
+            }
             output_writer.output_position += size;
-            return std::fwrite(decompressed_data, size, 1, reinterpret_cast<std::FILE *>(output_writer.output_file));
+            return true;
         };
 
         try {
             decomp.decompress_map_file(input, &output_writer);
         }
-        catch (std::exception &e) {
+        catch(...) {
             std::fclose(output_writer.output_file);
             throw;
         }
@@ -223,6 +245,10 @@ namespace Chimera {
     }
 
     std::size_t decompress_map_file(const char *input, std::byte *output, std::size_t output_size) {
+        if(!input || !*input || !output) {
+            throw std::exception();
+        }
+
         struct OutputWriter {
             std::byte *output;
             std::size_t output_size;
@@ -232,22 +258,16 @@ namespace Chimera {
         LowMemoryDecompression decomp;
         decomp.write_callback = [](const std::byte *decompressed_data, std::size_t size, void *user_data) -> bool {
             OutputWriter &output_writer = *reinterpret_cast<OutputWriter *>(user_data);
-            std::size_t new_position = output_writer.output_position + size;
-            if(new_position > output_writer.output_size) {
+            if(output_writer.output_position > output_writer.output_size || size > output_writer.output_size - output_writer.output_position) {
                 return false;
             }
+            const std::size_t new_position = output_writer.output_position + size;
             std::copy(decompressed_data, decompressed_data + size, output_writer.output + output_writer.output_position);
             output_writer.output_position = new_position;
             return true;
         };
 
-        try {
-            decomp.decompress_map_file(input, &output_writer);
-        }
-        catch (std::exception &e) {
-            throw;
-        }
-
+        decomp.decompress_map_file(input, &output_writer);
         return output_writer.output_position;
     }
 }

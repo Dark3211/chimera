@@ -4,7 +4,6 @@
 #include "../signature/hook.hpp"
 #include "../signature/signature.hpp"
 #include "../math_trig/math_trig.hpp"
-#include <optional>
 
 #include "tick.hpp"
 
@@ -14,6 +13,8 @@ namespace Chimera {
     static LARGE_INTEGER current_tick_time;
 
     static std::vector<Event<EventFunction>> pretick_events;
+    static std::size_t pretick_events_version = 0;
+    static ReusableEventDispatcher<EventFunction> pretick_dispatcher;
 
     void add_pretick_event(const EventFunction function, EventPriority priority) {
         // Remove if exists
@@ -24,18 +25,22 @@ namespace Chimera {
 
         // Add the event
         pretick_events.emplace_back(Event<EventFunction> { function, priority });
+        pretick_events_version++;
     }
 
     void remove_pretick_event(const EventFunction function) {
         for(std::size_t i = 0; i < pretick_events.size(); i++) {
             if(pretick_events[i].function == function) {
                 pretick_events.erase(pretick_events.begin() + i);
+                pretick_events_version++;
                 return;
             }
         }
     }
 
     static std::vector<Event<EventFunction>> tick_events;
+    static std::size_t tick_events_version = 0;
+    static ReusableEventDispatcher<EventFunction> tick_dispatcher;
 
     void add_tick_event(const EventFunction function, EventPriority priority) {
         // Remove if exists
@@ -46,24 +51,26 @@ namespace Chimera {
 
         // Add the event
         tick_events.emplace_back(Event<EventFunction> { function, priority });
+        tick_events_version++;
     }
 
     void remove_tick_event(const EventFunction function) {
         for(std::size_t i = 0; i < tick_events.size(); i++) {
             if(tick_events[i].function == function) {
                 tick_events.erase(tick_events.begin() + i);
+                tick_events_version++;
                 return;
             }
         }
     }
 
     static void on_pretick() {
-        call_in_order(pretick_events);
+        pretick_dispatcher.dispatch_versioned(pretick_events, pretick_events_version);
     }
 
     static void on_tick() {
         QueryPerformanceCounter(&current_tick_time);
-        call_in_order(tick_events);
+        tick_dispatcher.dispatch_versioned(tick_events, tick_events_version);
     }
 
     /**
@@ -82,35 +89,32 @@ namespace Chimera {
         write_jmp_call(get_chimera().get_signature("on_tick_sig").data(), hook, reinterpret_cast<const void *>(on_pretick), reinterpret_cast<const void *>(on_tick));
     }
 
+    static float *tick_rate_pointer() noexcept {
+        static float *tick_ptr = *reinterpret_cast<float **>(get_chimera().get_signature("tick_rate_sig").data() + 2);
+        return tick_ptr;
+    }
+
     float tick_rate() noexcept {
-        static float *tick_ptr = nullptr;
-        if(!tick_ptr) {
-            tick_ptr = *reinterpret_cast<float **>(get_chimera().get_signature("tick_rate_sig").data() + 2);
-        }
-        return *tick_ptr;
+        return *tick_rate_pointer();
     }
 
     void set_tick_rate(float new_rate) noexcept {
-        float *tick_ptr = *reinterpret_cast<float **>(get_chimera().get_signature("tick_rate_sig").data() + 2);
-        DWORD prota, protb;
-        VirtualProtect(tick_ptr, sizeof(tick_ptr), PAGE_READWRITE, &prota);
+        float *tick_ptr = tick_rate_pointer();
+        DWORD prota = 0, protb = 0;
+        if(!VirtualProtect(tick_ptr, sizeof(*tick_ptr), PAGE_READWRITE, &prota)) {
+            return;
+        }
         *tick_ptr = new_rate;
-        VirtualProtect(tick_ptr, sizeof(tick_ptr), prota, &protb);
+        VirtualProtect(tick_ptr, sizeof(*tick_ptr), prota, &protb);
     }
 
     float effective_tick_rate() noexcept {
-        static const float *game_speed_ptr = nullptr;
-        if(!game_speed_ptr) {
-            game_speed_ptr = reinterpret_cast<float *>(**reinterpret_cast<std::byte ***>(get_chimera().get_signature("game_speed_sig").data() + 1) + 0x18);
-        }
+        static const float *game_speed_ptr = reinterpret_cast<float *>(**reinterpret_cast<std::byte ***>(get_chimera().get_signature("game_speed_sig").data() + 1) + 0x18);
         return *game_speed_ptr * tick_rate();
     }
 
     std::int32_t get_tick_count() noexcept {
-        static std::int32_t *tick_count = nullptr;
-        if(!tick_count) {
-            tick_count = reinterpret_cast<std::int32_t *>(**reinterpret_cast<std::byte ***>(get_chimera().get_signature("tick_counter_sig").data() + 1) + 0xC);
-        }
+        static std::int32_t *tick_count = reinterpret_cast<std::int32_t *>(**reinterpret_cast<std::byte ***>(get_chimera().get_signature("tick_counter_sig").data() + 1) + 0xC);
         return *tick_count;
     }
 
@@ -121,12 +125,9 @@ namespace Chimera {
     }
 
     float get_tick_progress() noexcept {
-        static std::optional<float *> tick_progress;
-        if(!tick_progress.has_value()) {
-            tick_progress = reinterpret_cast<float *>(**reinterpret_cast<std::byte ***>(get_chimera().get_signature("tick_progress_sig").data() + 1) + 304);
-        }
+        static float *tick_progress = reinterpret_cast<float *>(**reinterpret_cast<std::byte ***>(get_chimera().get_signature("tick_progress_sig").data() + 1) + 304);
 
-        float v = effective_tick_rate() * **tick_progress;
+        float v = effective_tick_rate() * *tick_progress;
 
         if(v > 1) {
             v = 1;

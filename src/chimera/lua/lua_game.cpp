@@ -60,7 +60,7 @@ namespace Chimera {
                 argb = {1, 1, 1, 1};
             }
 
-            console_output(argb, message);
+            console_output(argb, "%s", message);
 
             return 0;
         }
@@ -87,7 +87,8 @@ namespace Chimera {
             }
             catch(std::runtime_error &e) {
                 Tag *tag = get_tag(tag_id);
-                return luaL_error(state, "%s %s", tag->path, e.what());
+                const char *tag_path = tag && tag->path ? tag->path : "<unknown>";
+                return luaL_error(state, "%s %s", tag_path, e.what());
             }
 
             return 0;
@@ -121,7 +122,10 @@ namespace Chimera {
 
             // Get the width scale
             auto &resolution = get_resolution();
-            float aspect_ratio = static_cast<float>(resolution.width) / resolution.height;
+            if(resolution.height == 0) {
+                return 0;
+            }
+            float aspect_ratio = static_cast<float>(resolution.width) / static_cast<float>(resolution.height);
             float width_scale = (aspect_ratio * 480.0f) / 640.0f;
 
             // Frame bounds
@@ -503,7 +507,7 @@ namespace Chimera {
         if(args >= 2) {
             auto &script = script_from_state(state);
             auto interval = luaL_checknumber(state, 1);
-            if(interval < 0.1) {
+            if(!std::isfinite(interval) || interval < 0.1) {
                 return luaL_error(state, localize("chimera_lua_error_minimum_timer_interval"));
             }
             auto *function = luaL_checkstring(state, 2);
@@ -585,8 +589,8 @@ namespace Chimera {
         int args = lua_gettop(state);
         if(args == 1) {
             auto value = luaL_checknumber(state, 1);
-            if(value < 0.01) return luaL_error(state, localize("chimera_lua_error_minimum_tick_rate"));
-            set_tick_rate(luaL_checknumber(state, 1));
+            if(!std::isfinite(value) || value < 0.01) return luaL_error(state, localize("chimera_lua_error_minimum_tick_rate"));
+            set_tick_rate(value);
         }
         lua_pushnumber(state, tick_rate());
         return 1;

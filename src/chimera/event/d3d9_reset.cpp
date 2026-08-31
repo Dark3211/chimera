@@ -4,6 +4,8 @@
 #include "../chimera.hpp"
 #include "../signature/hook.hpp"
 #include "../signature/signature.hpp"
+#include "../rasterizer/graphics_runtime_metrics.hpp"
+#include "../output/output.hpp"
 
 namespace Chimera {
     static std::vector<Event<ResetEventFunction>> reset_events;
@@ -35,19 +37,30 @@ namespace Chimera {
     }
 
     extern "C" void do_d3d9_reset_event(LPDIRECT3DDEVICE9 device, D3DPRESENT_PARAMETERS *present) {
+        GraphicsRuntimeMetrics::reset_begin();
         call_in_order(reset_events, device, present);
     }
 
     static void enable_d3d9_reset_hook() {
-        // Enable if not already enabled.
         static bool enabled = false;
+        static bool failure_reported = false;
+        static Hook hook;
         if(enabled) {
             return;
         }
-        enabled = true;
-
-        // Add the hook
-        static Hook hook;
-        write_jmp_call(get_chimera().get_signature("d3d9_call_reset_sig").data(), hook, reinterpret_cast<const void *>(on_d3d9_reset_asm), nullptr, false);
+        auto *call_site = get_chimera().get_signature("d3d9_call_reset_sig").data();
+        if(!call_site) {
+            if(!failure_reported) {
+                console_error("Chimera D3D9 Reset hook disabled: signature was not found.");
+                failure_reported = true;
+            }
+            return;
+        }
+        write_jmp_call(call_site, hook, reinterpret_cast<const void *>(on_d3d9_reset_asm), nullptr, false);
+        enabled = hook.address == call_site && hook.hook && !hook.original_bytes.empty();
+        if(!enabled && !failure_reported) {
+            console_error("Chimera D3D9 Reset hook disabled: executable validation or trampoline creation failed.");
+            failure_reported = true;
+        }
     }
 }

@@ -7,8 +7,19 @@
 #include "../../../signature/signature.hpp"
 #include "../../../chimera.hpp"
 #include "../../../output/output.hpp"
+#include <cerrno>
+#include <cmath>
+#include <cstdlib>
 
 namespace Chimera {
+    static bool parse_mouse_sensitivity(const char *text, float &value) noexcept {
+        if(!text) return false;
+        errno = 0;
+        char *end = nullptr;
+        value = std::strtof(text, &end);
+        return errno != ERANGE && end != text && end && *end == 0 && std::isfinite(value);
+    }
+
     bool mouse_sensitivity_command(int argc, const char **argv) {
         static bool active = false;
         static float horiz = 0;
@@ -25,8 +36,13 @@ namespace Chimera {
 
         if(argc == 2) {
             // Read the new values, subtracting the offset.
-            horiz = strtof(argv[0], nullptr) - OFFSET;
-            vert = strtof(argv[1], nullptr) - OFFSET;
+            float requested_horiz = 0.0F, requested_vert = 0.0F;
+            if(!parse_mouse_sensitivity(argv[0], requested_horiz) || !parse_mouse_sensitivity(argv[1], requested_vert)) {
+                console_error("Mouse sensitivity must be a finite number.");
+                return false;
+            }
+            horiz = requested_horiz - OFFSET;
+            vert = requested_vert - OFFSET;
 
             // Overwrite with the new values.
             overwrite(mouse_horiz_1_sig.data() + 2, &horiz);
@@ -37,7 +53,12 @@ namespace Chimera {
             active = true;
         }
         else if(argc == 1) {
-            if(std::atoi(argv[0]) == 0) {
+            float requested = 0.0F;
+            if(!parse_mouse_sensitivity(argv[0], requested)) {
+                console_error("Mouse sensitivity must be a finite number.");
+                return false;
+            }
+            if(requested == 0.0F) {
                 // Undo the thing.
                 mouse_horiz_1_sig.rollback();
                 mouse_horiz_2_sig.rollback();
@@ -46,7 +67,7 @@ namespace Chimera {
                 active = false;
             }
             else {
-                horiz = strtof(argv[0], nullptr) - OFFSET;
+                horiz = requested - OFFSET;
                 vert = horiz;
 
                 // Overwrite with the new values.

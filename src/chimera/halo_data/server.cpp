@@ -9,7 +9,7 @@
 namespace Chimera {
     Player *ServerInfoPlayer::get_player_table_player() const noexcept {
         auto &player_table = PlayerTable::get_player_table();
-        if(this->player_id >= player_table.current_size) {
+        if(!player_table.first_element || this->player_id >= player_table.current_size) {
             return nullptr;
         }
         return player_table.first_element + this->player_id;

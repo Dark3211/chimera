@@ -22,24 +22,33 @@ namespace Chimera {
     }
 
     static void print_section(const char *header, const char *text) noexcept {
-        console_output(ConsoleColor::header_color(), header);
-        char line[256];
+        console_output(ConsoleColor::header_color(), header ? header : "");
+        if(!text) {
+            return;
+        }
+
+        char line[256] = {};
         std::size_t line_length = 0;
         const char *format = "    %s";
+        auto flush_line = [&]() noexcept {
+            line[line_length] = 0;
+            console_output(ConsoleColor::body_color(), format, line);
+            line_length = 0;
+        };
+
         while(*text) {
             if(*text == '\n') {
-                line[line_length] = 0;
-                console_output(ConsoleColor::body_color(), format, line);
-                line_length = 0;
+                flush_line();
                 text++;
                 continue;
             }
-            line[line_length++] = *text;
-            text++;
+            if(line_length == sizeof(line) - 1) {
+                flush_line();
+            }
+            line[line_length++] = *text++;
         }
-        line[line_length] = 0;
         if(line_length) {
-            console_output(ConsoleColor::body_color(), format, line);
+            flush_line();
         }
     }
 }

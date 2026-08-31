@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+#include <algorithm>
+#include <cstdint>
+#include <cstring>
+
 #include "../chimera.hpp"
 #include "../signature/hook.hpp"
 #include "../signature/signature.hpp"
@@ -87,91 +91,92 @@ namespace Chimera {
                 continue;
             }
 
-            auto *object = object_table.get_dynamic_object(current_tick_object.object_id);
-
-            // This shouldn't ever happen but just in case it does...
-            if(!object) {
+            // Never read beyond either fixed-size node snapshot.
+            if(current_tick_object.node_count > MAX_NODES || previous_tick_object.node_count > MAX_NODES) {
                 continue;
             }
 
-            // Skip if the tags do not match
-            auto &tag_id = object->definition_index;
-            if(tag_id != current_tick_object.tag_id || previous_tick_object.tag_id != tag_id) {
-                continue;
-            }
-
-            // Skip if object ID's do not match. Mostly a sanity check.
-            if(current_tick_object.object_id != previous_tick_object.object_id) {
-                continue;
-            }
-
-            // Copy previous tick positions to object table to fudge contrails
-            object->object.bounding_sphere_center = previous_tick_object.center;
-            std::copy(previous_tick_object.nodes, previous_tick_object.nodes + previous_tick_object.node_count, object->nodes());
-        }
-    }
-
-
-    // Copy objects from Halo's data to buffer
-    static void copy_objects() noexcept {
-        // Get the object table
-        auto &object_table = ObjectTable::get_object_table();
-
-        // Get the contrail table
-        auto &contrail_table = ContrailTable::get_contrail_table();
-
-        // Go through all contrails.
-        for(std::size_t i = 0; i < CONTRAIL_BUFFER_SIZE; i++) {
-            auto &current_tick_object = current_tick[i];
-
-            // Set this to false so if the parent object doesn't exist or is invalid we don't need to restore position data.
-            current_tick_object.rollback = false;
-
-            //Check if contrail exists
-            if(contrail_table.first_element[i].id == 0) {
-                continue;
-            }
-
-            // Store parent Object ID
-            current_tick_object.object_id = contrail_table.first_element[i].parent_object_id;
-
-            // See if the parent object exists.
             auto *object = object_table.get_dynamic_object(current_tick_object.object_id);
             if(!object) {
                 continue;
             }
 
-            // Check if we can do anything with this object.
             auto *nodes = object->nodes();
             if(!nodes) {
                 continue;
             }
 
-            // Get the number of model nodes.
-            current_tick_object.tag_id = object->definition_index;
-            auto *object_tag = get_tag(current_tick_object.tag_id.index.index);
-            if(!object_tag) {
+            // Skip if the tags do not match.
+            auto &tag_id = object->definition_index;
+            if(tag_id != current_tick_object.tag_id || previous_tick_object.tag_id != tag_id) {
                 continue;
             }
 
-            // Get the model tag to get the node count
+            // Skip if object IDs do not match.
+            if(current_tick_object.object_id != previous_tick_object.object_id) {
+                continue;
+            }
+
+            // Copy previous tick positions to object table to fudge contrails.
+            object->object.bounding_sphere_center = previous_tick_object.center;
+            std::copy(previous_tick_object.nodes, previous_tick_object.nodes + previous_tick_object.node_count, nodes);
+        }
+    }
+
+    // Copy objects from Halo's data to buffer.
+    static void copy_objects() noexcept {
+        auto &object_table = ObjectTable::get_object_table();
+        auto &contrail_table = ContrailTable::get_contrail_table();
+
+        for(std::size_t i = 0; i < CONTRAIL_BUFFER_SIZE; i++) {
+            auto &current_tick_object = current_tick[i];
+
+            // Set this to false so invalid parents are never restored.
+            current_tick_object.rollback = false;
+            current_tick_object.node_count = 0;
+
+            if(contrail_table.first_element[i].id == 0) {
+                continue;
+            }
+
+            current_tick_object.object_id = contrail_table.first_element[i].parent_object_id;
+
+            auto *object = object_table.get_dynamic_object(current_tick_object.object_id);
+            if(!object) {
+                continue;
+            }
+
+            auto *nodes = object->nodes();
+            if(!nodes) {
+                continue;
+            }
+
+            current_tick_object.tag_id = object->definition_index;
+            auto *object_tag = get_tag(current_tick_object.tag_id.index.index);
+            if(!object_tag || !object_tag->data) {
+                continue;
+            }
+
             if(object->object.type == ObjectType::OBJECT_TYPE_PROJECTILE) {
                 current_tick_object.node_count = 1;
             }
             else {
                 const auto &model_tag_id = *reinterpret_cast<const TagID *>(object_tag->data + 0x28 + 0xC);
                 auto *model_tag = get_tag(model_tag_id);
-                if(!model_tag) {
-                    current_tick_object.node_count = 0;
+                if(!model_tag || !model_tag->data) {
+                    continue;
                 }
-                else {
-                    current_tick_object.node_count = *reinterpret_cast<std::uint32_t *>(model_tag->data + 0xB8);
-                }
+                current_tick_object.node_count = *reinterpret_cast<std::uint32_t *>(model_tag->data + 0xB8);
+            }
+
+            // The snapshot is fixed-size. Refuse malformed or unsupported models
+            // rather than copying beyond the buffer and corrupting adjacent state.
+            if(current_tick_object.node_count > MAX_NODES) {
+                current_tick_object.node_count = 0;
+                continue;
             }
 
             current_tick_object.rollback = true;
-
-            // Copy nodes from Halo's data
             std::copy(nodes, nodes + current_tick_object.node_count, current_tick_object.nodes);
             current_tick_object.center = object->object.bounding_sphere_center;
         }
@@ -189,26 +194,32 @@ namespace Chimera {
         for(std::size_t i = 0; i < max_objects && i < CONTRAIL_BUFFER_SIZE; i++) {
             auto &current_tick_object = current_tick[i];
 
-            // Skip if we didn't fix the contrails this frame.
-            if(!current_tick_object.rollback) {
+            if(!current_tick_object.rollback || current_tick_object.node_count > MAX_NODES) {
                 continue;
             }
 
             auto *object = object_table.get_dynamic_object(current_tick_object.object_id);
-
-            // This shouldn't ever happen but just in case it does...
             if(!object) {
                 continue;
             }
 
+            auto *nodes = object->nodes();
+            if(!nodes) {
+                continue;
+            }
+
             object->object.bounding_sphere_center = current_tick_object.center;
-            std::copy(current_tick_object.nodes, current_tick_object.nodes + current_tick_object.node_count, object->nodes());
+            std::copy(current_tick_object.nodes, current_tick_object.nodes + current_tick_object.node_count, nodes);
         }
     }
 
-     // Erase the object buffers to prevent funny things on revert
+    // Erase object buffers to prevent stale state on revert.
     void fix_contrail_clear() noexcept {
         std::memset(object_buffers, 0, sizeof(object_buffers));
+        current_tick = object_buffers[0];
+        previous_tick = object_buffers[1];
+        tick_passed = false;
+        can_update_contrail = 0;
     }
 
     static void allow_updates() {
@@ -216,7 +227,7 @@ namespace Chimera {
         update_contrail_by = 1.0F / effective_tick_rate();
         tick_passed = true;
 
-        apply_interpolation_hack = interpolation_enabled;
+        apply_interpolation_hack = interpolation_enabled ? 1U : 0U;
     }
 
     void set_up_contrail_fix() noexcept {

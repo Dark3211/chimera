@@ -1,4 +1,4 @@
-# Build our own ZSTD and cURL
+# Build our own ZSTD, cURL, and miniz
 
 # Silence CMake Warning
 if (POLICY CMP0135)
@@ -6,6 +6,7 @@ if (POLICY CMP0135)
 endif()
 
 include(ExternalProject)
+include(FetchContent)
 
 # This was once OFF by default, but newer CMake versions changed this to ON.
 # As long as the hashes are the same it should be fine. Needed for some MinGW-w64 releases, mainly winlibs.
@@ -86,6 +87,24 @@ ExternalProject_Add(zstd
 add_library(local_zstd STATIC IMPORTED)
 set_target_properties(local_zstd PROPERTIES IMPORTED_LOCATION ${LOCAL_ZSTD_LIB_DIR}/libzstd.a)
 add_dependencies(local_zstd zstd)
+
+# miniz is used only for the HaloNet ZIP fallback in the map downloader.
+# Use the official amalgamated release artifact and pin its published SHA-256.
+FetchContent_Declare(
+    chimera_miniz
+    URL "https://github.com/richgel999/miniz/releases/download/3.1.2/miniz-3.1.2.zip"
+    URL_HASH SHA256=f0446d863f9c19926ad9483c523fdc42e42b8d4a6a431d27e09d49c79a140d9a
+)
+FetchContent_MakeAvailable(chimera_miniz)
+
+add_library(local_miniz STATIC "${chimera_miniz_SOURCE_DIR}/miniz.c")
+target_include_directories(local_miniz PUBLIC "${chimera_miniz_SOURCE_DIR}")
+target_compile_definitions(local_miniz PUBLIC
+    MINIZ_NO_DEFLATE_APIS
+    MINIZ_NO_ZLIB_APIS
+    MINIZ_NO_ZLIB_COMPATIBLE_NAMES
+    MINIZ_NO_TIME
+)
 
 if(${CHIMERA_WINXP})
     set(LOCAL_CURL_LIBRARIES local_curl ws2_32 bcrypt)

@@ -21,6 +21,8 @@
 #include <fstream>
 #include <deque>
 #include <chrono>
+#include <algorithm>
+#include <cmath>
 
 namespace Chimera {
     static std::string rcon_password;
@@ -64,16 +66,16 @@ namespace Chimera {
     static std::uint32_t *entry_count_global = nullptr;
 
     static CommandEntry ***entries = nullptr;
-    static std::uint32_t *entry_count;
-    static CommandEntry **old_entries;
-    static std::uint32_t old_entry_count;
+    static std::uint32_t *entry_count = nullptr;
+    static CommandEntry **old_entries = nullptr;
+    static std::uint32_t old_entry_count = 0;
 
     static std::vector<CommandEntry *> new_entries_list;
     static std::vector<std::unique_ptr<CommandEntry>> new_entries_added;
 
     bool script_command_dump_command(int, const char **) noexcept {
         std::filesystem::path path;
-        if(entries) {
+        if(entries && entry_count && *entries) {
             std::size_t command_entry_count = *entry_count;
             auto *command_entries = *entries;
 
@@ -81,20 +83,29 @@ namespace Chimera {
             std::ofstream o(path, std::ios_base::out | std::ios_base::trunc);
             o << "[\n";
 
+            std::size_t command_entries_written = 0;
             for(std::size_t i = 0; i < command_entry_count; i++) {
-                o << "    { \"name\": \"" << command_entries[i]->name << "\", \"return\": " << command_entries[i]->return_type;
-                const auto *parameters = reinterpret_cast<const std::uint16_t *>(command_entries[i] + 1);
+                auto *entry = command_entries[i];
+                if(!entry) {
+                    continue;
+                }
+                if(command_entries_written > 0) {
+                    o << ",\n";
+                }
+
+                o << "    { \"name\": \"" << (entry->name ? entry->name : "") << "\", \"return\": " << entry->return_type;
+                const auto *parameters = reinterpret_cast<const std::uint16_t *>(entry + 1);
                 o << ", \"parameters\": [";
-                for(std::size_t x = 0; x < command_entries[i]->parameter_count; x++) {
+                for(std::size_t x = 0; x < entry->parameter_count; x++) {
                     o << static_cast<std::uint16_t>(parameters[x]);
-                    if(x + 1 != command_entries[i]->parameter_count) {
+                    if(x + 1 != entry->parameter_count) {
                         o << ",";
                     }
                 }
                 o << "] }";
-                if(i + 1 != command_entry_count) {
-                    o << ",";
-                }
+                command_entries_written++;
+            }
+            if(command_entries_written > 0) {
                 o << "\n";
             }
 
@@ -102,10 +113,10 @@ namespace Chimera {
             o.flush();
             o.close();
 
-            console_output("Dumped %zu command%s to script_command_dump.json", command_entry_count, command_entry_count == 1 ? "" : "s");
+            console_output("Dumped %zu command%s to script_command_dump.json", command_entries_written, command_entries_written == 1 ? "" : "s");
         }
 
-        if(entries_global) {
+        if(entries_global && entry_count_global && *entries_global) {
             path = get_chimera().get_path() / "script_global_dump.json";
             std::ofstream o(path, std::ios_base::out | std::ios_base::trunc);
             o << "[\n";
@@ -113,25 +124,34 @@ namespace Chimera {
             std::size_t global_entry_count = *entry_count_global;
             auto *global_entries = *entries_global;
 
+            std::size_t global_entries_written = 0;
             for(std::size_t i = 0; i < global_entry_count; i++) {
-                o << "    { \"name\": \"" << global_entries[i]->name << "\", \"type\": " << global_entries[i]->value_type << ", \"value\": ";
+                auto *entry = global_entries[i];
+                if(!entry) {
+                    continue;
+                }
+                if(global_entries_written > 0) {
+                    o << ",\n";
+                }
 
-                if(global_entries[i]->default_value) {
-                    switch(global_entries[i]->value_type) {
+                o << "    { \"name\": \"" << (entry->name ? entry->name : "") << "\", \"type\": " << entry->value_type << ", \"value\": ";
+
+                if(entry->default_value) {
+                    switch(entry->value_type) {
                         case 5:
-                            o << (*reinterpret_cast<const std::uint8_t *>(global_entries[i]->default_value) ? "true" : "false");
+                            o << (*reinterpret_cast<const std::uint8_t *>(entry->default_value) ? "true" : "false");
                             break;
                         case 6:
-                            o << *reinterpret_cast<const float *>(global_entries[i]->default_value);
+                            o << *reinterpret_cast<const float *>(entry->default_value);
                             break;
                         case 7:
-                            o << *reinterpret_cast<const std::int16_t *>(global_entries[i]->default_value);
+                            o << *reinterpret_cast<const std::int16_t *>(entry->default_value);
                             break;
                         case 9:
-                            o << "\"" << *reinterpret_cast<const char *>(global_entries[i]->default_value) << "\"";
+                            o << "\"" << *reinterpret_cast<const char *>(entry->default_value) << "\"";
                             break;
                         default:
-                            o << *reinterpret_cast<const std::int32_t *>(global_entries[i]->default_value);
+                            o << *reinterpret_cast<const std::int32_t *>(entry->default_value);
                             break;
                     }
                 }
@@ -140,9 +160,9 @@ namespace Chimera {
                 }
 
                 o << " }";
-                if(i + 1 != global_entry_count) {
-                    o << ",";
-                }
+                global_entries_written++;
+            }
+            if(global_entries_written > 0) {
                 o << "\n";
             }
 
@@ -150,19 +170,24 @@ namespace Chimera {
             o.flush();
             o.close();
 
-            console_output("Dumped %zu global%s to script_global_dump.json", global_entry_count, global_entry_count == 1 ? "" : "s");
+            console_output("Dumped %zu global%s to script_global_dump.json", global_entries_written, global_entries_written == 1 ? "" : "s");
         }
 
         return true;
     }
 
     static void on_tab_completion_start() noexcept {
-        auto &chimera_commands = get_chimera().get_commands();
+        if(!entries || !entry_count || !*entries) {
+            return;
+        }
 
-        old_entry_count = *entry_count;
-        old_entries = *entries;
+        try {
+            auto &chimera_commands = get_chimera().get_commands();
 
-        new_entries_list = std::vector<CommandEntry *>(old_entries, old_entries + old_entry_count);
+            old_entry_count = *entry_count;
+            old_entries = *entries;
+
+            new_entries_list = std::vector<CommandEntry *>(old_entries, old_entries + old_entry_count);
         for(auto &command : chimera_commands) {
             if(!get_chimera().feature_present(command.feature())) {
                 continue;
@@ -185,16 +210,25 @@ namespace Chimera {
         clear_command->more_stuff = 0x15;
         new_entries_list.emplace_back(clear_command.get());
 
-        overwrite(entry_count, static_cast<std::uint32_t>(new_entries_list.size()));
-        overwrite(entries, new_entries_list.data());
+            overwrite(entry_count, static_cast<std::uint32_t>(new_entries_list.size()));
+            overwrite(entries, new_entries_list.data());
+        }
+        catch(...) {
+            new_entries_list.clear();
+            new_entries_added.clear();
+        }
     }
 
     static void on_tab_completion_end() noexcept {
-        overwrite(entry_count, old_entry_count);
-        overwrite(entries, old_entries);
+        if(entries && entry_count && old_entries) {
+            overwrite(entry_count, old_entry_count);
+            overwrite(entries, old_entries);
+        }
 
         new_entries_list.clear();
         new_entries_added.clear();
+        old_entries = nullptr;
+        old_entry_count = 0;
     }
 
     void initialize_console_hook() {
@@ -213,8 +247,10 @@ namespace Chimera {
             case GameEngine::GAME_ENGINE_CUSTOM_EDITION: {
                 sig_to_use = "command_list_custom_edition_sig";
                 auto *global_list_data = get_chimera().get_signature("global_list_custom_edition_sig").data();
-                entries_global = reinterpret_cast<GlobalEntry ***>(global_list_data + 1);
-                entry_count_global = reinterpret_cast<std::uint32_t *>(global_list_data + 6);
+                if(global_list_data) {
+                    entries_global = reinterpret_cast<GlobalEntry ***>(global_list_data + 1);
+                    entry_count_global = reinterpret_cast<std::uint32_t *>(global_list_data + 6);
+                }
                 break;
             }
             case GameEngine::GAME_ENGINE_RETAIL:
@@ -224,9 +260,13 @@ namespace Chimera {
                 sig_to_use = "command_list_demo_sig";
                 break;
             default:
-                std::terminate();
+                console_error("Unsupported game engine while initializing the console hook.");
+                return;
         }
         auto *command_list_data = get_chimera().get_signature(sig_to_use).data();
+        if(!command_list_data) {
+            return;
+        }
         entries = reinterpret_cast<CommandEntry ***>(command_list_data + 1);
         entry_count = reinterpret_cast<std::uint32_t *>(command_list_data + 5 + (non_custom ? 4 : 1));
     }
@@ -247,8 +287,11 @@ namespace Chimera {
 
     // This function intercepts the console and reads the buffer.
     static void read_command() {
+        if(!console_text) {
+            return;
+        }
         block_error();
-        const Command *found_command;
+        const Command *found_command = nullptr;
 
         // If "clear" is sent to the console, change it to "cls"
         if(std::strcmp(console_text, "clear") == 0) {
@@ -270,10 +313,13 @@ namespace Chimera {
             // If this is an rcon password, check if we're using rconp
             if(rcon_password.size() && std::strncmp(console_text, "rconp ", 6) == 0) {
                 auto command_broken_up = split_arguments(console_text);
-                command_broken_up[0] = "rcon";
-                command_broken_up.insert(command_broken_up.begin() + 1, rcon_password);
-                auto command_put_together = unsplit_arguments(command_broken_up);
-                std::strncpy(console_text, command_put_together.data(), 75);
+                if(!command_broken_up.empty()) {
+                    command_broken_up[0] = "rcon";
+                    command_broken_up.insert(command_broken_up.begin() + 1, rcon_password);
+                    auto command_put_together = unsplit_arguments(command_broken_up);
+                    std::strncpy(console_text, command_put_together.c_str(), 75);
+                    console_text[75] = 0;
+                }
             }
         }
 
@@ -287,13 +333,19 @@ namespace Chimera {
                 break;
             }
             case CommandResult::COMMAND_RESULT_FAILED_NOT_ENOUGH_ARGUMENTS:
-                console_error(localize("chimera_error_not_enough_arguments"), found_command->name(), found_command->min_args());
+                if(found_command) {
+                    console_error(localize("chimera_error_not_enough_arguments"), found_command->name(), found_command->min_args());
+                }
                 break;
             case CommandResult::COMMAND_RESULT_FAILED_TOO_MANY_ARGUMENTS:
-                console_error(localize("chimera_error_too_many_arguments"), found_command->name(), found_command->max_args());
+                if(found_command) {
+                    console_error(localize("chimera_error_too_many_arguments"), found_command->name(), found_command->max_args());
+                }
                 break;
             case CommandResult::COMMAND_RESULT_FAILED_FEATURE_NOT_AVAILABLE:
-                console_error(localize("chimera_error_command_unavailable"), found_command->name(), found_command->feature());
+                if(found_command) {
+                    console_error(localize("chimera_error_command_unavailable"), found_command->name(), found_command->feature());
+                }
                 break;
             case CommandResult::COMMAND_RESULT_SUCCESS:
                 break;
@@ -402,7 +454,8 @@ namespace Chimera {
         int y = 480 - this_line_height;
         std::size_t i = position;
         auto resolution = get_resolution();
-        int width = (widescreen_fix_enabled() ? (static_cast<int>(resolution.width) * 480 + 240) / resolution.height : 640) - margin * 2;
+        const bool can_scale_widescreen = widescreen_fix_enabled() && resolution.height != 0;
+        int width = (can_scale_widescreen ? (static_cast<int>(resolution.width) * 480 + 240) / resolution.height : 640) - margin * 2;
         auto now = SteadyClock::now();
 
         // If we're on the bottom, we can clear this
@@ -486,9 +539,14 @@ namespace Chimera {
             if(!button_held) {
                 button_held = true;
                 if(keys.page_up) {
-                    position += half_page;
-                    if(position >= custom_lines.size()) {
-                        position = custom_lines.size() - 1;
+                    if(custom_lines.empty()) {
+                        position = 0;
+                    }
+                    else {
+                        position += half_page;
+                        if(position >= custom_lines.size()) {
+                            position = custom_lines.size() - 1;
+                        }
                     }
                 }
                 else {
@@ -525,8 +583,13 @@ namespace Chimera {
                     break;
                 }
                 if(time_since > fade_start * MICROSECONDS_PER_SEC) {
-                    double scale = 1.0 - (time_since - fade_start * MICROSECONDS_PER_SEC) / (fade_time * MICROSECONDS_PER_SEC);
-                    color_copy.alpha *= scale;
+                    if(fade_time <= 0.0) {
+                        color_copy.alpha = 0.0F;
+                    }
+                    else {
+                        double scale = 1.0 - (time_since - fade_start * MICROSECONDS_PER_SEC) / (fade_time * MICROSECONDS_PER_SEC);
+                        color_copy.alpha *= static_cast<float>(std::clamp(scale, 0.0, 1.0));
+                    }
                 }
             }
 
@@ -550,7 +613,8 @@ namespace Chimera {
 
     static void do_cls() noexcept {
         // make it look like it was an accident
-        auto invalid_time = SteadyClock::now() - std::chrono::microseconds(static_cast<int>((fade_start + fade_time) * 1000000));
+        auto elapsed = std::chrono::duration<double>(std::max(0.0, fade_start + fade_time));
+        auto invalid_time = SteadyClock::now() - std::chrono::duration_cast<SteadyClock::duration>(elapsed);
         for(auto &i : custom_lines) {
             i.created =invalid_time;
         }
@@ -580,16 +644,27 @@ namespace Chimera {
         fade_start = ini->get_value_float("custom_console.fade_start").value_or(4.0);
         x_margin = ini->get_value_long("custom_console.x_margin").value_or(10);
 
+        if(max_lines == 0) max_lines = 1;
+        if(max_lines_soft == 0) max_lines_soft = 1;
+        max_lines_soft = std::min(max_lines_soft, max_lines);
+        if(!std::isfinite(line_height) || line_height <= 0.0) line_height = 1.1;
+        if(!std::isfinite(fade_time) || fade_time < 0.0) fade_time = 0.75;
+        if(!std::isfinite(fade_start) || fade_start < 0.0) fade_start = 4.0;
+
         total_lifetime = fade_time + fade_start;
 
         add_preframe_event(on_console_frame);
     }
 
     extern "C" void on_console_output(char *text, const ColorARGB &color) {
-        // Erase all new lines until the buffer size is small enough to hold the new line
-        while(custom_lines.size() > max_lines + 1) {
+        if(!text) {
+            return;
+        }
+
+        // Keep the configured number of lines, including the line about to be added.
+        while(custom_lines.size() >= max_lines) {
             custom_lines.pop_front();
-            if(position > 1) {
+            if(position > 0) {
                 position--;
             }
         }

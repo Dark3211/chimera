@@ -31,15 +31,37 @@ namespace Chimera {
     static std::byte *global_render_targets = nullptr;
     static std::byte *bump_vertices = nullptr;
 
+    static bool water_device_available() noexcept {
+        return global_d3d9_device && *global_d3d9_device;
+    }
+
     extern "C" void set_water_shader_const(std::byte *shader, std::uint32_t start_register) noexcept {
+        if(!shader || !d3d9_device_caps || !water_device_available()) {
+            return;
+        }
+
         // Apply mip map lod bias to ripple maps. Bullshit the value specified in the tag to look like 480p ripples.
         // This is not how it's implemented on xbox but 4K gamers don't seem to like that.
         if(d3d9_device_caps->PixelShaderVersion >= 0xffff0101 && start_register == 1) {
 
             // Probably not "correct" but as close as I'm willing to try and make it.
-            float adjusted_lod_bias = log2f(get_resolution().height / 480.f) - (*reinterpret_cast<float *>(shader + 0xE0));
+            const auto resolution_height = get_resolution().height;
+            static std::uint16_t cached_resolution_height = 0;
+            static float cached_resolution_lod_bias = 0.0f;
+            static bool cached_resolution_valid = false;
+            if(!cached_resolution_valid || cached_resolution_height != resolution_height) {
+                // A transient zero-sized device/reset should not feed -inf into the
+                // sampler LOD state. Normal non-zero resolutions retain the exact path.
+                cached_resolution_lod_bias = resolution_height == 0
+                    ? 0.0f
+                    : log2f(static_cast<float>(resolution_height) / 480.0f);
+                cached_resolution_height = resolution_height;
+                cached_resolution_valid = true;
+            }
+            float adjusted_lod_bias = cached_resolution_lod_bias - (*reinterpret_cast<float *>(shader + 0xE0));
 
-            // Bump map is on sampler 0.
+            // Bump map is on sampler 0. Keep Halo/Chimera's normal filtering state;
+            // this water-only path must not change MIN/MAG/MIP filtering globally.
             DWORD *mip_lod_bias = reinterpret_cast<DWORD *>(&adjusted_lod_bias);
             IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 0, D3DSAMP_MIPMAPLODBIAS, *mip_lod_bias);
         }
@@ -59,30 +81,75 @@ namespace Chimera {
         IDirect3DDevice9_SetPixelShaderConstantF(*global_d3d9_device, start_register, psh_constants, 1);
     }
 
+    static IDirect3DTexture9 *water_render_target_texture() noexcept {
+        if(!global_render_targets) {
+            return nullptr;
+        }
+        auto **texture = reinterpret_cast<IDirect3DTexture9 **>(global_render_targets + 20 * 8 + 16);
+        return texture ? *texture : nullptr;
+    }
+
     extern "C" void make_water_go_brr(int i) noexcept {
-        auto water_render_target_texture = reinterpret_cast<IDirect3DTexture9 **>(global_render_targets + 20 * 8 + 16);
-        IDirect3DSurface9 *mipmap_surface = NULL;
-        IDirect3DTexture9_GetSurfaceLevel(*water_render_target_texture, i, &mipmap_surface);
+        if(!water_device_available() || i < 0 || i >= 4) {
+            return;
+        }
+
+        auto *texture = water_render_target_texture();
+        if(!texture) {
+            return;
+        }
+
+        IDirect3DSurface9 *mipmap_surface = nullptr;
+        const HRESULT get_surface_result = IDirect3DTexture9_GetSurfaceLevel(texture, static_cast<UINT>(i), &mipmap_surface);
+        if(FAILED(get_surface_result) || !mipmap_surface) {
+            return;
+        }
+
         IDirect3DDevice9_SetRenderTarget(*global_d3d9_device, 0, mipmap_surface);
         IDirect3DSurface9_Release(mipmap_surface);
     }
 
     extern "C" void make_water_go_brr_pt2(int mip_levels) noexcept {
-        auto water_render_target_texture = reinterpret_cast<IDirect3DTexture9 **>(global_render_targets + 20 * 8 + 16);
+        if(!water_device_available() || !bump_vertices) {
+            return;
+        }
+
+        auto *texture = water_render_target_texture();
+        if(!texture) {
+            return;
+        }
+
+        if(mip_levels < 0) {
+            mip_levels = 0;
+        }
+        if(mip_levels >= 4) {
+            return;
+        }
+
         auto vertices = reinterpret_cast<const void *>(bump_vertices);
 
         for(int i = mip_levels; i < 4; i++) {
-            IDirect3DSurface9 *mipmap_surface = NULL;
-            IDirect3DTexture9_GetSurfaceLevel(*water_render_target_texture, i, &mipmap_surface);
-            IDirect3DDevice9_SetRenderTarget(*global_d3d9_device, 0, mipmap_surface);
+            IDirect3DSurface9 *mipmap_surface = nullptr;
+            const HRESULT get_surface_result = IDirect3DTexture9_GetSurfaceLevel(texture, static_cast<UINT>(i), &mipmap_surface);
+            if(FAILED(get_surface_result) || !mipmap_surface) {
+                break;
+            }
+
+            const HRESULT set_target_result = IDirect3DDevice9_SetRenderTarget(*global_d3d9_device, 0, mipmap_surface);
             IDirect3DSurface9_Release(mipmap_surface);
+            if(FAILED(set_target_result)) {
+                break;
+            }
+
             IDirect3DDevice9_DrawPrimitiveUP(*global_d3d9_device, D3DPT_TRIANGLEFAN, 2, vertices, 24);
         }
     }
 
     void reset_sampler_states_for_mips() noexcept {
         // I guess this needs to be unset
-        IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 0, D3DSAMP_MIPMAPLODBIAS, 0);
+        if(water_device_available()) {
+            IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 0, D3DSAMP_MIPMAPLODBIAS, 0);
+        }
     }
 
     void set_up_water_fix() noexcept {

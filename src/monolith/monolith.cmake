@@ -20,6 +20,10 @@ target_compile_options(monolith PRIVATE -Wall -Wextra)
 set_target_properties(monolith PROPERTIES PREFIX "")
 set_target_properties(monolith PROPERTIES OUTPUT_NAME "strings")
 
+# Strip unneeded symbol data from Release builds only. This reduces the final
+# strings.dll size without packing or changing its runtime loading model.
+target_link_options(monolith PRIVATE $<$<CONFIG:Release>:-s>)
+
 # lol
 add_dependencies(monolith chimera)
 set_target_properties(monolith PROPERTIES LINK_FLAGS "-m32 -static-libgcc -static-libstdc++ -static -lwinpthread")

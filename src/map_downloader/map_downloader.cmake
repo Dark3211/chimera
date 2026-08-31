@@ -5,6 +5,7 @@ add_library(map_downloader STATIC
 )
 
 add_dependencies(map_downloader local_curl)
+target_link_libraries(map_downloader PRIVATE local_miniz)
 
 # Target this
 target_include_directories(map_downloader PRIVATE ${LOCAL_CURL_INCLUDE_DIR})

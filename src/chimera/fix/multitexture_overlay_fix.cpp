@@ -88,7 +88,10 @@ namespace Chimera {
         }
 
         if(geometry_params->map[2]) {
-            switch(geometry_params->map0_to_1_blend_function) {
+            // The shader table is a 5x5 matrix: map0->1 chooses the row and
+            // map1->2 chooses the column. Using map0->1 here again selects the
+            // wrong permutation whenever the two authored blend functions differ.
+            switch(geometry_params->map1_to_2_blend_function) {
                 // Add
                 case 0:
                     multitexture_shader_index -= 4;

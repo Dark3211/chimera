@@ -29,10 +29,17 @@ namespace Chimera {
     static_assert(sizeof(ScriptNode) == 0x14);
 
     static void jason_jones_away_bullshit() {
-        auto *scenario_tag_data = get_tag(get_tag_data_header().scenario_tag)->data;
+        auto *scenario_tag = get_tag(get_tag_data_header().scenario_tag);
+        if(!scenario_tag || !scenario_tag->data) {
+            return;
+        }
+        auto *scenario_tag_data = scenario_tag->data;
 
         const auto *string_data = *reinterpret_cast<const char **>(scenario_tag_data + 0x488 + 0xC);
         auto *node_table = reinterpret_cast<GenericTable<ScriptNode> *>(*reinterpret_cast<std::byte **>(scenario_tag_data + 0x474 + 0xC));
+        if(!string_data || !node_table) {
+            return;
+        }
         auto *syntax_data = reinterpret_cast<ScriptNode *>(node_table + 1);
 
         for(std::size_t i = 0; i < node_table->current_size; i++) {

@@ -67,7 +67,7 @@ namespace Chimera {
 
         size_t next_timer_id = 0;
 
-        LuaScript(lua_State *state, const char *name, const bool &global, const bool &unlocked) noexcept;
+        LuaScript(lua_State *state, const char *name, const bool &global, const bool &unlocked);
         ~LuaScript() noexcept;
     };
 

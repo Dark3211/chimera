@@ -115,12 +115,19 @@ namespace Chimera {
             return;
         }
 
-        // Skip if the node counts don't match
-        if(previous_tick_object.node_count != current_tick_object.node_count) {
+        // Snapshots cannot exceed MAX_NODES.
+        if(previous_tick_object.node_count != current_tick_object.node_count
+            || current_tick_object.node_count > MAX_NODES
+            || previous_tick_object.node_count > MAX_NODES) {
             return;
         }
 
-        // Set this flag so we don't need to do all these checks again when rolling things back.
+        auto *nodes = object->nodes();
+        if(current_tick_object.node_count != 0 && !nodes) {
+            return;
+        }
+
+        // Mark before recursion to break parent cycles.
         current_tick_object.interpolated_this_frame = true;
 
         // Search for all objects that parent this object.
@@ -130,8 +137,6 @@ namespace Chimera {
 
         // Interpolate the center thingymajigabobit.
         interpolate_point(previous_tick_object.center, current_tick_object.center, object->object.bounding_sphere_center, interpolation_tick_progress);
-
-        auto *nodes = object->nodes();
 
         for(std::size_t n = 0; n < current_tick_object.node_count; n++) {
             auto &node = nodes[n];
@@ -158,23 +163,36 @@ namespace Chimera {
         // Get the object table
         auto &object_table = ObjectTable::get_object_table();
 
-        // Array that holds the parent object ID for each object index (if it has one).
-        ObjectID parent_object_array[OBJECT_BUFFER_SIZE] = {HaloID::null_id()};
+        // Initialize every parent slot to Halo's null ID.
+        ObjectID parent_object_array[OBJECT_BUFFER_SIZE];
+        for(auto &parent : parent_object_array) {
+            parent = HaloID::null_id();
+        }
 
-        // Go through all objects.
-        auto max_size = object_table.current_size;
+        // Clear stale snapshot state.
         for(std::size_t i = 0; i < OBJECT_BUFFER_SIZE; i++) {
             auto &current_tick_object = current_tick[i];
             current_tick_object.interpolated_this_frame = false;
-
-            // Set this to false so if it doesn't exist or we can't interpolate it for some reason, we don't have to worry about it.
             current_tick_object.interpolate = false;
+            current_tick_object.index = 0;
+            current_tick_object.children_count = 0;
+            current_tick_object.node_count = 0;
+        }
+
+        if(!object_table.first_element) {
+            return;
+        }
+
+        auto max_size = static_cast<std::size_t>(object_table.current_size);
+        if(max_size > OBJECT_BUFFER_SIZE) {
+            max_size = OBJECT_BUFFER_SIZE;
+        }
+
+        for(std::size_t i = 0; i < max_size; i++) {
+            auto &current_tick_object = current_tick[i];
 
             // Store index ID.
             current_tick_object.index = object_table.first_element[i].id;
-
-            // Set this to zero for later.
-            current_tick_object.children_count = 0;
 
             // See if the object exists.
             auto *object = object_table.get_dynamic_object(i);
@@ -197,7 +215,7 @@ namespace Chimera {
             // Get the number of model nodes.
             current_tick_object.tag_id = object->definition_index;
             auto *object_tag = get_tag(current_tick_object.tag_id.index.index);
-            if(!object_tag) {
+            if(!object_tag || !object_tag->data) {
                 continue;
             }
 
@@ -208,12 +226,18 @@ namespace Chimera {
             else {
                 const auto &model_tag_id = *reinterpret_cast<const TagID *>(object_tag->data + 0x28 + 0xC);
                 auto *model_tag = get_tag(model_tag_id);
-                if(!model_tag) {
+                if(!model_tag || !model_tag->data) {
                     current_tick_object.node_count = 0;
                 }
                 else {
                     current_tick_object.node_count = *reinterpret_cast<std::uint32_t *>(model_tag->data + 0xB8);
                 }
+            }
+
+            // Reject models larger than the snapshot buffer.
+            if(current_tick_object.node_count > MAX_NODES) {
+                current_tick_object.node_count = 0;
+                continue;
             }
 
             // Copy nodes from Halo's data
@@ -241,15 +265,22 @@ namespace Chimera {
         }
 
         // Now go through the parent object array to add child objects to their parents children array.
-        for(std::size_t i = 0; i < max_size && i < OBJECT_BUFFER_SIZE; i++) {
+        for(std::size_t i = 0; i < max_size; i++) {
             // If object at index i has no parent, skip.
             if(parent_object_array[i].is_null()) {
                 continue;
             }
 
-            // If it does have a parent, put the index in the parent objects child array.
-            auto &current_tick_parent_object = current_tick[parent_object_array[i].index.index];
-            current_tick_parent_object.children[current_tick_parent_object.children_count++] = i;
+            const auto parent_index = static_cast<std::size_t>(parent_object_array[i].index.index);
+            if(parent_index >= max_size || parent_index >= OBJECT_BUFFER_SIZE) {
+                continue;
+            }
+
+            // If it does have a parent, put the index in the parent object's child array.
+            auto &current_tick_parent_object = current_tick[parent_index];
+            if(current_tick_parent_object.children_count < OBJECT_BUFFER_SIZE) {
+                current_tick_parent_object.children[current_tick_parent_object.children_count++] = i;
+            }
         }
     }
 
@@ -270,12 +301,16 @@ namespace Chimera {
             auto *object = object_table.get_dynamic_object(i);
 
             // This shouldn't ever happen but just in case it does...
-            if(!object) {
+            if(!object || current_tick_object.node_count > MAX_NODES) {
                 continue;
             }
 
             object->object.bounding_sphere_center = current_tick_object.center;
-            std::copy(current_tick_object.nodes, current_tick_object.nodes + current_tick_object.node_count, object->nodes());
+            auto *nodes = object->nodes();
+            if(current_tick_object.node_count != 0 && !nodes) {
+                continue;
+            }
+            std::copy(current_tick_object.nodes, current_tick_object.nodes + current_tick_object.node_count, nodes);
         }
     }
 
@@ -285,6 +320,8 @@ namespace Chimera {
             current_tick[i].interpolate = false;
             current_tick[i].interpolated_this_frame = false;
             current_tick[i].index = 0;
+            current_tick[i].children_count = 0;
+            current_tick[i].node_count = 0;
         }
     }
 

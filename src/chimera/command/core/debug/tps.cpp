@@ -8,18 +8,31 @@
 #include "../../../signature/signature.hpp"
 #include "../../../signature/hook.hpp"
 #include "../../../halo_data/multiplayer.hpp"
+#include <cerrno>
+#include <cmath>
+#include <cstdlib>
 
 namespace Chimera {
     static float *tps = nullptr;
     static void revert_if_needed() noexcept;
     bool tps_command(int argc, const char **argv) noexcept {
         if(!tps) {
-            tps = *reinterpret_cast<float **>(get_chimera().get_signature("tick_rate_sig").data() + 2);
+            auto *signature = get_chimera().get_signature("tick_rate_sig").data();
+            if(!signature) {
+                return false;
+            }
+            tps = *reinterpret_cast<float **>(signature + 2);
+            if(!tps) {
+                return false;
+            }
         }
         if(argc) {
-            float new_tps = std::atof(*argv);
-            if(new_tps < 0.0F) {
-                new_tps = 0.0F;
+            errno = 0;
+            char *end = nullptr;
+            float new_tps = std::strtof(*argv, &end);
+            if(errno == ERANGE || end == *argv || !end || *end != 0 || !std::isfinite(new_tps) || new_tps < 0.0F) {
+                console_error("TPS must be a finite non-negative number.");
+                return false;
             }
             if(new_tps == 30.0F) {
                 remove_pretick_event(revert_if_needed);

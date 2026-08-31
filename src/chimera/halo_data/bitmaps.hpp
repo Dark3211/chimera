@@ -140,7 +140,7 @@ namespace Chimera {
         std::uint16_t flags;
         Vector2DInt registration_point;
         std::int16_t mipmap_count;
-        PAD(0x2);
+        PAD(0x2); // Used temporarily by map_loading to preserve indexed-tag bitmap format.
         std::int32_t pixels_offset;
         std::int32_t pixels_size;
         TagID tag_id;
@@ -207,7 +207,7 @@ namespace Chimera {
      * @param  bitmap Bitmap data block to convert.
      * @return pointer to the converted raw pixel data.
      */
-    void *bitmap_covert_format(BitmapData *bitmap) noexcept;
+    void *bitmap_covert_format(BitmapData *bitmap, bool force_32) noexcept;
 
 }
 

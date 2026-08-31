@@ -53,6 +53,11 @@ namespace Chimera {
 
         entry = get_map_entry(map_name);
         loaded_map = get_loaded_map(map_name);
+        if(!loaded_map) {
+            console_error("Unable to read current map information.");
+            output_prefix = prefix;
+            return false;
+        }
 
         // is the map compressed?
         bool compressed = loaded_map->decompressed_size != loaded_map->file_size;
@@ -123,9 +128,10 @@ namespace Chimera {
 
         if(get_chimera().get_ini()->get_value_bool("memory.enable_map_memory_buffer").value_or(false)) {
             std::size_t buffer_used = loaded_map->loaded_size;
-            std::size_t buffer_size = loaded_map->buffer_size + loaded_map->loaded_size; // This seems off but I don't want to touch it
-
-            float buffer_used_percentage = (static_cast<float>(buffer_used) / buffer_size) * 100;
+            std::size_t buffer_size = loaded_map->buffer_size;
+            float buffer_used_percentage = buffer_size > 0
+                ? (static_cast<float>(buffer_used) / static_cast<float>(buffer_size)) * 100.0F
+                : 0.0F;
 
             const char *key_string = localize("chimera_map_info_command_ram_buffer");
             OUTPUT_WITH_COLOR("%s: %.2f MiB / %.2f MiB (%.2f%%)", key_string, SIZE_IN_MIB(buffer_used), SIZE_IN_MIB(buffer_size), buffer_used_percentage);

@@ -36,7 +36,7 @@ namespace Chimera {
                             break;
                         default:
                             unsigned int team_int = player->team;
-                            std::strncpy(team, " (%u)", team_int);
+                            std::snprintf(team, sizeof(team), " (%u)", team_int);
                             color.r = 0.4F;
                             color.g = 1.0F;
                             color.b = 0.4F;

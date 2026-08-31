@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstring>
 #include <optional>
+#include <limits>
 
 #define DEG_TO_RAD(deg) (deg * static_cast<float>(M_PI) / 180.0f)
 #define RAD_TO_DEG(rad) (rad / static_cast<float>(M_PI) * 180.0f)
@@ -76,21 +77,32 @@ namespace Chimera {
             auto *player_object = reinterpret_cast<UnitDynamicObject *>(object_table.get_dynamic_object(player->object_id));
             if(player_object) {
                 auto *player_object_tag = get_tag(player_object->definition_index);
-                float unit_field_of_view = *reinterpret_cast<float *>(player_object_tag->data + 0x17C + 0x24); // unit camera_field_of_view
-                // The game does this somewhere so we have to too.
-                if(unit_field_of_view > MAX_UNIT_FOV && player_object->unit.current_zoom_level == 255) {
-                    unit_field_of_view = MAX_UNIT_FOV;
+                if(player_object_tag && player_object_tag->data) {
+                    float unit_field_of_view = *reinterpret_cast<float *>(player_object_tag->data + 0x17C + 0x24); // unit camera_field_of_view
+                    // The game does this somewhere so we have to too.
+                    if(unit_field_of_view > MAX_UNIT_FOV && player_object->unit.current_zoom_level == 255) {
+                        unit_field_of_view = MAX_UNIT_FOV;
+                    }
+                    if(std::isfinite(unit_field_of_view) && std::fabs(unit_field_of_view) > std::numeric_limits<float>::epsilon()) {
+                        fov_multiplier = camera.fov / unit_field_of_view;
+                    }
                 }
-                fov_multiplier = camera.fov / unit_field_of_view;
             }
         }
 
         float setting = fov_to_use.value();
 
+        if(!std::isfinite(setting) || !std::isfinite(fov_multiplier)) {
+            return;
+        }
+
         if(vertical) {
             // Convert to a vertical FOV based on the resolution of the game.
             auto &resolution = get_resolution();
-            camera.fov = 2.0f * std::atan(std::tan(setting / 2.0f) * resolution.width / resolution.height) * fov_multiplier;
+            if(resolution.height == 0) {
+                return;
+            }
+            camera.fov = 2.0f * std::atan(std::tan(setting / 2.0f) * static_cast<float>(resolution.width) / static_cast<float>(resolution.height)) * fov_multiplier;
         }
         else {
             // If we're just changing horizontal FOV, we don't need to do much math.
@@ -117,15 +129,29 @@ namespace Chimera {
 
             // We know what we want
             else {
+                if(!args || !args[0]) {
+                    console_error(localize("chimera_fov_error_invalid_fov_given"));
+                    return false;
+                }
+
                 std::size_t end = 0;
+                float degrees = 0.0f;
                 try {
-                    setting = DEG_TO_RAD(static_cast<float>(std::stof(args[0], &end)));
+                    degrees = std::stof(args[0], &end);
                 }
                 catch(std::exception &) {
                     console_error(localize("chimera_fov_error_invalid_fov_given"));
                     return false;
                 }
-                vertical = (end && args[0][end] == 'v');
+
+                const bool vertical_suffix = args[0][end] == 'v' && args[0][end + 1] == '\0';
+                if((args[0][end] != '\0' && !vertical_suffix) || !std::isfinite(degrees) || degrees <= 0.0f || degrees >= 180.0f) {
+                    console_error(localize("chimera_fov_error_invalid_fov_given"));
+                    return false;
+                }
+
+                setting = DEG_TO_RAD(degrees);
+                vertical = vertical_suffix;
             }
 
             // Unregister everything

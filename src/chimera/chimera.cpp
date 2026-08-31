@@ -136,10 +136,14 @@ namespace Chimera {
             if(path) {
                 static std::string new_path = path;
                 if(new_path.size() >= MAX_PATH) {
-                    show_error_box("Error", "Path is too long");
-                    std::exit(1);
+                    show_error_box("Error", "Configured halo.path is too long; the override will be ignored.");
                 }
-                overwrite(chimera->get_signature("write_path_sig").data() + 2, new_path.data());
+                else {
+                    auto *write_path_signature = chimera->get_signature("write_path_sig").data();
+                    if(write_path_signature) {
+                        overwrite(write_path_signature + 2, new_path.c_str());
+                    }
+                }
             }
 
             // Enable fast loading
@@ -448,46 +452,49 @@ namespace Chimera {
     }
 
     CommandResult Chimera::execute_command(const char *command, const Command **found_command, bool saves) {
-        // Try to parse it
-        auto arguments = split_arguments(command);
+        if(found_command) {
+            *found_command = nullptr;
+        }
+        if(!command) {
+            return CommandResult::COMMAND_RESULT_FAILED_ERROR_NOT_FOUND;
+        }
 
-        // Check if there actually was something given
-        if(arguments.size() != 0) {
-            // Get the command name and lowercase it
+        try {
+            auto arguments = split_arguments(command);
+            if(arguments.empty()) {
+                return CommandResult::COMMAND_RESULT_FAILED_ERROR_NOT_FOUND;
+            }
+
             std::string command_name = arguments[0];
             auto &c_locale = std::locale::classic();
             for(char &c : command_name) {
                 c = std::tolower(c, c_locale);
             }
-
-            // Remove the command name from the arguments
             arguments.erase(arguments.begin());
 
-            // Find and execute the command
             for(auto &cmd : this->p_commands) {
-                if(std::strcmp(command_name.data(), cmd.name()) == 0) {
+                if(std::strcmp(command_name.c_str(), cmd.name()) == 0) {
                     if(found_command) {
                         *found_command = &cmd;
                     }
+
                     extern const char *output_prefix;
                     auto *old_prefix = output_prefix;
-                    if(std::strcmp(cmd.name(), "chimera") == 0) {
-                        output_prefix = nullptr;
-                    }
-                    else {
-                        output_prefix = cmd.name();
-                    }
+                    output_prefix = std::strcmp(cmd.name(), "chimera") == 0 ? nullptr : cmd.name();
                     auto result = cmd.call(arguments);
                     output_prefix = old_prefix;
 
-                    if(saves && this->p_config.get() && result == CommandResult::COMMAND_RESULT_SUCCESS && cmd.autosave() && arguments.size() > 0) {
-                        this->p_config->set_settings_for_command(command_name.data(), arguments);
+                    if(saves && this->p_config && result == CommandResult::COMMAND_RESULT_SUCCESS && cmd.autosave() && !arguments.empty()) {
+                        this->p_config->set_settings_for_command(command_name.c_str(), arguments);
                     }
                     return result;
                 }
             }
+            return CommandResult::COMMAND_RESULT_FAILED_ERROR_NOT_FOUND;
         }
-        return CommandResult::COMMAND_RESULT_FAILED_ERROR_NOT_FOUND;
+        catch(...) {
+            return CommandResult::COMMAND_RESULT_FAILED_ERROR;
+        }
     }
 
     Language Chimera::get_language() const noexcept {
@@ -522,8 +529,24 @@ namespace Chimera {
     extern "C" void print_signature_errors() {
         // Hold errors
         static char error_buffer[65536];
+        error_buffer[0] = 0;
         std::size_t error_buffer_offset = 0;
-        #define APPEND_SPRINTF(...) error_buffer_offset += std::snprintf(error_buffer + error_buffer_offset, sizeof(error_buffer) - error_buffer_offset, __VA_ARGS__)
+        #define APPEND_SPRINTF(...) do { \
+            if(error_buffer_offset < sizeof(error_buffer) - 1) { \
+                auto remaining = sizeof(error_buffer) - error_buffer_offset; \
+                int written = std::snprintf(error_buffer + error_buffer_offset, remaining, __VA_ARGS__); \
+                if(written < 0) { \
+                    error_buffer[error_buffer_offset] = 0; \
+                } \
+                else if(static_cast<std::size_t>(written) >= remaining) { \
+                    error_buffer_offset = sizeof(error_buffer) - 1; \
+                    error_buffer[error_buffer_offset] = 0; \
+                } \
+                else { \
+                    error_buffer_offset += static_cast<std::size_t>(written); \
+                } \
+            } \
+        } while(0)
 
         APPEND_SPRINTF("Could not load Chimera.\n\n");
         bool engine_type_missing = false;
@@ -582,10 +605,16 @@ namespace Chimera {
     }
 
     extern "C" const std::byte *address_for_signature(const char *signature) {
+        if(!chimera || !signature) {
+            return nullptr;
+        }
         return chimera->get_signature(signature).data();
     }
 
     extern "C" void address_for_signature_if_null(const char *signature, std::byte **address) {
+        if(!chimera || !signature || !address) {
+            return;
+        }
         if(*address == nullptr) {
             *address = chimera->get_signature(signature).data();
         }
@@ -594,8 +623,10 @@ namespace Chimera {
     const std::filesystem::path Chimera::get_path() noexcept {
         if(this->p_path.empty()) {
             this->p_path = std::filesystem::path(halo_path()) / "chimera";
-            std::filesystem::create_directory(this->p_path);
-            std::filesystem::create_directory(this->p_path / "tmp");
+            std::error_code ec;
+            std::filesystem::create_directories(this->p_path, ec);
+            ec.clear();
+            std::filesystem::create_directories(this->p_path / "tmp", ec);
         }
         return this->p_path;
     }
@@ -609,7 +640,8 @@ namespace Chimera {
             else {
                 this->p_download_map_path = this->get_path() / "maps";
             }
-            std::filesystem::create_directory(this->p_download_map_path);
+            std::error_code ec;
+            std::filesystem::create_directories(this->p_download_map_path, ec);
         }
         return this->p_download_map_path;
     }
@@ -623,7 +655,8 @@ namespace Chimera {
             else {
                 this->p_map_path = std::filesystem::path("maps");
             }
-            std::filesystem::create_directory(this->p_map_path);
+            std::error_code ec;
+            std::filesystem::create_directories(this->p_map_path, ec);
         }
         return this->p_map_path;
     }
@@ -854,7 +887,11 @@ namespace Chimera {
                 std::size_t node_count;
 
                 if(object->object.type != ObjectType::OBJECT_TYPE_PROJECTILE) {
-                    auto *tag_data = get_tag(object->definition_index)->data;
+                    auto *definition_tag = get_tag(object->definition_index);
+                    if(!definition_tag || !definition_tag->data) {
+                        continue;
+                    }
+                    auto *tag_data = definition_tag->data;
                     auto *model_tag = get_tag(*reinterpret_cast<TagID *>(tag_data + 0x28 + 0xC));
                     if(!model_tag) {
                         continue;

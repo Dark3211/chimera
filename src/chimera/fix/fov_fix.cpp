@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+#include <cstdint>
+
 #include "fov_fix.hpp"
 #include "../chimera.hpp"
 #include "../signature/signature.hpp"
@@ -10,9 +12,28 @@
 namespace Chimera {
     float fov_scale_factor = 1.0f;
 
+    static std::int32_t cached_fov_frame_extent = 0;
+    static std::uint16_t cached_fov_resolution_height = 0;
+    static float cached_fov_scale_factor = 1.0f;
+    static bool cached_fov_scale_valid = false;
+
     void set_fov_scale_this_frame() noexcept {
-        auto resoution = get_resolution();
-        fov_scale_factor = static_cast<float>(resoution.frame_bounds[2] - resoution.frame_bounds[0]) / static_cast<float>(resoution.height);
+        const auto &resolution = get_resolution();
+        if(resolution.height == 0) {
+            fov_scale_factor = 1.0f;
+            cached_fov_scale_valid = false;
+            return;
+        }
+
+        const auto frame_extent = static_cast<std::int32_t>(resolution.frame_bounds[2]) - static_cast<std::int32_t>(resolution.frame_bounds[0]);
+        if(!cached_fov_scale_valid || cached_fov_frame_extent != frame_extent || cached_fov_resolution_height != resolution.height) {
+            cached_fov_scale_factor = static_cast<float>(frame_extent) / static_cast<float>(resolution.height);
+            cached_fov_frame_extent = frame_extent;
+            cached_fov_resolution_height = resolution.height;
+            cached_fov_scale_valid = true;
+        }
+
+        fov_scale_factor = cached_fov_scale_factor;
     }
 
     void set_up_fov_fix() noexcept {

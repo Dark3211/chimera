@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+#include <cstddef>
+
 #include "effect_shader_fix.hpp"
 #include "../chimera.hpp"
 #include "../signature/hook.hpp"
@@ -17,7 +19,7 @@
 
 namespace Chimera {
 
-    #define RASTERIZER_TRANSPARENT_GEOMETRY_TEXCOORD_STREAM_SIZE 8192;
+    static constexpr std::size_t RASTERIZER_TRANSPARENT_GEOMETRY_TEXCOORD_STREAM_BYTES = 0x10000;
 
     extern "C" {
         void effect_shader_reindex_pixel_shader_asm() noexcept;
@@ -55,27 +57,29 @@ namespace Chimera {
             effect_shader_permutation_index += 6;
         }
 
-        switch(shader->effect.framebuffer_blend_function) {
-            case SHADER_FRAMEBUFFER_BLEND_FUNCTION_ALPHA_BLEND:
-                effect_shader_permutation_index += 2;
-                break;
-            case SHADER_FRAMEBUFFER_BLEND_FUNCTION_MULTIPLY:
-            case SHADER_FRAMEBUFFER_BLEND_FUNCTION_MIN:
-                effect_shader_permutation_index += 4;
-                break;
-            case SHADER_FRAMEBUFFER_BLEND_FUNCTION_DOUBLE_MULTIPLY:
-                effect_shader_permutation_index += 3;
-                break;
-            case SHADER_FRAMEBUFFER_BLEND_FUNCTION_ADD:
-            case SHADER_FRAMEBUFFER_BLEND_FUNCTION_REVERSE_SUBTRACT:
-            case SHADER_FRAMEBUFFER_BLEND_FUNCTION_MAX:
-                effect_shader_permutation_index += 1;
-                break;
-            case SHADER_FRAMEBUFFER_BLEND_FUNCTION_ALPHA_MULTIPLY_ADD:
-                effect_shader_permutation_index += 5;
-                break;
-            default:
-                break;
+        if(!TEST_FLAG(group->geometry_flags, RASTERIZER_GEOMETRY_FLAGS_NO_FOG_BIT)) {
+            switch(shader->effect.framebuffer_blend_function) {
+                case SHADER_FRAMEBUFFER_BLEND_FUNCTION_ALPHA_BLEND:
+                    effect_shader_permutation_index += 2;
+                    break;
+                case SHADER_FRAMEBUFFER_BLEND_FUNCTION_MULTIPLY:
+                case SHADER_FRAMEBUFFER_BLEND_FUNCTION_MIN:
+                    effect_shader_permutation_index += 4;
+                    break;
+                case SHADER_FRAMEBUFFER_BLEND_FUNCTION_DOUBLE_MULTIPLY:
+                    effect_shader_permutation_index += 3;
+                    break;
+                case SHADER_FRAMEBUFFER_BLEND_FUNCTION_ADD:
+                case SHADER_FRAMEBUFFER_BLEND_FUNCTION_REVERSE_SUBTRACT:
+                case SHADER_FRAMEBUFFER_BLEND_FUNCTION_MAX:
+                    effect_shader_permutation_index += 1;
+                    break;
+                case SHADER_FRAMEBUFFER_BLEND_FUNCTION_ALPHA_MULTIPLY_ADD:
+                    effect_shader_permutation_index += 5;
+                    break;
+                default:
+                    break;
+            }
         }
 
         // +1 on retail/demo
@@ -86,7 +90,7 @@ namespace Chimera {
     }
 
     extern "C" void set_up_zsprites(TransparentGeometryGroup *group) noexcept {
-        if(d3d9_device_caps->PixelShaderVersion < 0xffff0200) {
+        if(!group || !group->shader || !d3d9_device_caps || !global_d3d9_device || !*global_d3d9_device || !aux_buffer || !*aux_buffer || d3d9_device_caps->PixelShaderVersion < 0xffff0200) {
             return;
         }
 
@@ -108,12 +112,22 @@ namespace Chimera {
 
             int shader_index = game_engine() == GameEngine::GAME_ENGINE_CUSTOM_EDITION ? effect_shader_permutation_index : effect_shader_permutation_index - 1;
             shader_index = CHIMERA_PIXEL_SHADER_EFF_NLIN_TINT_Z + (shader_index - SHADER_EFFECT_EFFECT_NONLINEAR_TINT);
+            if(shader_index < CHIMERA_PIXEL_SHADER_EFF_NLIN_TINT_Z || shader_index > CHIMERA_PIXEL_SHADER_EFF_NORMAL_TINT_MUL_ADD_Z) {
+                return;
+            }
+
+            auto *pixel_shader = chimera_pixel_shaders[shader_index];
+            auto *vertex_shader = rasterizer_get_vertex_shader(VSH_EFFECT_ZSPRITE);
+            auto *vertex_declaration = rasterizer_get_vertex_declaration(VERTEX_DECLARATION_UNLIT_ZSPRITE);
+            if(!pixel_shader || !vertex_shader || !vertex_declaration) {
+                return;
+            }
 
             IDirect3DDevice9_SetVertexShaderConstantF(*global_d3d9_device, 18, vsh_constants_zspite, 2);
-            IDirect3DDevice9_SetVertexShader(*global_d3d9_device, rasterizer_get_vertex_shader(VSH_EFFECT_ZSPRITE));
-            IDirect3DDevice9_SetVertexDeclaration(*global_d3d9_device, rasterizer_get_vertex_declaration(VERTEX_DECLARATION_UNLIT_ZSPRITE));
+            IDirect3DDevice9_SetVertexShader(*global_d3d9_device, vertex_shader);
+            IDirect3DDevice9_SetVertexDeclaration(*global_d3d9_device, vertex_declaration);
             IDirect3DDevice9_SetStreamSource(*global_d3d9_device, 1, *aux_buffer, 0, 8);
-            IDirect3DDevice9_SetPixelShader(*global_d3d9_device, chimera_pixel_shaders[shader_index]);
+            IDirect3DDevice9_SetPixelShader(*global_d3d9_device, pixel_shader);
 
             rasterizer_set_texture(1, BITMAP_DATA_TYPE_2D, BITMAP_USAGE_ADDITIVE, group->shader_permutation_index, shader->effect.secondary_map.tag_id);
             rasterizer_set_sampler_state(1, D3DSAMP_ADDRESSU, D3DTADDRESS_WRAP);
@@ -131,17 +145,36 @@ namespace Chimera {
     }
 
     void meme_up_the_aux_buffer() noexcept {
-        float *vertices = nullptr;
-        IDirect3DVertexBuffer9_Lock(*aux_buffer, 0, 0x10000, reinterpret_cast<void **>(&vertices), 0);
+        if(!aux_buffer || !*aux_buffer) {
+            return;
+        }
 
-        float sequence[] = { 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.0f };
-        int sequence_size = 8;
-        int count = RASTERIZER_TRANSPARENT_GEOMETRY_TEXCOORD_STREAM_SIZE;
+        void *locked_data = nullptr;
+        const HRESULT lock_result = IDirect3DVertexBuffer9_Lock(
+            *aux_buffer,
+            0,
+            static_cast<UINT>(RASTERIZER_TRANSPARENT_GEOMETRY_TEXCOORD_STREAM_BYTES),
+            &locked_data,
+            0
+        );
+        if(FAILED(lock_result) || !locked_data) {
+            return;
+        }
 
-        while (count > 0) {
-            memcpy(vertices, sequence, sizeof(sequence));
-            vertices += sequence_size;
-            count -= sequence_size;
+        static constexpr float sequence[] = {
+            0.0f, 0.0f,
+            0.0f, 1.0f,
+            1.0f, 1.0f,
+            1.0f, 0.0f
+        };
+        constexpr std::size_t sequence_bytes = sizeof(sequence);
+        auto *vertices = static_cast<std::byte *>(locked_data);
+
+        // Initialize the full auxiliary texture-coordinate stream.
+        for(std::size_t offset = 0;
+            offset + sequence_bytes <= RASTERIZER_TRANSPARENT_GEOMETRY_TEXCOORD_STREAM_BYTES;
+            offset += sequence_bytes) {
+            memcpy(vertices + offset, sequence, sequence_bytes);
         }
 
         IDirect3DVertexBuffer9_Unlock(*aux_buffer);

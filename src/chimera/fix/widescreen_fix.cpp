@@ -210,7 +210,7 @@ namespace Chimera {
     }
 
     extern "C" void upscale_hud_element(ElementData &element) noexcept {
-        float screen_width = aspect_ratio * 480.000f;
+        float screen_width = widescreen_width_480p;
         float center_x = (element.corners[CORNER_TOP_LEFT].x + element.corners[CORNER_TOP_RIGHT].x + element.corners[CORNER_BOTTOM_LEFT].x + element.corners[CORNER_BOTTOM_RIGHT].x) / 4.0f;
         float position_percentage = center_x / 640.0f;
         float new_center_x = position_percentage * screen_width;
@@ -272,7 +272,7 @@ namespace Chimera {
     }
 
     extern "C" void reposition_letterbox_element(ElementData &element) noexcept {
-        float increase = aspect_ratio * 480.000f - 640.000f;
+        float increase = widescreen_width_480p - 640.000f;
         if(element.corners[CORNER_TOP_LEFT].x <= 1.0f && element.corners[CORNER_TOP_RIGHT].x >= 639.0f) {
             element.corners[CORNER_TOP_RIGHT].x += increase;
             element.corners[CORNER_BOTTOM_RIGHT].x += increase;
@@ -324,7 +324,7 @@ namespace Chimera {
 
     extern "C" void upscale_menu_text_element(std::int16_t *element) noexcept {
         // Basically this upscales the position of the element
-        float screen_width = aspect_ratio * 480.000f;
+        float screen_width = widescreen_width_480p;
         std::int16_t element_width = element[3] - element[1];
         std::int16_t element_center = (element[3] + element[1] + 1) / 2;
         float position_percentage = static_cast<float>(element_center) / 640.0f;
@@ -650,11 +650,30 @@ namespace Chimera {
     }
 
     static void on_tick() noexcept {
-        aspect_ratio = static_cast<float>(get_resolution().width) / static_cast<float>(get_resolution().height);
-        widescreen_left_offset_add = static_cast<std::int16_t>((aspect_ratio * 480.000f - 640.000f) / 2.0f);
+        const auto &resolution = get_resolution();
+        if(resolution.width == 0 || resolution.height == 0) {
+            return;
+        }
+
+        static std::uint16_t cached_resolution_width = 0;
+        static std::uint16_t cached_resolution_height = 0;
+        static float cached_width_480p = 640.0f;
+        static std::int16_t cached_left_offset_add = 0;
+        static bool cached_resolution_valid = false;
+
+        if(!cached_resolution_valid || cached_resolution_width != resolution.width || cached_resolution_height != resolution.height) {
+            aspect_ratio = static_cast<float>(resolution.width) / static_cast<float>(resolution.height);
+            cached_width_480p = aspect_ratio * 480.0f;
+            cached_left_offset_add = static_cast<std::int16_t>((cached_width_480p - 640.0f) / 2.0f);
+            cached_resolution_width = resolution.width;
+            cached_resolution_height = resolution.height;
+            cached_resolution_valid = true;
+        }
+
+        widescreen_left_offset_add = cached_left_offset_add;
 
         // Change instructions if we need them to be changed
-        widescreen_width_480p = aspect_ratio * 480.0f;
+        widescreen_width_480p = cached_width_480p;
 
         if(*console_width != static_cast<std::int32_t>(widescreen_width_480p)) {
             overwrite(scope_width, widescreen_width_480p);
@@ -665,7 +684,7 @@ namespace Chimera {
             widescreen_mouse_right_bounds = 640 + mouse_increase;
             *widescreen_mouse_x = widescreen_mouse_left_bounds;
 
-            float half_width_inverted = 2.0 / (aspect_ratio * 480.0f);
+            float half_width_inverted = 2.0f / widescreen_width_480p;
             overwrite(hud_element_scaling, half_width_inverted);
             overwrite(text_scaling, half_width_inverted);
             overwrite(motion_sensor_scaling, half_width_inverted);

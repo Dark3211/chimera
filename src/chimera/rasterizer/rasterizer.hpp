@@ -8,10 +8,46 @@
 #include <d3d9.h>
 #include <d3dcompiler.h>
 
+#include "highlight_protection.hpp"
 #include "../halo_data/rasterizer_common.hpp"
 #include "../output/error_box.hpp"
 #include "../output/output.hpp"
 
+
+namespace Chimera {
+    namespace Detail {
+        // MinGW's IMAGE_FIRST_SECTION macro uses C-style casts internally, which
+        // trigger -Wold-style-cast at the expansion site. Keep the SDK's exact
+        // pointer arithmetic, but express it with typed C++ casts instead of
+        // weakening warnings for the whole rasterizer translation unit.
+        inline IMAGE_SECTION_HEADER *first_image_section(IMAGE_NT_HEADERS *nt) noexcept {
+            if(!nt) {
+                return nullptr;
+            }
+            return reinterpret_cast<IMAGE_SECTION_HEADER *>(
+                reinterpret_cast<std::byte *>(&nt->OptionalHeader) +
+                static_cast<std::size_t>(nt->FileHeader.SizeOfOptionalHeader)
+            );
+        }
+
+        inline const IMAGE_SECTION_HEADER *first_image_section(const IMAGE_NT_HEADERS *nt) noexcept {
+            if(!nt) {
+                return nullptr;
+            }
+            return reinterpret_cast<const IMAGE_SECTION_HEADER *>(
+                reinterpret_cast<const std::byte *>(&nt->OptionalHeader) +
+                static_cast<std::size_t>(nt->FileHeader.SizeOfOptionalHeader)
+            );
+        }
+    }
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+    #ifdef IMAGE_FIRST_SECTION
+        #undef IMAGE_FIRST_SECTION
+        #define IMAGE_FIRST_SECTION(ntheader) ::Chimera::Detail::first_image_section((ntheader))
+    #endif
+#endif
 
 namespace Chimera {
     enum ChimeraPixelShaders {

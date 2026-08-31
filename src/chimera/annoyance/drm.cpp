@@ -42,7 +42,7 @@ namespace Chimera {
         if(hash && std::strlen(hash) > 0) {
             if(!get_chimera().feature_present("client_edit_cd_hash")) {
                 show_error_box("Error", "Using custom CD hashes is not supported on this client. (client is probably modified)");
-                std::exit(1);
+                return;
             }
 
             static Hook hook;
@@ -51,6 +51,9 @@ namespace Chimera {
     }
 
     extern "C" void fun_cd_key_hash_gen_asm(std::uint8_t *key) noexcept {
+        if(!key) {
+            return;
+        }
         auto *hash = get_chimera().get_ini()->get_value("halo.hash");
         if(hash) {
             #define HASH_LENGTH 32

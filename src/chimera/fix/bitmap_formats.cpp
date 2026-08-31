@@ -5,6 +5,7 @@
 #include "bitmap_formats.hpp"
 #include "../halo_data/bitmaps.hpp"
 #include "../chimera.hpp"
+#include "../config/ini.hpp"
 #include "../signature/hook.hpp"
 #include "../signature/signature.hpp"
 
@@ -14,26 +15,42 @@ namespace Chimera {
     }
 
     extern "C" void check_for_invalid_bitmap_format(BitmapData *bitmap) noexcept {
-        // Convert invalid formats
-        if(bitmap->format == BITMAP_DATA_FORMAT_A8 || bitmap->format == BITMAP_DATA_FORMAT_AY8 || bitmap->format == BITMAP_DATA_FORMAT_P8_BUMP) {
-            void *new_bitmap = bitmap_covert_format(bitmap);
-            GlobalFree(bitmap->base_address);
-            bitmap->base_address = new_bitmap;
+        if(!bitmap) {
+            return;
+        }
 
-            // Tell the game to treat this bitmap data block as either A8Y8 or A8R8G8B8.
-            switch(bitmap->format) {
-                case BITMAP_DATA_FORMAT_A8:
-                case BITMAP_DATA_FORMAT_AY8:
-                    bitmap->format = BITMAP_DATA_FORMAT_A8Y8;
-                    break;
+        // Convert unsupported monochrome formats before D3D9 texture creation.
+        const bool force_32 = get_chimera().get_ini()->get_value_bool("debug.convert_monochrome_to_argb").value_or(false);
+        const auto original_format = bitmap->format;
+        const bool should_convert = force_32
+            ? ((original_format >= BITMAP_DATA_FORMAT_A8 && original_format <= BITMAP_DATA_FORMAT_A8Y8) || original_format == BITMAP_DATA_FORMAT_P8_BUMP)
+            : (original_format == BITMAP_DATA_FORMAT_A8 || original_format == BITMAP_DATA_FORMAT_AY8 || original_format == BITMAP_DATA_FORMAT_P8_BUMP);
 
-                case BITMAP_DATA_FORMAT_P8_BUMP:
-                    bitmap->format = BITMAP_DATA_FORMAT_A8R8G8B8;
-                    break;
+        if(!should_convert) {
+            return;
+        }
 
-                default:
-                    break;
-            }
+        void *new_bitmap = bitmap_covert_format(bitmap, force_32);
+        if(!new_bitmap) {
+            return;
+        }
+
+        auto *old_bitmap = bitmap->base_address;
+        bitmap->base_address = new_bitmap;
+
+        if(force_32) {
+            bitmap->format = original_format == BITMAP_DATA_FORMAT_Y8
+                ? BITMAP_DATA_FORMAT_X8R8G8B8
+                : BITMAP_DATA_FORMAT_A8R8G8B8;
+        }
+        else {
+            bitmap->format = original_format == BITMAP_DATA_FORMAT_P8_BUMP
+                ? BITMAP_DATA_FORMAT_A8R8G8B8
+                : BITMAP_DATA_FORMAT_A8Y8;
+        }
+
+        if(old_bitmap) {
+            GlobalFree(old_bitmap);
         }
     }
 

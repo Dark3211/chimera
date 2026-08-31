@@ -43,7 +43,7 @@ namespace Chimera {
             return false;
         }
         latest_query_packet = query_server(get_latest_connection());
-        if(latest_query_packet->error || latest_query_packet->get_data_for_key("sappflags")) {
+        if(latest_query_packet->error != QueryPacketDone::Error::NONE || latest_query_packet->has_data_for_key("sappflags")) {
             latest_query_packet = std::nullopt;
             return false;
         }

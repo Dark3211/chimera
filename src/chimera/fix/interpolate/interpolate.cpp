@@ -30,6 +30,10 @@ namespace Chimera {
 
     // This is the assumed tick rate of the first person camera.
     static float *first_person_camera_tick_rate = nullptr;
+    static float original_first_person_camera_tick_rate = 0.0f;
+    static float applied_first_person_camera_tick_rate = 0.0f;
+    static bool first_person_camera_tick_rate_saved = false;
+    static bool first_person_camera_tick_rate_modified = false;
 
     // Set for if interpolation is enabled
     bool interpolation_enabled = false;
@@ -50,8 +54,12 @@ namespace Chimera {
         interpolate_particle_on_tick();
         interpolation_tick_progress = 0;
         float current_tick_rate = effective_tick_rate();
-        if(*first_person_camera_tick_rate != current_tick_rate) {
+        if(first_person_camera_tick_rate && *first_person_camera_tick_rate != current_tick_rate) {
             overwrite(first_person_camera_tick_rate, current_tick_rate);
+            if(*first_person_camera_tick_rate == current_tick_rate) {
+                applied_first_person_camera_tick_rate = current_tick_rate;
+                first_person_camera_tick_rate_modified = true;
+            }
         }
     }
 
@@ -89,9 +97,22 @@ namespace Chimera {
     }
 
     void set_up_interpolation() noexcept {
+        if(interpolation_enabled) {
+            return;
+        }
+
         static auto *fp_interp_ptr = get_chimera().get_signature("fp_interp_sig").data();
         static Hook fp_interp_hook;
         first_person_camera_tick_rate = *reinterpret_cast<float **>(get_chimera().get_signature("fp_cam_tick_rate_sig").data() + 2);
+        if(first_person_camera_tick_rate) {
+            original_first_person_camera_tick_rate = *first_person_camera_tick_rate;
+            first_person_camera_tick_rate_saved = true;
+        }
+        else {
+            first_person_camera_tick_rate_saved = false;
+        }
+        first_person_camera_tick_rate_modified = false;
+        interpolation_tick_progress = 0;
 
         add_tick_event(on_tick);
         add_preframe_event(on_preframe);
@@ -103,12 +124,16 @@ namespace Chimera {
         // Block built-in fp camera interpolation. Let Chimera do it instead.
         overwrite(get_chimera().get_signature("camera_interpolation_sig").data() + 0xF, static_cast<unsigned char>(0xEB));
 
-        //Clear interpolation buffers on major game state changes to prevent funny things from happening
+        // Clear buffers on major state changes.
         add_revert_event(clear_buffers);
         interpolation_enabled = true;
     }
 
     void disable_interpolation() noexcept {
+        if(!interpolation_enabled) {
+            return;
+        }
+
         get_chimera().get_signature("fp_interp_sig").rollback();
         get_chimera().get_signature("camera_interpolation_sig").rollback();
         remove_tick_event(on_tick);
@@ -117,6 +142,18 @@ namespace Chimera {
         remove_precamera_event(interpolate_camera_before);
         remove_camera_event(interpolate_camera_after);
         remove_revert_event(clear_buffers);
+
+        // Restore only if Chimera still owns the value.
+        if(first_person_camera_tick_rate &&
+           first_person_camera_tick_rate_saved &&
+           first_person_camera_tick_rate_modified &&
+           *first_person_camera_tick_rate == applied_first_person_camera_tick_rate) {
+            overwrite(first_person_camera_tick_rate, original_first_person_camera_tick_rate);
+        }
+
+        first_person_camera_tick_rate_saved = false;
+        first_person_camera_tick_rate_modified = false;
+        interpolation_tick_progress = 0;
         interpolation_enabled = false;
     }
 }

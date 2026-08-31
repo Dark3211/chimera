@@ -20,95 +20,96 @@ namespace Chimera {
     std::uint32_t global_max_anisotropy = 16;
     bool af_trial = false;
 
-    void set_sampler_states_for_models() noexcept {
-        if(*af_is_enabled) {
-            if((d3d9_device_caps->RasterCaps & D3DPRASTERCAPS_ANISOTROPY) != 0 && 1 < d3d9_device_caps->MaxAnisotropy) {
-                auto max_anisotropy = d3d9_device_caps->MaxAnisotropy < global_max_anisotropy ? d3d9_device_caps->MaxAnisotropy : global_max_anisotropy;
+    static bool af_supported() noexcept {
+        return d3d9_device_caps &&
+               (d3d9_device_caps->RasterCaps & D3DPRASTERCAPS_ANISOTROPY) != 0 &&
+               1 < d3d9_device_caps->MaxAnisotropy;
+    }
 
-                IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 0, D3DSAMP_MAXANISOTROPY, max_anisotropy);
-                IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 0, D3DSAMP_MAGFILTER, 3);
-                IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 0, D3DSAMP_MINFILTER, 3);
-                IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 1, D3DSAMP_MAXANISOTROPY, max_anisotropy);
-                IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 1, D3DSAMP_MAGFILTER, 3);
-                IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 1, D3DSAMP_MINFILTER, 3);
-                // Samplers 2 and 3 aren't used if ps < 1.1, not that thats ever really going to come up in the year 2025.
-                if(d3d9_device_caps->PixelShaderVersion > 0xffff0100) {
-                    IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 2, D3DSAMP_MAXANISOTROPY, max_anisotropy);
-                    IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 2, D3DSAMP_MAGFILTER, 3);
-                    IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 2, D3DSAMP_MINFILTER, 3);
-                    IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 3, D3DSAMP_MAXANISOTROPY, max_anisotropy);
-                    IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 3, D3DSAMP_MAGFILTER, 3);
-                    IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 3, D3DSAMP_MINFILTER, 3);
-                }
+    static std::uint32_t effective_max_anisotropy() noexcept {
+        return d3d9_device_caps->MaxAnisotropy < global_max_anisotropy
+                   ? d3d9_device_caps->MaxAnisotropy
+                   : global_max_anisotropy;
+    }
+
+    static void apply_anisotropic_filtering(std::uint32_t sampler, std::uint32_t max_anisotropy) noexcept {
+        if(!global_d3d9_device || !*global_d3d9_device) {
+            return;
+        }
+
+        IDirect3DDevice9_SetSamplerState(
+            *global_d3d9_device,
+            sampler,
+            D3DSAMP_MAXANISOTROPY,
+            max_anisotropy
+        );
+        IDirect3DDevice9_SetSamplerState(
+            *global_d3d9_device,
+            sampler,
+            D3DSAMP_MAGFILTER,
+            D3DTEXF_ANISOTROPIC
+        );
+        IDirect3DDevice9_SetSamplerState(
+            *global_d3d9_device,
+            sampler,
+            D3DSAMP_MINFILTER,
+            D3DTEXF_ANISOTROPIC
+        );
+    }
+
+    void set_sampler_states_for_models() noexcept {
+        if(af_is_enabled && *af_is_enabled && af_supported()) {
+            auto max_anisotropy = effective_max_anisotropy();
+
+            apply_anisotropic_filtering(0, max_anisotropy);
+            apply_anisotropic_filtering(1, max_anisotropy);
+
+            // Samplers 2 and 3 aren't used if ps < 1.1, not that thats ever really going to come up in the year 2025.
+            if(d3d9_device_caps->PixelShaderVersion > 0xffff0100) {
+                apply_anisotropic_filtering(2, max_anisotropy);
+                apply_anisotropic_filtering(3, max_anisotropy);
             }
         }
     }
 
     void set_sampler_states_for_structures() noexcept {
         // This is only for the demo. The base game does it for retail/custom edition on 1.0.10.
-        if(*af_is_enabled) {
-            if((d3d9_device_caps->RasterCaps & D3DPRASTERCAPS_ANISOTROPY) != 0 && 1 < d3d9_device_caps->MaxAnisotropy) {
-                auto max_anisotropy = d3d9_device_caps->MaxAnisotropy < global_max_anisotropy ? d3d9_device_caps->MaxAnisotropy : global_max_anisotropy;
+        if(af_is_enabled && *af_is_enabled && af_supported()) {
+            auto max_anisotropy = effective_max_anisotropy();
 
-                IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 0, D3DSAMP_MAXANISOTROPY, max_anisotropy);
-                IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 0, D3DSAMP_MAGFILTER, 3);
-                IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 0, D3DSAMP_MINFILTER, 3);
-                IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 1, D3DSAMP_MAXANISOTROPY, max_anisotropy);
-                IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 1, D3DSAMP_MAGFILTER, 3);
-                IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 1, D3DSAMP_MINFILTER, 3);
-                // Samplers 2 and 3 aren't used if ps < 1.1.
-                if(d3d9_device_caps->PixelShaderVersion > 0xffff0100) {
-                    IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 2, D3DSAMP_MAXANISOTROPY, max_anisotropy);
-                    IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 2, D3DSAMP_MAGFILTER, 3);
-                    IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 2, D3DSAMP_MINFILTER, 3);
-                    IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 3, D3DSAMP_MAXANISOTROPY, max_anisotropy);
-                    IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 3, D3DSAMP_MAGFILTER, 3);
-                    IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 3, D3DSAMP_MINFILTER, 3);
-                }
+            apply_anisotropic_filtering(0, max_anisotropy);
+            apply_anisotropic_filtering(1, max_anisotropy);
+
+            // Samplers 2 and 3 aren't used if ps < 1.1.
+            if(d3d9_device_caps->PixelShaderVersion > 0xffff0100) {
+                apply_anisotropic_filtering(2, max_anisotropy);
+                apply_anisotropic_filtering(3, max_anisotropy);
             }
         }
     }
 
     void set_sampler_states_for_decals() noexcept {
-        if(*af_is_enabled) {
-            if((d3d9_device_caps->RasterCaps & D3DPRASTERCAPS_ANISOTROPY) != 0 && 1 < d3d9_device_caps->MaxAnisotropy) {
-                auto max_anisotropy = d3d9_device_caps->MaxAnisotropy < global_max_anisotropy ? d3d9_device_caps->MaxAnisotropy : global_max_anisotropy;
-
-                IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 0, D3DSAMP_MAXANISOTROPY, max_anisotropy);
-                IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 0, D3DSAMP_MAGFILTER, 3);
-                IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 0, D3DSAMP_MINFILTER, 3);
-            }
+        if(af_is_enabled && *af_is_enabled && af_supported()) {
+            apply_anisotropic_filtering(0, effective_max_anisotropy());
         }
     }
 
     void set_sampler_states_for_plasma() noexcept {
-        if(*af_is_enabled) {
-            if((d3d9_device_caps->RasterCaps & D3DPRASTERCAPS_ANISOTROPY) != 0 && 1 < d3d9_device_caps->MaxAnisotropy) {
-                auto max_anisotropy = d3d9_device_caps->MaxAnisotropy < global_max_anisotropy ? d3d9_device_caps->MaxAnisotropy : global_max_anisotropy;
+        if(af_is_enabled && *af_is_enabled && af_supported()) {
+            auto max_anisotropy = effective_max_anisotropy();
 
-                // Barely makes much difference with shader_transparent_plasma. Whatever.
-                IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 0, D3DSAMP_MAXANISOTROPY, max_anisotropy);
-                IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 0, D3DSAMP_MAGFILTER, 3);
-                IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 0, D3DSAMP_MINFILTER, 3);
-                IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 1, D3DSAMP_MAXANISOTROPY, max_anisotropy);
-                IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 1, D3DSAMP_MAGFILTER, 3);
-                IDirect3DDevice9_SetSamplerState(*global_d3d9_device, 1, D3DSAMP_MINFILTER, 3);
-            }
+            // Barely makes much difference with shader_transparent_plasma. Whatever.
+            apply_anisotropic_filtering(0, max_anisotropy);
+            apply_anisotropic_filtering(1, max_anisotropy);
         }
     }
 
     extern "C" void set_sampler_states_for_chicago(std::byte *map, std::uint32_t map_index) noexcept {
-        if(*af_is_enabled) {
+        if(af_is_enabled && *af_is_enabled && map && af_supported()) {
             auto *map_flags = reinterpret_cast<std::uint16_t *>(map);
             // If unfiltered flag is true, do nothing.
             if(!(*map_flags & 1)) {
-                if((d3d9_device_caps->RasterCaps & D3DPRASTERCAPS_ANISOTROPY) != 0 && 1 < d3d9_device_caps->MaxAnisotropy) {
-                    auto max_anisotropy = d3d9_device_caps->MaxAnisotropy < global_max_anisotropy ? d3d9_device_caps->MaxAnisotropy : global_max_anisotropy;
-
-                    IDirect3DDevice9_SetSamplerState(*global_d3d9_device, map_index, D3DSAMP_MAXANISOTROPY, max_anisotropy);
-                    IDirect3DDevice9_SetSamplerState(*global_d3d9_device, map_index, D3DSAMP_MAGFILTER, 3);
-                    IDirect3DDevice9_SetSamplerState(*global_d3d9_device, map_index, D3DSAMP_MINFILTER, 3);
-                }
+                apply_anisotropic_filtering(map_index, effective_max_anisotropy());
             }
         }
     }

@@ -9,6 +9,10 @@
 
 namespace Chimera {
     void refresh_client_index(lua_State *state) noexcept {
+        if(!state) {
+            return;
+        }
+
         auto player_id = get_client_player_id();
         if(!player_id.is_null()) {
             lua_pushinteger(state, player_id.index.index);
@@ -20,6 +24,10 @@ namespace Chimera {
     }
 
     void refresh_variables(lua_State *state) noexcept {
+        if(!state) {
+            return;
+        }
+
         // Update client player index
         refresh_client_index(state);
 
@@ -32,7 +40,7 @@ namespace Chimera {
         lua_setglobal(state, "map_is_protected");
 
         // Update server type
-        const char *server = nullptr;
+        const char *server = "none";
         switch(server_type()) {
             case SERVER_NONE:
                 server = "none";

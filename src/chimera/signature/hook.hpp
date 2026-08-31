@@ -11,6 +11,12 @@
 #include "signature.hpp"
 
 namespace Chimera {
+    /** Validate that an address range is committed/readable memory. */
+    bool is_readable_memory_range(const void *address, std::size_t length = 1) noexcept;
+
+    /** Validate that an address range is committed executable memory. */
+    bool is_executable_memory_range(const void *address, std::size_t length = 1) noexcept;
+
     /**
      * A hook is used to execute Chimera code from Halo code. It is recommended to store these as a static variable.
      */
@@ -20,7 +26,7 @@ namespace Chimera {
         std::vector<std::byte> original_bytes;
 
         /** This is the address to the first modified byte in Halo's code. */
-        std::byte *address;
+        std::byte *address = nullptr;
 
         /** This is the code being jumped to. */
         std::unique_ptr<std::byte []> hook;
@@ -77,16 +83,21 @@ namespace Chimera {
      * @param length  This is the length of the data.
      */
     template<typename T> inline void overwrite(void *pointer, const T *data, std::size_t length) noexcept {
-        // Instantiate our new_protection and old_protection variables.
-        DWORD new_protection = PAGE_EXECUTE_READWRITE, old_protection;
+        if(pointer == nullptr || data == nullptr || length == 0) {
+            return;
+        }
 
-        // Apply read/write/execute protection
-        VirtualProtect(pointer, length, new_protection, &old_protection);
+        DWORD new_protection = PAGE_EXECUTE_READWRITE, old_protection = 0;
 
-        // Copy
+        // Refuse to write if the target cannot be made writable. This keeps a bad/
+        // missing signature from turning into an access violation.
+        if(!VirtualProtect(pointer, length, new_protection, &old_protection)) {
+            return;
+        }
+
         std::copy(data, data + length, reinterpret_cast<T *>(pointer));
+        FlushInstructionCache(GetCurrentProcess(), pointer, length);
 
-        // Restore the older protection unless it's the same
         if(new_protection != old_protection) {
             VirtualProtect(pointer, length, old_protection, &new_protection);
         }

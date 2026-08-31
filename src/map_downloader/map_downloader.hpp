@@ -89,8 +89,11 @@ private:
     /** The format of the URL to download maps from **/
     std::string url_template;
 
-    /** Map name being downloaded */
+    /** Map name being downloaded, normalized to lowercase for Chimera's map paths */
     std::string map;
+
+    /** Original map name as reported by Halo before normalization */
+    std::string requested_map;
 
     /** Server information */
     std::string server;
@@ -124,7 +127,7 @@ private:
     std::vector<std::byte> buffer;
 
     /** Amount of the buffer used */
-    std::size_t buffer_used;
+    std::size_t buffer_used = 0;
 
     /** Clock to use */
     using Clock = std::chrono::steady_clock;
@@ -142,7 +145,7 @@ private:
     std::thread dispatch_thread;
 
     /**
-     * Dispatch thread function that does the map downloading
+     * Dispatch thread function that does map downloading
      * @param downloader downloader reference
      */
     static void dispatch_thread_function(MapDownloader *downloader);

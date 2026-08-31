@@ -220,8 +220,8 @@ namespace Chimera {
         bool was_network_at_rest;
         PAD(2);
 
-        /** Only a valid Tag ID on campaign, on multiplayer it's an unknown counter */
-        TagID actor_variant_definition;
+        /** Used for rate limiting incremental network updates */
+        std::int32_t last_incremental_send_time;
 
         std::uint32_t flags;
         std::int32_t magic_number;
@@ -301,7 +301,7 @@ namespace Chimera {
         std::uint16_t shield_stun_ticks;
 
         std::uint16_t damage_flags;
-        std::uint32_t scenery_idx;
+        std::int32_t unused_for_bernie;
         std::int32_t first_cluster_reference_index;
         ObjectID next_garbage_object_index;
         ObjectID next_object_index;

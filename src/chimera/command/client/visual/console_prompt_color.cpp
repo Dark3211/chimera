@@ -6,8 +6,24 @@
 #include "../../../chimera.hpp"
 #include "../../../output/output.hpp"
 #include "../../../localization/localization.hpp"
+#include <algorithm>
+#include <cerrno>
+#include <cmath>
+#include <cstdlib>
 
 namespace Chimera {
+    static bool parse_color_component(const char *text, float &value) noexcept {
+        if(!text) return false;
+        errno = 0;
+        char *end = nullptr;
+        value = std::strtof(text, &end);
+        if(errno == ERANGE || end == text || !end || *end != 0 || !std::isfinite(value)) {
+            return false;
+        }
+        value = std::clamp(value, 0.0F, 1.0F);
+        return true;
+    }
+
     bool console_prompt_color_command(int argc, const char **argv) {
         // Set the prompt color
         static ConsoleColor *color = nullptr;
@@ -20,31 +36,21 @@ namespace Chimera {
             }
         }
 
+        if(!color) {
+            console_error("Unable to locate the console prompt color.");
+            return false;
+        }
+
         // If we have 3 arguments, try to get the color
         if(argc == 3) {
-            color->r = std::strtof(argv[0], nullptr);
-            if(color->r < 0.0) {
-                color->r = 0.0;
+            float red = 0.0F, green = 0.0F, blue = 0.0F;
+            if(!parse_color_component(argv[0], red) || !parse_color_component(argv[1], green) || !parse_color_component(argv[2], blue)) {
+                console_error("Console prompt color values must be finite numbers.");
+                return false;
             }
-            else if(color->r > 1.0) {
-                color->r = 1.0;
-            }
-
-            color->g = std::strtof(argv[1], nullptr);
-            if(color->g < 0.0) {
-                color->g = 0.0;
-            }
-            else if(color->g > 1.0) {
-                color->g = 1.0;
-            }
-
-            color->b = std::strtof(argv[2], nullptr);
-            if(color->b < 0.0) {
-                color->b = 0.0;
-            }
-            else if(color->b > 1.0) {
-                color->b = 1.0;
-            }
+            color->r = red;
+            color->g = green;
+            color->b = blue;
 
             if(color->r == 0.0 && color->g == 1.0 && color->b == 1.0) {
                 console_output(*color, "Vap!~");

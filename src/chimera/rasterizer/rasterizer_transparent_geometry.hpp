@@ -12,6 +12,11 @@ namespace Chimera {
     */
     short rasterizer_transparent_geometry_get_primary_vertex_type(TransparentGeometryGroup *group) noexcept;
 
+    /**
+    * Fix dynamic environment transparent index-buffer wrap synchronization.
+    */
+    void set_up_environment_transparent_index_buffer_fix() noexcept;
+
 }
 
 #endif

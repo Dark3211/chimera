@@ -5,6 +5,7 @@
 #include "../../../signature/signature.hpp"
 #include "../../../chimera.hpp"
 #include "../../../output/output.hpp"
+#include <cmath>
 
 namespace Chimera {
     bool meme_zone_command(int argc, const char **argv) {
@@ -15,6 +16,10 @@ namespace Chimera {
             }
             catch(std::exception &) {
                 value = 0.0F;
+            }
+            if(!std::isfinite(value)) {
+                console_error("Scale must be a finite number.");
+                return false;
             }
             if(value <= 1.0F) {
                 value = 1.0F;

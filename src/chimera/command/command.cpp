@@ -8,145 +8,136 @@
 
 namespace Chimera {
     CommandResult Command::call(std::size_t arg_count, const char **args) const noexcept {
+        if(!this->p_function || (arg_count > 0 && !args)) {
+            return CommandResult::COMMAND_RESULT_FAILED_ERROR;
+        }
         if(!get_chimera().feature_present(this->feature())) {
             return CommandResult::COMMAND_RESULT_FAILED_FEATURE_NOT_AVAILABLE;
         }
-        else if(arg_count > this->max_args()) {
+        if(arg_count > this->max_args()) {
             return CommandResult::COMMAND_RESULT_FAILED_TOO_MANY_ARGUMENTS;
         }
-        else if(arg_count < this->min_args()) {
+        if(arg_count < this->min_args()) {
             return CommandResult::COMMAND_RESULT_FAILED_NOT_ENOUGH_ARGUMENTS;
         }
-        else {
+
+        try {
             return this->p_function(arg_count, args) ? CommandResult::COMMAND_RESULT_SUCCESS : CommandResult::COMMAND_RESULT_FAILED_ERROR;
+        }
+        catch(...) {
+            return CommandResult::COMMAND_RESULT_FAILED_ERROR;
         }
     }
 
     CommandResult Command::call(const std::vector<std::string> &arguments) const noexcept {
-        // Get argument count
-        std::size_t arg_count = arguments.size();
+        try {
+            std::size_t arg_count = arguments.size();
+            if(arg_count == 0) {
+                return this->call(0, nullptr);
+            }
 
-        // If no arguments were passed, just call it.
-        if(arg_count == 0) {
-            return this->call(0, nullptr);
+            auto arguments_alloc(std::make_unique<const char *[]>(arg_count));
+            for(std::size_t i = 0; i < arg_count; i++) {
+                arguments_alloc[i] = arguments[i].c_str();
+            }
+            return this->call(arg_count, arguments_alloc.get());
         }
-
-        // Make our array
-        auto arguments_alloc(std::make_unique<const char *[]>(arg_count));
-        for(std::size_t i = 0; i < arg_count; i++) {
-            arguments_alloc[i] = arguments[i].data();
+        catch(...) {
+            return CommandResult::COMMAND_RESULT_FAILED_ERROR;
         }
-
-        // Do it!
-        return this->call(arg_count, arguments_alloc.get());
     }
 
     std::vector<std::string> split_arguments(const char *command) noexcept {
-        // This is the vector to return.
         std::vector<std::string> arguments;
+        if(!command) {
+            return arguments;
+        }
 
-        // This value will be true if we are inside quotes, during which the word will not separate into arguments.
-        bool in_quotes = false;
+        try {
+            bool in_quotes = false;
+            bool escape_character = false;
+            bool allow_empty_argument = false;
+            std::size_t command_size = std::strlen(command);
+            std::string argument;
 
-        // If using a backslash, add the next character to the string regardless of what it is.
-        bool escape_character = false;
+            for(std::size_t i = 0; i < command_size; i++) {
+                if(escape_character) {
+                    escape_character = false;
+                }
+                else if(command[i] == '\\') {
+                    escape_character = true;
+                    continue;
+                }
+                else if(command[i] == '"') {
+                    in_quotes = !in_quotes;
+                    allow_empty_argument = true;
+                    continue;
+                }
+                else if((command[i] == ' ' || command[i] == '\r' || command[i] == '\n' || command[i] == '#') && !in_quotes) {
+                    if(!argument.empty() || allow_empty_argument) {
+                        arguments.push_back(argument);
+                        argument.clear();
+                        allow_empty_argument = false;
+                    }
+                    if(command[i] == '#') {
+                        break;
+                    }
+                    continue;
+                }
+                argument += command[i];
+            }
 
-        // Regardless of if there were any characters, there was an argument.
-        bool allow_empty_argument = false;
-
-        // Get the command
-        std::size_t command_size = std::strlen(command);
-
-        // Get the argument
-        std::string argument;
-        for(std::size_t i = 0; i < command_size; i++) {
+            // Preserve a trailing backslash rather than silently dropping it.
             if(escape_character) {
-                escape_character = false;
+                argument += '\\';
             }
-            // Escape character - this will be used to include the next character regardless of what it is
-            else if(command[i] == '\\') {
-                escape_character = true;
-                continue;
+            if(!argument.empty() || allow_empty_argument) {
+                arguments.push_back(argument);
             }
-            // If a whitespace or octotothorpe is in quotations in the argument, then it is considered part of the argument.
-            else if(command[i] == '"') {
-                in_quotes = !in_quotes;
-                allow_empty_argument = true;
-                continue;
-            }
-            else if((command[i] == ' ' || command[i] == '\r' || command[i] == '\n' || command[i] == '#') && !in_quotes) {
-                // Add argument if not empty.
-                if(argument != "" || allow_empty_argument) {
-                    arguments.push_back(argument);
-                    argument = "";
-                    allow_empty_argument = false;
-                }
-
-                // Terminate if beginning a comment.
-                if(command[i] == '#') {
-                    break;
-                }
-                continue;
-            }
-            argument += command[i];
         }
-
-        // Add the last argument.
-        if(argument != "" || allow_empty_argument) {
-            arguments.push_back(argument);
+        catch(...) {
+            arguments.clear();
         }
-
         return arguments;
     }
 
     std::string unsplit_arguments(const std::vector<std::string> &arguments) noexcept {
-        // This is the string to return.
-        std::string unsplit;
+        try {
+            std::string unsplit;
+            for(std::size_t i = 0; i < arguments.size(); i++) {
+                const std::string &argument = arguments[i];
+                std::string argument_final;
+                bool surround_with_quotes = false;
 
-        for(std::size_t i = 0; i < arguments.size(); i++) {
-            // This is a reference to the argument we're dealing with.
-            const std::string &argument = arguments[i];
-
-            // This will be the final string we append to the unsplit string.
-            std::string argument_final;
-
-            // Set this to true if we need to surround this argument with quotes.
-            bool surround_with_quotes = false;
-
-            // Go through each character and add them one-by-one to argument_final.
-            for(const char &c : argument) {
-                switch(c) {
-                    // Backslashes and quotation marks should be escaped.
-                    case '\\':
-                    case '"':
-                        argument_final += '\\';
-                        break;
-
-                    // If we're using spaces or octothorpes, the argument should be surrounded with quotation marks. We could escape those, but this is more readable.
-                    case '#':
-                    case ' ':
-                        surround_with_quotes = true;
-                        break;
-
-                    default:
-                        break;
+                for(const char &c : argument) {
+                    switch(c) {
+                        case '\\':
+                        case '"':
+                            argument_final += '\\';
+                            break;
+                        case '#':
+                        case ' ':
+                            surround_with_quotes = true;
+                            break;
+                        default:
+                            break;
+                    }
+                    argument_final += c;
                 }
-                argument_final += c;
-            }
 
-            if(surround_with_quotes) {
-                argument_final = std::string("\"") + argument_final + "\"";
+                if(surround_with_quotes || argument.empty()) {
+                    argument_final = std::string("\"") + argument_final + "\"";
+                }
+                unsplit += argument_final;
+                if(i + 1 < arguments.size()) {
+                    unsplit += " ";
+                }
             }
-
-            unsplit += argument_final;
-
-            // Add the space to separate the next argument.
-            if(i + 1 < arguments.size()) {
-                unsplit += " ";
-            }
+            return unsplit;
         }
-
-        return unsplit;
+        catch(...) {
+            return {};
+        }
     }
 
     Command::Command(const char *name, const char *category, const char *feature, const char *help, CommandFunction function, bool autosave, std::size_t min_args, std::size_t max_args) :
@@ -225,6 +216,7 @@ namespace Chimera {
 
         // Visuals
         ADD_COMMAND("chimera_af", "chimera_category_visual", "client", af_command, true, 0, 1);
+        ADD_COMMAND("chimera_material_quality", "chimera_category_visual", "client", material_quality_command, true, 0, 1);
         ADD_COMMAND("chimera_block_auto_center", "chimera_category_visual", "client", block_auto_center_command, true, 0, 1);
         ADD_COMMAND("chimera_block_camera_shake", "chimera_category_visual", "client_camera_shake", block_camera_shake_command, true, 0, 1);
         ADD_COMMAND("chimera_block_gametype_indicator", "chimera_category_visual", "client_gametype_indicator", block_gametype_indicator_command, true, 0, 1);
