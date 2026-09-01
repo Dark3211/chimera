@@ -78,6 +78,9 @@ namespace Chimera {
 
         // Apply SMAA T2x camera jitter.
         SMAA::apply_temporal_jitter();
+        if(SMAA::state().jitter_applied) {
+            rasterizer_set_frustum_z(-1.0f, -1.0f);
+        }
 
         // Preserve the current temporal frustum.
         v_fov = global_window_parameters->camera.vertical_field_of_view;
