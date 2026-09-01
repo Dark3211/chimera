@@ -12,6 +12,7 @@
 #include "../halo_data/resolution.hpp"
 #include "../math_trig/math_trig.hpp"
 #include "../rasterizer/smaa.hpp"
+#include "../rasterizer/smaa_t2x_optimizer.hpp"
 
 
 namespace Chimera {
@@ -81,6 +82,7 @@ namespace Chimera {
         if(SMAA::state().jitter_applied) {
             rasterizer_set_frustum_z(-1.0f, -1.0f);
         }
+        SMAAT2XOptimizer::install();
 
         // Preserve the current temporal frustum.
         v_fov = global_window_parameters->camera.vertical_field_of_view;
