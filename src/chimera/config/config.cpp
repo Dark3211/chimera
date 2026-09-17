@@ -11,6 +11,8 @@
 #include "version.hpp"
 
 namespace Chimera {
+    extern bool suppress_early_config_output;
+
     const std::vector<std::string> *Config::get_settings_for_command(const char *command) const {
         if(!command) {
             return nullptr;
@@ -112,7 +114,11 @@ namespace Chimera {
                                     console_error(__VA_ARGS__);
 
             const Command *command;
-            switch(get_chimera().execute_command(line.data(), &command, true)) {
+            suppress_early_config_output = true;
+            auto result = get_chimera().execute_command(line.data(), &command, true);
+            suppress_early_config_output = false;
+
+            switch(result) {
                 case CommandResult::COMMAND_RESULT_SUCCESS:
                     break;
                 case CommandResult::COMMAND_RESULT_FAILED_ERROR_NOT_FOUND:
