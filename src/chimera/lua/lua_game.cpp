@@ -203,6 +203,8 @@ namespace Chimera {
         "chimera_af",
         "chimera_block_hold_f1",
         "chimera_fov",
+        "chimera_fov_vehicle",
+        "chimera_fov_cinematic",
         "chimera_mouse_sensitivity",
     };
 
@@ -211,20 +213,23 @@ namespace Chimera {
         if(args == 2) {
             bool found = false;
             const char *command = luaL_checkstring(state, 1);
-            for (auto command_name : allowed_chimera_commands) {
-                // Check if command starts with the command name
-                if (std::strncmp(command, command_name, std::strlen(command_name)) == 0) {
-                    found = true;
-                    break;
+            for(auto command_name : allowed_chimera_commands) {
+                auto command_name_length = std::strlen(command_name);
+                if(std::strncmp(command, command_name, command_name_length) == 0) {
+                    auto next = command[command_name_length];
+                    if(next == 0 || next == ' ' || next == '\t') {
+                        found = true;
+                        break;
+                    }
                 }
             }
-            if (!found) {
+            if(!found) {
                 return luaL_error(state, localize("chimera_error_invalid_scripted_chimera_command"), command);
             }
             const bool save = lua_toboolean(state, 2);
             const Command *found_command;
-            CommandResult result = get_chimera().execute_command(command, &found_command, save);\
-            if (result == COMMAND_RESULT_FAILED_ERROR_NOT_FOUND) {
+            CommandResult result = get_chimera().execute_command(command, &found_command, save);
+            if(result == COMMAND_RESULT_FAILED_ERROR_NOT_FOUND) {
                 return luaL_error(state, localize("chimera_error_command_not_found"), command);
             }
             return 0;

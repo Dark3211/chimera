@@ -9,13 +9,13 @@
 #include "../event/event.hpp"
 
 namespace Chimera {
-    #define CHIMERA_LUA_VERSION 2.056
+    #define CHIMERA_LUA_VERSION 2.069
 
     struct LuaScript;
 
     struct LuaScriptCallback {
         std::string callback_function;
-        EventPriority priority;
+        EventPriority priority = EVENT_PRIORITY_DEFAULT;
     };
 
     struct LuaAmbiguousTypeArgument {
@@ -64,6 +64,11 @@ namespace Chimera {
         LuaScriptCallback c_tick;
         LuaScriptCallback c_pretick;
         LuaScriptCallback c_unload;
+        LuaScriptCallback c_preconnect;
+        LuaScriptCallback c_damage;
+        LuaScriptCallback c_damage_result;
+        LuaScriptCallback c_vitality_update;
+        LuaScriptCallback c_revert;
 
         size_t next_timer_id = 0;
 

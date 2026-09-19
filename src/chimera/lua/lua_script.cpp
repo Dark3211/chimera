@@ -18,6 +18,7 @@
 #include "../fix/map_hacks/map_hacks.hpp"
 #include "lua_filesystem.hpp"
 #include "lua_game.hpp"
+#include "lua_extended_api.hpp"
 #include "lua_variables.hpp"
 #include "lua_io.hpp"
 #include "version.hpp"
@@ -82,6 +83,7 @@ namespace Chimera {
         set_fs_functions(state);
         set_io_functions(state);
         set_game_functions(state);
+        set_extended_api_functions(state);
 
         // Refresh variables
         refresh_variables(state);
