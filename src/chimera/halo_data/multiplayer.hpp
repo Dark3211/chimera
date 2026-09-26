@@ -37,6 +37,8 @@ namespace Chimera {
      * @return true if team
      */
     bool is_team();
+
+    std::uint8_t score_limit() noexcept;
 }
 
 #endif

@@ -15,6 +15,7 @@
 #include "../event/d3d9_end_scene.hpp"
 #include "../event/d3d9_reset.hpp"
 #include "../event/game_loop.hpp"
+#include "../event/interface_render.hpp"
 #include "../halo_data/game_engine.hpp"
 #include "../output/output.hpp"
 #include "../signature/hook.hpp"
@@ -596,6 +597,12 @@ namespace Chimera {
             auto *ui_widgets_call = module + UI_WIDGETS_CALL_RVA;
             auto *render_ui_widgets = module + RENDER_UI_WIDGETS_RVA;
 
+            if(hud_render_event_call_site() == pre_hud_call &&
+               ui_render_event_call_site() == ui_widgets_call) {
+                cached_call_site = pre_hud_call;
+                return cached_call_site;
+            }
+
             if(!validate_relative_call(pre_hud_call, interface_draw_screen) ||
                !validate_relative_call(ui_widgets_call, render_ui_widgets)) {
                 return nullptr;
@@ -683,19 +690,20 @@ namespace Chimera {
             restore_state(device, state_block, scene_render_target, old_viewport, old_scissor);
         }
 
-        inline bool install_pre_hud_hook() noexcept {
-            static Hook hook;
-            if(hook.address && hook.hook && !hook.original_bytes.empty()) {
-                return true;
+        inline void on_hud_render_event(bool after) noexcept {
+            if(!after) {
+                on_pre_hud();
             }
+        }
 
+        inline bool install_pre_hud_hook() noexcept {
             auto *call_site = validated_pre_hud_call_site();
-            if(!call_site) {
+            if(!call_site || hud_render_event_call_site() != call_site) {
+
                 return false;
             }
 
-            write_jmp_call(call_site, hook, reinterpret_cast<const void *>(on_pre_hud));
-            return hook.address == call_site && hook.hook && !hook.original_bytes.empty();
+            return add_hud_render_event(on_hud_render_event, EVENT_PRIORITY_BEFORE);
         }
 
         inline void set_up() noexcept {

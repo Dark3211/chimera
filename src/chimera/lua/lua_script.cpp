@@ -18,6 +18,8 @@
 #include "../fix/map_hacks/map_hacks.hpp"
 #include "lua_filesystem.hpp"
 #include "lua_game.hpp"
+#include "lua_extended_api.hpp"
+#include "lua_callback.hpp"
 #include "lua_variables.hpp"
 #include "lua_io.hpp"
 #include "version.hpp"
@@ -82,6 +84,7 @@ namespace Chimera {
         set_fs_functions(state);
         set_io_functions(state);
         set_game_functions(state);
+        set_extended_api_functions(state);
 
         // Refresh variables
         refresh_variables(state);
@@ -229,6 +232,8 @@ namespace Chimera {
     }
 
     void unload_scripts() noexcept {
+
+        detach_lua_render_callbacks();
         scripts.clear();
     }
 
@@ -269,10 +274,7 @@ namespace Chimera {
 
     LuaScript::~LuaScript() noexcept {
         if(this->loaded && this->state) {
-            lua_getglobal(this->state, this->c_unload.callback_function.data());
-            if(!lua_isnil(this->state, -1) && lua_pcall(this->state, 0, 0, 0) != LUA_OK) {
-                print_error(this->state);
-            }
+            call_lua_unload_callbacks(*this);
             lua_close(this->state);
         }
 

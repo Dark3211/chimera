@@ -23,7 +23,7 @@
 #include "../output/error_box.hpp"
 #include "../event/frame.hpp"
 #include "../event/game_loop.hpp"
-
+#include "../event/interface_render.hpp"
 
 namespace Chimera {
 
@@ -135,7 +135,18 @@ namespace Chimera {
         return reinterpret_cast<std::byte *>(static_cast<std::uintptr_t>(target_address));
     }
 
-    static std::byte *validated_retail_pre_hud_call_site() noexcept {
+    std::byte *validated_retail_pre_hud_call_site() noexcept {
+        static std::byte *cached_call_site = nullptr;
+        static bool discovery_attempted = false;
+
+        if(cached_call_site) {
+            return cached_call_site;
+        }
+        if(discovery_attempted) {
+            return nullptr;
+        }
+        discovery_attempted = true;
+
         // Keep the Retail discovery path completely separate from Custom Edition. CE has
         // its own validated 1.10 call-site path in enhanced_graphics.hpp and must not be
         // affected by Retail executable-layout differences.
@@ -250,7 +261,8 @@ namespace Chimera {
 
         bool ambiguous = false;
         if(auto *strict_candidate = find_unique_candidate(true, ambiguous)) {
-            return strict_candidate;
+            cached_call_site = strict_candidate;
+            return cached_call_site;
         }
         if(ambiguous) {
             return nullptr;
@@ -259,35 +271,36 @@ namespace Chimera {
         // Retail-compatible semantic fallback: same validated call flow, without assuming
         // that the NULL screen-effect argument is encoded specifically as `push 0`.
         auto *compatible_candidate = find_unique_candidate(false, ambiguous);
-        if(ambiguous) {
+        if(ambiguous || !compatible_candidate) {
             return nullptr;
         }
-        return compatible_candidate;
+        cached_call_site = compatible_candidate;
+        return cached_call_site;
+    }
+
+    static void (*retail_pre_hud_graphics_callback)() = nullptr;
+
+    static void retail_pre_hud_graphics_event(bool after) noexcept {
+        if(!after && retail_pre_hud_graphics_callback) {
+            retail_pre_hud_graphics_callback();
+        }
     }
 
     static bool install_retail_pre_hud_hook(const void *callback) noexcept {
-        static Hook hook;
-        static const void *installed_callback = nullptr;
+        auto *validated_call_site = validated_retail_pre_hud_call_site();
+        if(!callback || !validated_call_site ||
+           hud_render_event_call_site() != validated_call_site) {
 
-        if(hook.address && hook.hook && !hook.original_bytes.empty()) {
-            return installed_callback == callback;
-        }
-        if(!callback) {
             return false;
         }
 
-        auto *call_site = validated_retail_pre_hud_call_site();
-        if(!call_site) {
+        retail_pre_hud_graphics_callback =
+            reinterpret_cast<void (*)()>(const_cast<void *>(callback));
+        if(!add_hud_render_event(retail_pre_hud_graphics_event, EVENT_PRIORITY_BEFORE)) {
+            retail_pre_hud_graphics_callback = nullptr;
             return false;
         }
-
-        write_jmp_call(call_site, hook, callback);
-        const bool installed =
-            hook.address == call_site && hook.hook && !hook.original_bytes.empty();
-        if(installed) {
-            installed_callback = callback;
-        }
-        return installed;
+        return true;
     }
 
     static bool set_up_retail_pre_hud_graphics() noexcept {

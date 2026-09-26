@@ -72,6 +72,18 @@ namespace Chimera {
         return object_id;
     }
 
+    ObjectID spawn_client_object(const TagID &tag_id, float x, float y, float z) noexcept {
+        char buffer[1024] = {};
+        auto *object_create_query = reinterpret_cast<s_object_creation_disposition *>(buffer);
+        ObjectID parent = ObjectID::null_id();
+        create_object_query_asm(tag_id, parent, object_create_query);
+        object_create_query->player_id = 0xFFFFFFFF;
+        object_create_query->pos[0] = x;
+        object_create_query->pos[1] = y;
+        object_create_query->pos[2] = z;
+        return create_object_asm(object_create_query, 3);
+    }
+
     void delete_object(ObjectID object_id) noexcept {
         delete_object_asm(object_id);
     }

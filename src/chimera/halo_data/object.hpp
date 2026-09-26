@@ -82,6 +82,7 @@ namespace Chimera {
      * @return          ID of the spawned object.
      */
     ObjectID spawn_object(const TagID &tag_id, float x, float y, float z, const ObjectID &parent) noexcept;
+    ObjectID spawn_client_object(const TagID &tag_id, float x, float y, float z) noexcept;
 
     enum {
         NUMBER_OF_OUTGOING_OBJECT_FUNCTIONS = 4,

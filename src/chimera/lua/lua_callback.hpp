@@ -10,6 +10,10 @@ namespace Chimera {
      * Set up Lua callbacks
     */
     int lua_set_callback(lua_State *state) noexcept;
+    int lua_add_callback(lua_State *state) noexcept;
+    int lua_remove_callback(lua_State *state) noexcept;
+    void call_lua_unload_callbacks(LuaScript &script) noexcept;
+    void detach_lua_render_callbacks() noexcept;
     void setup_callbacks() noexcept;
 }
 

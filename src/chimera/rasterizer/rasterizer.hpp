@@ -13,7 +13,6 @@
 #include "../output/error_box.hpp"
 #include "../output/output.hpp"
 
-
 namespace Chimera {
     namespace Detail {
         // MinGW's IMAGE_FIRST_SECTION macro uses C-style casts internally, which
@@ -84,6 +83,8 @@ namespace Chimera {
     extern bool chimera_rasterizer_enabled;
 
     extern IDirect3DPixelShader9 *chimera_pixel_shaders[NUMBER_OF_CHIMERA_PIXEL_SHADERS];
+
+    std::byte *validated_retail_pre_hud_call_site() noexcept;
 
     /**
     * D3D function calls.
