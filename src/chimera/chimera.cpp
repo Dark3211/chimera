@@ -81,6 +81,7 @@
 #include "miscellaneous/controller.hpp"
 #include "halo_data/port.hpp"
 #include "command/hotkey.hpp"
+#include "command/client/visual/status_overlay.hpp"
 #include "config/ini.hpp"
 #include "annoyance/exception_dialog.hpp"
 #include "output/error_box.hpp"
@@ -480,7 +481,11 @@ namespace Chimera {
 
                     extern const char *output_prefix;
                     auto *old_prefix = output_prefix;
-                    output_prefix = std::strcmp(cmd.name(), "chimera") == 0 ? nullptr : cmd.name();
+                    const bool plain_output =
+                        std::strncmp(cmd.name(), "chimera_bookmark_", sizeof("chimera_bookmark_") - 1) == 0 ||
+                        std::strncmp(cmd.name(), "chimera_history_", sizeof("chimera_history_") - 1) == 0 ||
+                        std::strncmp(cmd.name(), "chimera_spectate", sizeof("chimera_spectate") - 1) == 0;
+                    output_prefix = (std::strcmp(cmd.name(), "chimera") == 0 || plain_output) ? nullptr : cmd.name();
                     auto result = cmd.call(arguments);
                     output_prefix = old_prefix;
 
@@ -679,6 +684,7 @@ namespace Chimera {
         if(chimera->feature_present("client")) {
             // Set up the text hook?
             setup_text_hook();
+            set_up_status_overlay();
 
             // Set default settings
             if(chimera->get_ini()->get_value_bool("halo.optimal_defaults").value_or(false)) {

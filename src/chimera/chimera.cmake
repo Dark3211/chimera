@@ -78,7 +78,10 @@ add_library(chimera STATIC
     src/chimera/event/damage.S
     src/chimera/event/frame.cpp
     src/chimera/event/game_loop.cpp
+    src/chimera/event/interface_render.cpp
     src/chimera/event/map_load.cpp
+    src/chimera/event/multiplayer_event.cpp
+    src/chimera/event/multiplayer_event.S
     src/chimera/event/revert.cpp
     src/chimera/event/rcon_message.cpp
     src/chimera/event/tick.cpp
@@ -258,8 +261,11 @@ add_library(chimera STATIC
     src/chimera/rasterizer/rasterizer.cpp
     src/chimera/rasterizer/rasterizer_vertex_shaders.cpp
     src/chimera/signature/hook.cpp
+    src/chimera/signature/hook_v2.cpp
     src/chimera/signature/signature.cpp
+    src/chimera/signature/signature_v2.cpp
     src/chimera/signature/hac/codefinder.cpp
+    src/chimera/signature/hac/codefinder_v2.cpp
     src/chimera/version.rc
     ${COMMAND_FILES}
 

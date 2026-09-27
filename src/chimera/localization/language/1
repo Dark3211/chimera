@@ -218,3 +218,4 @@ chimera_lua_warning_script_too_updated                                          
 chimera_lua_warning_script_too_outdated                                         %s fue hecho para una versión más antigua de Chimera.
 chimera_lua_warning_script_possibly_not_work                                    Es posible que no funcione como se espera.
 chimera_lua_error_failed_to_load_script                                         No se pudo cargar %s
+chimera_hud_color_command_help                                               Cambia el color del HUD sin modificar la retícula ni el radar. Usa auto para un ciclo RGB u off para restaurar.
