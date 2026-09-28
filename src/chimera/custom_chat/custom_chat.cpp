@@ -38,6 +38,8 @@ const void *kill_feed_message;
 namespace Chimera {
     static void on_custom_chat_frame() noexcept;
     static void on_chat_input() noexcept;
+    static void refresh_emoji_suggestions();
+    static bool accept_emoji_suggestion();
     static void enable_input(bool enabled) noexcept;
     static bool custom_chat_initialized = false;
     static const char *color_id_for_player(std::uint8_t player, ColorARGB *color_to_use);
@@ -229,8 +231,103 @@ namespace Chimera {
     static bool chat_input_open = false;
     static clock::time_point chat_open_state_changed;
 
+    static constexpr std::size_t MAX_EMOJI_SUGGESTIONS = 5;
+    static std::vector<std::string> emoji_suggestion_names;
+    static std::string emoji_suggestion_query;
+    static std::size_t emoji_suggestion_start = std::string::npos;
+    static std::size_t emoji_suggestion_index = 0;
+
     static bool player_in_server[16] = {};
     static char player_name[16][64];
+
+    static bool emoji_suggestion_context(std::size_t &start, std::string &query) {
+        if(!chat_input_open || chat_input_cursor > chat_input_buffer.size() || chat_input_cursor < 3) {
+            return false;
+        }
+
+        start = chat_input_buffer.rfind(':', chat_input_cursor - 1);
+        if(start == std::string::npos || start + 2 >= chat_input_cursor) {
+            return false;
+        }
+
+        query = chat_input_buffer.substr(start + 1, chat_input_cursor - start - 1);
+        for(char c : query) {
+            const auto uc = static_cast<unsigned char>(c);
+            if(!std::isalnum(uc) && c != '_' && c != '+' && c != '-') {
+                return false;
+            }
+        }
+
+        std::transform(query.begin(), query.end(), query.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        return true;
+    }
+
+    static void clear_emoji_suggestions() noexcept {
+        emoji_suggestion_names.clear();
+        emoji_suggestion_query.clear();
+        emoji_suggestion_start = std::string::npos;
+        emoji_suggestion_index = 0;
+    }
+
+    static void refresh_emoji_suggestions() {
+        std::size_t start = std::string::npos;
+        std::string query;
+        if(!emoji_suggestion_context(start, query)) {
+            clear_emoji_suggestions();
+            return;
+        }
+
+        if(start == emoji_suggestion_start && query == emoji_suggestion_query) {
+            return;
+        }
+
+        emoji_suggestion_start = start;
+        emoji_suggestion_query = query;
+        emoji_suggestion_index = 0;
+        emoji_suggestion_names.clear();
+
+        for(const auto &emoji : EMOJI_MAP) {
+            const auto &name = emoji.first;
+            if(name.size() >= query.size() && name.compare(0, query.size(), query) == 0) {
+                emoji_suggestion_names.emplace_back(name);
+            }
+        }
+
+        std::sort(emoji_suggestion_names.begin(), emoji_suggestion_names.end());
+        if(emoji_suggestion_names.size() > MAX_EMOJI_SUGGESTIONS) {
+            emoji_suggestion_names.resize(MAX_EMOJI_SUGGESTIONS);
+        }
+    }
+
+    static bool accept_emoji_suggestion() {
+        refresh_emoji_suggestions();
+        if(emoji_suggestion_names.empty() ||
+           emoji_suggestion_index >= emoji_suggestion_names.size() ||
+           emoji_suggestion_start == std::string::npos) {
+            return false;
+        }
+
+        const auto &name = emoji_suggestion_names[emoji_suggestion_index];
+        auto found = EMOJI_MAP.find(name);
+        if(found == EMOJI_MAP.end()) {
+            return false;
+        }
+
+        const auto replace_length = chat_input_cursor - emoji_suggestion_start;
+        const auto &emoji = found->second;
+        const auto new_size = chat_input_buffer.size() - replace_length + emoji.size();
+        if(new_size >= INPUT_BUFFER_SIZE) {
+            return false;
+        }
+
+        chat_input_buffer.erase(emoji_suggestion_start, replace_length);
+        chat_input_buffer.insert(emoji_suggestion_start, emoji);
+        chat_input_cursor = emoji_suggestion_start + emoji.size();
+        clear_emoji_suggestions();
+        return true;
+    }
 
     static bool show_chat_color_help = false;
     void set_show_color_help(bool show_help) noexcept {
@@ -399,7 +496,41 @@ namespace Chimera {
             cursor_color.append("_");
             apply_text_quake_colors(u8_to_u16(cursor_color.c_str()), cursor_x + chat_input_x + x_offset_text_buffer, adjusted_y, chat_input_w, line_height, chat_input_color, chat_input_font, chat_input_anchor);
 
-            if(show_chat_color_help) {
+            refresh_emoji_suggestions();
+            if(!emoji_suggestion_names.empty()) {
+                std::size_t suggestion_y = adjusted_y + line_height + 2;
+                for(std::size_t i = 0; i < emoji_suggestion_names.size(); i++) {
+                    const auto &name = emoji_suggestion_names[i];
+                    const auto found = EMOJI_MAP.find(name);
+                    if(found == EMOJI_MAP.end()) {
+                        continue;
+                    }
+
+                    std::string suggestion = i == emoji_suggestion_index ? "> " : "  ";
+                    suggestion += found->second;
+                    suggestion += "  :";
+                    suggestion += name;
+                    suggestion += ":";
+
+                    ColorARGB suggestion_color = i == emoji_suggestion_index
+                        ? ColorARGB {1.0F, 0.75F, 0.90F, 1.0F}
+                        : ColorARGB {0.82F, 0.72F, 0.72F, 0.78F};
+
+                    apply_text(
+                        u8_to_u16(suggestion.c_str()),
+                        chat_input_x,
+                        static_cast<std::int16_t>(suggestion_y),
+                        chat_input_w,
+                        line_height,
+                        suggestion_color,
+                        chat_input_font,
+                        FontAlignment::ALIGN_LEFT,
+                        chat_input_anchor
+                    );
+                    suggestion_y += line_height;
+                }
+            }
+            else if(show_chat_color_help) {
                 const char *color_codes = "1234567890\nqwertyuiop QWERTYUIOP\nasdfghjkl ASDFGHJKL\nzxcvbnm ZXCVBNM";
                 std::size_t help_y = adjusted_y + line_height;
                 std::size_t help_x = chat_input_x;
@@ -724,22 +855,39 @@ namespace Chimera {
             if(character == 0xFF) {
                 bool ctrl  = modifier & 0b0000010;
                 auto char_starts = get_char_start_idxs(num_bytes);
+                refresh_emoji_suggestions();
 
                 if(key_code == 0) {
+                    clear_emoji_suggestions();
                     chat_input_open = false;
                     chat_open_state_changed = clock::now();
                     chat_message_scroll = 0;
                     enable_input(true);
                 }
+                // Tab accepts the selected emoji suggestion.
+                else if(key_code == 0x1E && !emoji_suggestion_names.empty()) {
+                    accept_emoji_suggestion();
+                }
                 // Up arrow / Page up
                 else if(key_code == 0x4D || key_code == 0x53) {
-                    if(chat_message_scroll + 1 != MESSAGE_BUFFER_SIZE && chat_messages[chat_message_scroll + 1].valid()) {
+                    if(!emoji_suggestion_names.empty() && key_code == 0x4D) {
+                        if(emoji_suggestion_index == 0) {
+                            emoji_suggestion_index = emoji_suggestion_names.size() - 1;
+                        }
+                        else {
+                            emoji_suggestion_index--;
+                        }
+                    }
+                    else if(chat_message_scroll + 1 != MESSAGE_BUFFER_SIZE && chat_messages[chat_message_scroll + 1].valid()) {
                         chat_message_scroll++;
                     }
                 }
                 // Down arrow / Page down
                 else if(key_code == 0x4E || key_code == 0x56) {
-                    if(chat_message_scroll > 0) {
+                    if(!emoji_suggestion_names.empty() && key_code == 0x4E) {
+                        emoji_suggestion_index = (emoji_suggestion_index + 1) % emoji_suggestion_names.size();
+                    }
+                    else if(chat_message_scroll > 0) {
                         chat_message_scroll--;
                     }
                 }
@@ -802,6 +950,7 @@ namespace Chimera {
                     chat_input_open = false;
                     chat_open_state_changed = clock::now();
                     chat_message_scroll = 0;
+                    clear_emoji_suggestions();
                     enable_input(true);
                 }
             }
@@ -815,6 +964,9 @@ namespace Chimera {
                     if (start != std::string::npos && chat_input_cursor - start > 1) {
                         unsigned int name_len = chat_input_cursor - start - 1;
                         auto emoji_name = chat_input_buffer.substr(start + 1, name_len);
+                        std::transform(emoji_name.begin(), emoji_name.end(), emoji_name.begin(), [](unsigned char c) {
+                            return static_cast<char>(std::tolower(c));
+                        });
                         try {
                             // get the emoji from the name (raises exception if not found)
                             auto emoji = EMOJI_MAP.at(emoji_name);
