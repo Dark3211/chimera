@@ -39,6 +39,8 @@ namespace Chimera {
             IDirect3DTexture9 *frame_texture = nullptr;
             IDirect3DSurface9 *frame_surface = nullptr;
             IDirect3DPixelShader9 *pixel_shader = nullptr;
+            IDirect3DStateBlock9 *capture_state_block = nullptr;
+            IDirect3DDevice9 *capture_state_block_device = nullptr;
             UINT width = 0;
             UINT height = 0;
             D3DFORMAT format = D3DFMT_UNKNOWN;
@@ -82,6 +84,8 @@ namespace Chimera {
                 GraphicsRuntimeMetrics::resources_released(graphics.tracked_resources);
                 graphics.tracked_resources = 0;
             }
+            release_com(graphics.capture_state_block);
+            graphics.capture_state_block_device = nullptr;
             release_com(graphics.pixel_shader);
             release_com(graphics.frame_surface);
             release_com(graphics.frame_texture);
@@ -153,9 +157,7 @@ namespace Chimera {
             return ini && (
                 ini->get_value_bool("graphics.adaptive_sharpening").value_or(false) ||
                 ini->get_value_bool("graphics.sharpening_anti_halo").value_or(false) ||
-                ini->get_value_bool("graphics.bloom").value_or(false) ||
-                ini->get_value_bool("graphics.debanding").value_or(false) ||
-                ini->get_value_bool("graphics.dithering").value_or(false)
+                ini->get_value_bool("graphics.bloom").value_or(false)
             );
         }
 
@@ -354,13 +356,33 @@ namespace Chimera {
             D3DVIEWPORT9 &viewport,
             RECT &scissor
         ) noexcept {
-            if(FAILED(IDirect3DDevice9_CreateStateBlock(device, D3DSBT_ALL, state_block)) || !*state_block) {
+            if(!device || !state_block || !render_target) {
                 return false;
             }
-            if(FAILED(IDirect3DStateBlock9_Capture(*state_block))) {
-                release_com(*state_block);
+
+            auto &graphics = state();
+            if(!graphics.capture_state_block || graphics.capture_state_block_device != device) {
+                release_com(graphics.capture_state_block);
+                graphics.capture_state_block_device = nullptr;
+                if(FAILED(IDirect3DDevice9_CreateStateBlock(
+                    device,
+                    D3DSBT_ALL,
+                    &graphics.capture_state_block
+                )) || !graphics.capture_state_block) {
+                    return false;
+                }
+                graphics.capture_state_block_device = device;
+            }
+
+            if(FAILED(IDirect3DStateBlock9_Capture(graphics.capture_state_block))) {
+                release_com(graphics.capture_state_block);
+                graphics.capture_state_block_device = nullptr;
                 return false;
             }
+
+            *state_block = graphics.capture_state_block;
+            (*state_block)->AddRef();
+
             if(FAILED(IDirect3DDevice9_GetRenderTarget(device, 0, render_target)) || !*render_target) {
                 release_com(*state_block);
                 return false;
@@ -409,18 +431,9 @@ namespace Chimera {
                 return false;
             }
 
+            // SetRenderTarget resets the D3D9 viewport to the full target size.
+            // Avoid issuing a redundant SetViewport on every post-process frame.
             bool can_draw = SUCCEEDED(IDirect3DDevice9_SetRenderTarget(device, 0, render_target));
-
-            D3DVIEWPORT9 viewport {};
-            viewport.X = 0;
-            viewport.Y = 0;
-            viewport.Width = description.Width;
-            viewport.Height = description.Height;
-            viewport.MinZ = 0.0f;
-            viewport.MaxZ = 1.0f;
-            if(can_draw && FAILED(IDirect3DDevice9_SetViewport(device, &viewport))) {
-                can_draw = false;
-            }
 
             if(can_draw) {
                 IDirect3DDevice9_SetRenderState(device, D3DRS_ZENABLE, FALSE);

@@ -387,11 +387,6 @@ namespace Chimera {
     struct PostEffectsSettings {
         bool adaptive_sharpening = false;
         bool sharpening_anti_halo = false;
-        bool debanding = false;
-        float debanding_strength = 0.35f;
-        float debanding_threshold = 0.025f;
-        bool dithering = false;
-        float dithering_strength = 1.00f;
     };
 
     static float clamp_graphics_value(double value, float minimum, float maximum) noexcept {
@@ -435,23 +430,6 @@ namespace Chimera {
 
         effects.adaptive_sharpening = ini->get_value_bool("graphics.adaptive_sharpening").value_or(false);
         effects.sharpening_anti_halo = ini->get_value_bool("graphics.sharpening_anti_halo").value_or(false);
-        effects.debanding = ini->get_value_bool("graphics.debanding").value_or(false);
-        effects.debanding_strength = clamp_graphics_value(
-            ini->get_value_float("graphics.debanding_strength").value_or(0.35),
-            0.0f,
-            1.0f
-        );
-        effects.debanding_threshold = clamp_graphics_value(
-            ini->get_value_float("graphics.debanding_threshold").value_or(0.025),
-            0.005f,
-            0.10f
-        );
-        effects.dithering = ini->get_value_bool("graphics.dithering").value_or(false);
-        effects.dithering_strength = clamp_graphics_value(
-            ini->get_value_float("graphics.dithering_strength").value_or(1.00),
-            0.0f,
-            2.0f
-        );
         return effects;
     }
 
@@ -741,77 +719,6 @@ namespace Chimera {
             prepared.insert(bloom_position, bloom_source.str());
         }
 
-        // Debanding runs after color correction and before the final 8-bit dithering step.
-        // It only blends low-contrast neighborhoods and therefore avoids softening real
-        // geometry edges. The neighboring raw colors are graded with the same color
-        // settings before they are mixed back into the current pixel.
-        constexpr const char *POST_COLOR_INSERTION_POINT =
-            "color = lerp(color, saturate(corrected), saturate(color_options.w));";
-        const auto post_color_position = prepared.find(POST_COLOR_INSERTION_POINT);
-        if(post_color_position != std::string::npos) {
-            std::ostringstream final_color_source;
-            final_color_source.imbue(std::locale::classic());
-
-            if(post_effects.debanding && d3d9_device_caps &&
-               d3d9_device_caps->PixelShaderVersion >= 0xffff0300) {
-                final_color_source << std::fixed << std::setprecision(9)
-                    << "\n\n                const float deband_strength = " << post_effects.debanding_strength << ";\n"
-                    << "                const float deband_threshold = " << post_effects.debanding_threshold << ";\n"
-                    << R"HLSL(                const float2 deband_step = frame_options.xy * 2.0;
-                const float3 deband_l = tex2D(frame_sampler, uv + float2(-deband_step.x, 0.0)).rgb;
-                const float3 deband_r = tex2D(frame_sampler, uv + float2( deband_step.x, 0.0)).rgb;
-                const float3 deband_u = tex2D(frame_sampler, uv + float2(0.0, -deband_step.y)).rgb;
-                const float3 deband_d = tex2D(frame_sampler, uv + float2(0.0,  deband_step.y)).rgb;
-                const float deband_center_luma = luma(center_sample.rgb);
-                const float deband_dl = abs(luma(deband_l) - deband_center_luma);
-                const float deband_dr = abs(luma(deband_r) - deband_center_luma);
-                const float deband_du = abs(luma(deband_u) - deband_center_luma);
-                const float deband_dd = abs(luma(deband_d) - deband_center_luma);
-                const float deband_inv_range = 1.0 / max(deband_threshold * 0.75, 0.0001);
-                const float deband_wl = 1.0 - saturate((deband_dl - deband_threshold * 0.25) * deband_inv_range);
-                const float deband_wr = 1.0 - saturate((deband_dr - deband_threshold * 0.25) * deband_inv_range);
-                const float deband_wu = 1.0 - saturate((deband_du - deband_threshold * 0.25) * deband_inv_range);
-                const float deband_wd = 1.0 - saturate((deband_dd - deband_threshold * 0.25) * deband_inv_range);
-                const float deband_weight = 1.5 + deband_wl + deband_wr + deband_wu + deband_wd;
-                const float3 deband_raw = (
-                    center_sample.rgb * 1.5 +
-                    deband_l * deband_wl + deband_r * deband_wr +
-                    deband_u * deband_wu + deband_d * deband_wd
-                ) / deband_weight;
-                const float deband_grey = luma(deband_raw);
-                float3 deband_corrected = lerp(float3(deband_grey, deband_grey, deband_grey), deband_raw, color_options.z);
-                deband_corrected = (deband_corrected - 0.5) * color_options.y + 0.5;
-                deband_corrected *= color_options.x;
-                deband_corrected = lerp(deband_raw, saturate(deband_corrected), saturate(color_options.w));
-                const float deband_range = max(max(deband_dl, deband_dr), max(deband_du, deband_dd));
-                const float deband_flatness = 1.0 - saturate(deband_range / max(deband_threshold, 0.0001));
-                color = lerp(color, saturate(deband_corrected), saturate(deband_strength * deband_flatness));
-)HLSL";
-            }
-
-            // Dithering is the final color operation. A stable screen-space sequence targets
-            // 8-bit A8R8G8B8 quantization directly: most of the perturbation is shared across
-            // RGB to avoid colored grain, while a small phase offset decorrelates the channels.
-            if(post_effects.dithering) {
-                const float dither_scale = (2.0f * post_effects.dithering_strength) / 255.0f;
-                final_color_source << std::fixed << std::setprecision(9)
-                    << "\n                const float2 dither_pixel = floor(uv / frame_options.xy);\n"
-                    << "                const float dither_phase = frac(52.9829189 * frac(dot(dither_pixel, float2(0.06711056, 0.00583715))));\n"
-                    << "                const float dither_luma = dither_phase - 0.5;\n"
-                    << "                const float3 dither_channels = frac(dither_phase + float3(0.0, 0.333333333, 0.666666667)) - 0.5;\n"
-                    << "                const float3 dither_noise = lerp(float3(dither_luma, dither_luma, dither_luma), dither_channels, 0.25);\n"
-                    << "                color = saturate(color + dither_noise * " << dither_scale << ");";
-            }
-
-            const auto final_source = final_color_source.str();
-            if(!final_source.empty()) {
-                prepared.insert(
-                    post_color_position + std::strlen(POST_COLOR_INSERTION_POINT),
-                    final_source
-                );
-            }
-        }
-
         return prepared;
     }
 
@@ -876,7 +783,22 @@ namespace Chimera {
                                           &new_shader, &error_messages);
         if(FAILED(result) || !new_shader) {
             if(error_messages) {
-                console_error("Pixel shader failed to compile");
+                const auto *error_text =
+                    reinterpret_cast<const char *>(error_messages->GetBufferPointer());
+                const auto error_size = error_messages->GetBufferSize();
+                const int visible_error_size = static_cast<int>(
+                    error_size < 180U ? error_size : 180U
+                );
+                if(error_text && visible_error_size > 0) {
+                    console_error(
+                        "Pixel shader failed to compile: %.*s",
+                        visible_error_size,
+                        error_text
+                    );
+                }
+                else {
+                    console_error("Pixel shader failed to compile");
+                }
                 error_messages->Release();
             }
             else {
@@ -944,11 +866,6 @@ namespace Chimera {
         const auto bloom = graphics_bloom_settings();
         if(bloom.enabled && d3d9_device_caps->PixelShaderVersion < 0xffff0300) {
             console_error("Chimera Graphics: Bloom requires ps_3_0 and was left disabled.");
-        }
-
-        const auto post_effects = graphics_post_effects_settings();
-        if(post_effects.debanding && d3d9_device_caps->PixelShaderVersion < 0xffff0300) {
-            console_error("Chimera Graphics: Debanding requires ps_3_0 and was left disabled.");
         }
 
         const bool pre_hud_validated =
