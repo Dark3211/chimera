@@ -24,8 +24,8 @@ if(${CHIMERA_WINXP})
 	endif()
 else()
 	# use latest version
-    set(LOCAL_CURL_URL "https://github.com/curl/curl/releases/download/curl-8_21_0/curl-8.21.0.tar.xz")
-    set(LOCAL_CURL_URL_HASH aa1b66a70eace83dc624508745646c08ae561de512ab403adffb93ac87fc72e6)
+    set(LOCAL_CURL_URL "https://github.com/curl/curl/releases/download/curl-8_23_0/curl-8.23.0.tar.xz")
+    set(LOCAL_CURL_URL_HASH 8dadd7d2536a314f982ad05a651b713f426bf7d02cc2c76cffb9796f2218e6c5)
 endif()
 
 set(LOCAL_CURL_INCLUDE_DIR ${CMAKE_CURRENT_BINARY_DIR}/ext/curl/include)
@@ -51,9 +51,24 @@ ExternalProject_Add(curl
         -DCURL_USE_LIBSSH2=OFF
         -DCURL_ZLIB=OFF
         -DCURL_ZSTD=OFF
-        -DHTTP_ONLY=ON
         -DUSE_NGHTTP2=OFF
         -DUSE_LIBIDN2=OFF
+        -DCURL_DISABLE_DICT=ON
+        -DCURL_DISABLE_FILE=ON
+        -DCURL_DISABLE_FTP=ON
+        -DCURL_DISABLE_GOPHER=ON
+        -DCURL_DISABLE_IMAP=ON
+        -DCURL_DISABLE_IPFS=ON
+        -DCURL_DISABLE_LDAP=ON
+        -DCURL_DISABLE_LDAPS=ON
+        -DCURL_DISABLE_MQTT=ON
+        -DCURL_DISABLE_POP3=ON
+        -DCURL_DISABLE_RTSP=ON
+        -DCURL_DISABLE_SMTP=ON
+        -DCURL_DISABLE_TELNET=ON
+        -DCURL_DISABLE_TFTP=ON
+        -DCURL_DISABLE_WEBSOCKETS=ON
+        $<$<BOOL:${CHIMERA_WINXP}>:-DCURL_DISABLE_SMB=ON>
         -DCURL_TARGET_WINDOWS_VERSION=${CHIMERA_TARGET_WINDOWS_VERSION}
 )
 

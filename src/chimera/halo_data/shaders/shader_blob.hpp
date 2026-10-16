@@ -106,3 +106,17 @@ extern const size_t decal_multiply2x_size;
 extern const size_t decal_alpha_blend_size;
 extern const size_t decal_alpha_madd_size;
 
+extern unsigned char transparent_glass_tint[];
+extern const size_t transparent_glass_tint_size;
+
+extern unsigned char modulate[];
+extern const size_t modulate_size;
+
+extern unsigned char diffuse[];
+extern const size_t diffuse_size;
+
+extern unsigned char texture[];
+extern const size_t texture_size;
+
+extern unsigned char occlusion_test[];
+extern const size_t occlusion_test_size;

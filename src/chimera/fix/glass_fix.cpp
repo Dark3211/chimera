@@ -8,6 +8,7 @@
 #include "../halo_data/rasterizer_common.hpp"
 #include "../halo_data/shader_defs.hpp"
 #include "../halo_data/game_engine.hpp"
+#include "../math_trig/math_trig.hpp"
 
 
 namespace Chimera {
@@ -20,10 +21,22 @@ namespace Chimera {
     }
 
     void correct_glass_tint_intensity() noexcept {
-        // Game uses the diffuse instead of the diffuse adjusted for camo that is calculated in stage 0.
-        // Change the params to use the output from the previous stage.
-        IDirect3DDevice9_SetTextureStageState(*global_d3d9_device, 1, D3DTSS_COLORARG2, D3DTA_ALPHAREPLICATE | D3DTA_CURRENT);
-        IDirect3DDevice9_SetTextureStageState(*global_d3d9_device, 1, D3DTSS_COLORARG0, D3DTA_ALPHAREPLICATE | D3DTA_COMPLEMENT | D3DTA_CURRENT);
+        if(d3d9_device_caps->PixelShaderVersion < 0xffff0200) {
+            // Keep the fixed-function path for older D3D9 implementations.
+            IDirect3DDevice9_SetTextureStageState(*global_d3d9_device, 1, D3DTSS_COLORARG2, D3DTA_ALPHAREPLICATE | D3DTA_CURRENT);
+            IDirect3DDevice9_SetTextureStageState(*global_d3d9_device, 1, D3DTSS_COLORARG0, D3DTA_ALPHAREPLICATE | D3DTA_COMPLEMENT | D3DTA_CURRENT);
+        }
+        else {
+            D3DCOLOR texfactor = 0;
+            ColorARGB tint_and_intensity {};
+            IDirect3DDevice9_GetRenderState(*global_d3d9_device, D3DRS_TEXTUREFACTOR, &texfactor);
+            pixel32_to_real_argb_color(texfactor, &tint_and_intensity);
+            float ps_constants[4] = {tint_and_intensity.red, tint_and_intensity.green, tint_and_intensity.blue, tint_and_intensity.alpha};
+            IDirect3DDevice9_SetPixelShaderConstantF(*global_d3d9_device, 0, ps_constants, 1);
+            IDirect3DDevice9_SetPixelShader(*global_d3d9_device, chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_TRANSPARENT_GLASS_TINT]);
+            IDirect3DDevice9_SetTextureStageState(*global_d3d9_device, 0, D3DTSS_COLOROP, D3DTOP_DISABLE);
+            IDirect3DDevice9_SetTextureStageState(*global_d3d9_device, 0, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
+        }
     }
 
     extern "C" void set_correct_glass_reflection_ps_const(TransparentGeometryGroup *group, float *ps_constants) noexcept {

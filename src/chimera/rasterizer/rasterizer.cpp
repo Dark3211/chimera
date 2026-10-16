@@ -499,6 +499,11 @@ namespace Chimera {
         create_pixel_shader(decal_multiply2x, &chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_DECAL_MULTIPLY2X]);
         create_pixel_shader(decal_alpha_blend, &chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_DECAL_ALPHA_BLEND]);
         create_pixel_shader(decal_alpha_madd, &chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_DECAL_ALPHA_MULTIPLY_ADD]);
+        create_pixel_shader(transparent_glass_tint, &chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_TRANSPARENT_GLASS_TINT]);
+        create_pixel_shader(modulate, &chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_MODULATE]);
+        create_pixel_shader(diffuse, &chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_DIFFUSE]);
+        create_pixel_shader(texture, &chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_TEXTURE]);
+        create_pixel_shader(occlusion_test, &chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_OCCLUSION]);
     }
 
     void rasterizer_release_pixel_shaders() noexcept {
