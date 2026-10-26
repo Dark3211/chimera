@@ -124,6 +124,7 @@ namespace Chimera {
             bool cached_scene_checked = false;
             std::uint32_t temporal_sample = 0;
             std::uint32_t tracked_resources = 0;
+            std::uint8_t resource_failures = 0;
             DWORD active_point_sampler_mask = 0;
             DWORD stencil_ref = 1;
             DWORD stencil_ref_mask = 1;
@@ -200,7 +201,8 @@ namespace Chimera {
         inline bool create_shader(
             IDirect3DDevice9 *device,
             const char *source,
-            IDirect3DPixelShader9 **shader
+            IDirect3DPixelShader9 **shader,
+            D3D_SHADER_MACRO *defines = nullptr
         ) noexcept {
             if(!device || !source || !shader) {
                 return false;
@@ -208,7 +210,7 @@ namespace Chimera {
             *shader = nullptr;
 
             ID3DBlob *compiled = nullptr;
-            if(!rasterizer_compile_shader(source, "main", "ps_3_0", nullptr, &compiled) || !compiled) {
+            if(!rasterizer_compile_shader(source, "main", "ps_3_0", defines, &compiled) || !compiled) {
                 EnhancedGraphics::release_com(compiled);
                 return false;
             }
@@ -224,6 +226,42 @@ namespace Chimera {
                 return false;
             }
             return true;
+        }
+
+        struct Preset {
+            const char *edge_threshold;
+            const char *search_steps;
+            const char *search_steps_diag;
+            int steps;
+        };
+
+        inline const Preset &active_preset() noexcept {
+            static const Preset ultra {"0.05", "32", "16", 32};
+            static const Preset high {"0.10", "16", "8", 16};
+            static const Preset *selected = []() noexcept -> const Preset * {
+                const auto *ini = get_chimera().get_ini();
+                const char *value = ini ? ini->get_value("graphics.smaa_preset") : nullptr;
+                if(value && (std::strcmp(value, "high") == 0 || std::strcmp(value, "HIGH") == 0)) {
+                    return &high;
+                }
+                return &ultra;
+            }();
+            return *selected;
+        }
+
+        inline bool create_preset_shader(
+            IDirect3DDevice9 *device,
+            const char *source,
+            IDirect3DPixelShader9 **shader
+        ) noexcept {
+            const auto &preset = active_preset();
+            D3D_SHADER_MACRO defines[] = {
+                {"SMAA_EDGE_THRESHOLD", preset.edge_threshold},
+                {"SMAA_MAX_SEARCH_STEPS", preset.search_steps},
+                {"SMAA_MAX_SEARCH_STEPS_DIAG", preset.search_steps_diag},
+                {nullptr, nullptr}
+            };
+            return create_shader(device, source, shader, defines);
         }
 
         inline bool create_render_target(
@@ -310,6 +348,9 @@ namespace Chimera {
         // pixels without an edge are discarded so the stencil pass can mark only work
         // that must enter the expensive blending-weight shader.
         static constexpr const char *EDGE_SHADER = R"HLSL(
+            #ifndef SMAA_EDGE_THRESHOLD
+            #define SMAA_EDGE_THRESHOLD 0.05
+            #endif
             sampler2D frame_sampler : register(s0);
 
             float luma(float3 c) {
@@ -328,7 +369,7 @@ namespace Chimera {
 
                 float4 delta = 0.0;
                 delta.xy = abs(L.xx - float2(Lleft, Ltop));
-                float2 edges = step(0.05.xx, delta.xy);
+                float2 edges = step(float2(SMAA_EDGE_THRESHOLD, SMAA_EDGE_THRESHOLD), delta.xy);
                 if(dot(edges, 1.0.xx) == 0.0) {
                     discard;
                 }
@@ -353,6 +394,12 @@ namespace Chimera {
         // equations are used by both modes. T2x supplies the official per-jitter
         // subsample indices through c1; 1x supplies zero.
         static constexpr const char *WEIGHT_SHADER = R"HLSL(
+            #ifndef SMAA_MAX_SEARCH_STEPS
+            #define SMAA_MAX_SEARCH_STEPS 32
+            #endif
+            #ifndef SMAA_MAX_SEARCH_STEPS_DIAG
+            #define SMAA_MAX_SEARCH_STEPS_DIAG 16
+            #endif
             sampler2D edge_sampler : register(s0);
             sampler2D area_sampler : register(s1);
             sampler2D search_sampler : register(s2);
@@ -387,8 +434,8 @@ namespace Chimera {
                 float continuation = 1.0;
                 e = 0.0;
                 [loop]
-                for(int i = 0; i < 16; i++) {
-                    if(distance >= 15.0 || continuation <= 0.9) break;
+                for(int i = 0; i < SMAA_MAX_SEARCH_STEPS_DIAG; i++) {
+                    if(distance >= (SMAA_MAX_SEARCH_STEPS_DIAG - 1.0) || continuation <= 0.9) break;
                     uv += dir * metrics.xy;
                     distance += 1.0;
                     e = edge4(uv).rg;
@@ -403,8 +450,8 @@ namespace Chimera {
                 uv.x += 0.25 * metrics.x;
                 e = 0.0;
                 [loop]
-                for(int i = 0; i < 16; i++) {
-                    if(distance >= 15.0 || continuation <= 0.9) break;
+                for(int i = 0; i < SMAA_MAX_SEARCH_STEPS_DIAG; i++) {
+                    if(distance >= (SMAA_MAX_SEARCH_STEPS_DIAG - 1.0) || continuation <= 0.9) break;
                     uv += dir * metrics.xy;
                     distance += 1.0;
                     e = decode_diag(edge4(uv).rg);
@@ -482,7 +529,7 @@ namespace Chimera {
             float search_x_left(float2 uv, float end) {
                 float2 e = float2(0.0, 1.0);
                 [loop]
-                for(int i = 0; i < 32; i++) {
+                for(int i = 0; i < SMAA_MAX_SEARCH_STEPS; i++) {
                     if(!(uv.x > end && e.g > 0.8281 && e.r == 0.0)) break;
                     e = edge4(uv).rg;
                     uv -= float2(2.0 * metrics.x, 0.0);
@@ -494,7 +541,7 @@ namespace Chimera {
             float search_x_right(float2 uv, float end) {
                 float2 e = float2(0.0, 1.0);
                 [loop]
-                for(int i = 0; i < 32; i++) {
+                for(int i = 0; i < SMAA_MAX_SEARCH_STEPS; i++) {
                     if(!(uv.x < end && e.g > 0.8281 && e.r == 0.0)) break;
                     e = edge4(uv).rg;
                     uv += float2(2.0 * metrics.x, 0.0);
@@ -506,7 +553,7 @@ namespace Chimera {
             float search_y_up(float2 uv, float end) {
                 float2 e = float2(1.0, 0.0);
                 [loop]
-                for(int i = 0; i < 32; i++) {
+                for(int i = 0; i < SMAA_MAX_SEARCH_STEPS; i++) {
                     if(!(uv.y > end && e.r > 0.8281 && e.g == 0.0)) break;
                     e = edge4(uv).rg;
                     uv -= float2(0.0, 2.0 * metrics.y);
@@ -518,7 +565,7 @@ namespace Chimera {
             float search_y_down(float2 uv, float end) {
                 float2 e = float2(1.0, 0.0);
                 [loop]
-                for(int i = 0; i < 32; i++) {
+                for(int i = 0; i < SMAA_MAX_SEARCH_STEPS; i++) {
                     if(!(uv.y < end && e.r > 0.8281 && e.g == 0.0)) break;
                     e = edge4(uv).rg;
                     uv += float2(0.0, 2.0 * metrics.y);
@@ -947,10 +994,11 @@ namespace Chimera {
                         vertex.data2[1] = v - 0.25f * inv_height;
                         vertex.data2[2] = u - 0.125f * inv_width;
                         vertex.data2[3] = v + 1.25f * inv_height;
-                        vertex.data3[0] = vertex.data1[0] - 64.0f * inv_width;
-                        vertex.data3[1] = vertex.data1[2] + 64.0f * inv_width;
-                        vertex.data3[2] = vertex.data2[1] - 64.0f * inv_height;
-                        vertex.data3[3] = vertex.data2[3] + 64.0f * inv_height;
+                        const float search_end = 2.0f * static_cast<float>(active_preset().steps);
+                        vertex.data3[0] = vertex.data1[0] - search_end * inv_width;
+                        vertex.data3[1] = vertex.data1[2] + search_end * inv_width;
+                        vertex.data3[2] = vertex.data2[1] - search_end * inv_height;
+                        vertex.data3[3] = vertex.data2[3] + search_end * inv_height;
                     }
                     else {
                         vertex.data0[0] = u + inv_width;
@@ -1201,6 +1249,10 @@ namespace Chimera {
                 return true;
             }
 
+            if(EnhancedGraphics::device_unavailable(device)) {
+                return false;
+            }
+
             // Recreating D3D resources can happen on the first T2x frame. Preserve
             // the already-selected camera sample so the weight pass uses the matching
             // official subsample indices instead of silently reverting to SMAA 1x.
@@ -1214,8 +1266,8 @@ namespace Chimera {
             s.height = height;
             s.color_format = color_format;
 
-            if(!create_shader(device, EDGE_SHADER, &s.edge_shader) ||
-               !create_shader(device, WEIGHT_SHADER, &s.weight_shader) ||
+            if(!create_preset_shader(device, EDGE_SHADER, &s.edge_shader) ||
+               !create_preset_shader(device, WEIGHT_SHADER, &s.weight_shader) ||
                !create_shader(device, NEIGHBORHOOD_SHADER, &s.neighborhood_shader) ||
                !create_render_target(device, width, height, &s.edges_texture, &s.edges_surface) ||
                !create_render_target(device, width, height, &s.weights_texture, &s.weights_surface) ||
@@ -1252,6 +1304,7 @@ namespace Chimera {
                 release_resources();
                 return false;
             }
+            s.resource_failures = 0;
             s.tracked_resources = (temporal ? 18U : 12U) + (s.stencil_surface ? 1U : 0U);
             GraphicsRuntimeMetrics::resources_created(s.tracked_resources);
             GraphicsRuntimeMetrics::subsystem_recovered(GraphicsRuntimeMetrics::Subsystem::SMAA);
@@ -1754,6 +1807,7 @@ namespace Chimera {
         inline void on_reset(IDirect3DDevice9 *, D3DPRESENT_PARAMETERS *) noexcept {
             GraphicsRuntimeMetrics::subsystem_reset(GraphicsRuntimeMetrics::Subsystem::SMAA);
             release_resources();
+            state().resource_failures = 0;
             GraphicsRuntimeMetrics::write_log();
         }
 
@@ -1827,6 +1881,9 @@ namespace Chimera {
                 release_com(scene_target);
                 s.processing = false;
                 s.jitter_applied = false;
+                if(!EnhancedGraphics::resource_failure_is_fatal(device, s.resource_failures)) {
+                    return;
+                }
                 disable_for_session(
                     "Chimera Graphics SMAA disabled: official SMAA resources could not be created."
                 );
@@ -1855,9 +1912,11 @@ namespace Chimera {
                 restore_smaa_state(device, captured_state);
                 s.processing = false;
                 s.jitter_applied = false;
-                EnhancedGraphics::disable_for_session(
-                    "Chimera Graphics disabled: shared pre-HUD post-process resources could not be created."
-                );
+                if(EnhancedGraphics::resource_failure_is_fatal(device, graphics.resource_failures)) {
+                    EnhancedGraphics::disable_for_session(
+                        "Chimera Graphics disabled: shared pre-HUD post-process resources could not be created."
+                    );
+                }
                 return;
             }
 
@@ -1886,10 +1945,12 @@ namespace Chimera {
                     discard_smaa_state(captured_state);
                     s.processing = false;
                     s.jitter_applied = false;
-                    disable_for_session("Chimera Graphics SMAA disabled: D3D9 could not resume Halo's scene.");
-                    EnhancedGraphics::disable_for_session(
-                        "Chimera Graphics disabled: D3D9 could not resume Halo's scene after SMAA processing."
-                    );
+                    if(!EnhancedGraphics::device_unavailable(device)) {
+                        disable_for_session("Chimera Graphics SMAA disabled: D3D9 could not resume Halo's scene.");
+                        EnhancedGraphics::disable_for_session(
+                            "Chimera Graphics disabled: D3D9 could not resume Halo's scene after SMAA processing."
+                        );
+                    }
                     return;
                 }
 

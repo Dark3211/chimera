@@ -9,8 +9,8 @@ _on_d3d9_reset_asm:
     pushfd
     pushad
 
-    push dword ptr [esp+0x28]
-    push dword ptr [esp+0x30]
+    push dword ptr [esp+0x2C]
+    push dword ptr [esp+0x2C]
     call _do_d3d9_reset_event
     add esp, 8
 

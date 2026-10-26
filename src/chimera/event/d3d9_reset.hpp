@@ -27,6 +27,7 @@ namespace Chimera {
      * @param function This is the function to remove
      */
     void remove_d3d9_reset_event(const ResetEventFunction function);
+    bool d3d9_reset_hook_active() noexcept;
 }
 
 #endif

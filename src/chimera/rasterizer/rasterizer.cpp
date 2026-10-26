@@ -827,6 +827,17 @@ namespace Chimera {
     static D3DCAPS9 live_d3d9_device_caps {};
     static bool runtime_graphics_setup_complete = false;
 
+    static void release_graphics_on_device_loss() noexcept {
+        if(!global_d3d9_device || !*global_d3d9_device) {
+            return;
+        }
+        if((*global_d3d9_device)->TestCooperativeLevel() == D3D_OK) {
+            return;
+        }
+        EnhancedGraphics::release_resources();
+        SMAA::release_resources();
+    }
+
     static bool set_up_runtime_graphics_if_device_ready() noexcept {
         if(runtime_graphics_setup_complete) {
             return true;
@@ -866,6 +877,13 @@ namespace Chimera {
         // Only the official SMAA 1x/T2x implementation remains.
         if(!retail_pre_hud_smaa_active) {
             SMAA::set_up();
+
+        if(EnhancedGraphics::state().settings.enabled) {
+            add_preframe_event(release_graphics_on_device_loss, EVENT_PRIORITY_BEFORE);
+            if(!d3d9_reset_hook_active()) {
+                console_warning("Chimera Graphics: the D3D9 Reset hook is inactive; graphics resources are released by the device-loss watchdog instead.");
+            }
+        }
         }
 
         const auto bloom = graphics_bloom_settings();

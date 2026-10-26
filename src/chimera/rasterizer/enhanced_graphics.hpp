@@ -48,6 +48,7 @@ namespace Chimera {
             bool failure_reported = false;
             bool processing_frame = false;
             std::uint32_t tracked_resources = 0;
+            std::uint8_t resource_failures = 0;
         };
 
         struct ScreenVertex {
@@ -76,6 +77,23 @@ namespace Chimera {
                 resource->Release();
                 resource = nullptr;
             }
+        }
+
+        inline bool device_unavailable(IDirect3DDevice9 *device) noexcept {
+            return !device || device->TestCooperativeLevel() != D3D_OK;
+        }
+
+        static constexpr std::uint8_t MAX_TRANSIENT_RESOURCE_FAILURES = 30;
+
+        inline bool resource_failure_is_fatal(IDirect3DDevice9 *device, std::uint8_t &failures) noexcept {
+            if(device_unavailable(device)) {
+                return false;
+            }
+            if(failures < MAX_TRANSIENT_RESOURCE_FAILURES) {
+                failures++;
+                return false;
+            }
+            return true;
         }
 
         inline void release_resources() noexcept {
@@ -331,12 +349,17 @@ namespace Chimera {
                 return true;
             }
 
+            if(device_unavailable(device)) {
+                return false;
+            }
+
             release_resources();
             graphics.device = device;
             if(!create_shader(device) || !create_frame_texture(device, description)) {
                 release_resources();
                 return false;
             }
+            graphics.resource_failures = 0;
             graphics.tracked_resources = 3;
             GraphicsRuntimeMetrics::resources_created(graphics.tracked_resources);
             GraphicsRuntimeMetrics::subsystem_recovered(GraphicsRuntimeMetrics::Subsystem::ENHANCED);
@@ -346,6 +369,7 @@ namespace Chimera {
         inline void on_reset(IDirect3DDevice9 *, D3DPRESENT_PARAMETERS *) noexcept {
             GraphicsRuntimeMetrics::subsystem_reset(GraphicsRuntimeMetrics::Subsystem::ENHANCED);
             release_resources();
+            state().resource_failures = 0;
             GraphicsRuntimeMetrics::write_log();
         }
 
@@ -526,7 +550,9 @@ namespace Chimera {
 
             if(!ensure_resources(device, description)) {
                 release_com(back_buffer);
-                disable_for_session("Chimera Graphics disabled for this session: D3D9 post-process resources could not be created.");
+                if(resource_failure_is_fatal(device, graphics.resource_failures)) {
+                    disable_for_session("Chimera Graphics disabled for this session: D3D9 post-process resources could not be created.");
+                }
                 return;
             }
 
@@ -663,7 +689,9 @@ namespace Chimera {
             if(!ensure_resources(device, description)) {
                 release_com(scene_render_target);
                 release_com(state_block);
-                disable_for_session("Chimera Graphics strict HUD exclusion disabled: active scene resources could not be created.");
+                if(resource_failure_is_fatal(device, graphics.resource_failures)) {
+                    disable_for_session("Chimera Graphics strict HUD exclusion disabled: active scene resources could not be created.");
+                }
                 return;
             }
 
@@ -689,7 +717,9 @@ namespace Chimera {
             if(FAILED(IDirect3DDevice9_BeginScene(device))) {
                 release_com(scene_render_target);
                 release_com(state_block);
-                disable_for_session("Chimera Graphics strict HUD exclusion disabled: D3D9 could not resume the Halo scene.");
+                if(!device_unavailable(device)) {
+                    disable_for_session("Chimera Graphics strict HUD exclusion disabled: D3D9 could not resume the Halo scene.");
+                }
                 return;
             }
 

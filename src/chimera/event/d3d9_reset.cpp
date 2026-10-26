@@ -9,6 +9,7 @@
 
 namespace Chimera {
     static std::vector<Event<ResetEventFunction>> reset_events;
+    static bool reset_hook_installed = false;
 
     static void enable_d3d9_reset_hook();
 
@@ -36,6 +37,10 @@ namespace Chimera {
         }
     }
 
+    bool d3d9_reset_hook_active() noexcept {
+        return reset_hook_installed;
+    }
+
     extern "C" void do_d3d9_reset_event(LPDIRECT3DDEVICE9 device, D3DPRESENT_PARAMETERS *present) {
         GraphicsRuntimeMetrics::reset_begin();
         call_in_order(reset_events, device, present);
@@ -58,6 +63,7 @@ namespace Chimera {
         }
         write_jmp_call(call_site, hook, reinterpret_cast<const void *>(on_d3d9_reset_asm), nullptr, false);
         enabled = hook.address == call_site && hook.hook && !hook.original_bytes.empty();
+        reset_hook_installed = enabled;
         if(!enabled && !failure_reported) {
             console_error("Chimera D3D9 Reset hook disabled: executable validation or trampoline creation failed.");
             failure_reported = true;
