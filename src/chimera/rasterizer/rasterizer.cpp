@@ -877,13 +877,15 @@ namespace Chimera {
         // Only the official SMAA 1x/T2x implementation remains.
         if(!retail_pre_hud_smaa_active) {
             SMAA::set_up();
+        }
 
+        // The device-loss watchdog protects every EnhancedGraphics configuration,
+        // including the retail pre-HUD path above.
         if(EnhancedGraphics::state().settings.enabled) {
             add_preframe_event(release_graphics_on_device_loss, EVENT_PRIORITY_BEFORE);
             if(!d3d9_reset_hook_active()) {
                 console_warning("Chimera Graphics: the D3D9 Reset hook is inactive; graphics resources are released by the device-loss watchdog instead.");
             }
-        }
         }
 
         const auto bloom = graphics_bloom_settings();

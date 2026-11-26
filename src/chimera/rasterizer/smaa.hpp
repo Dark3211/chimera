@@ -1815,6 +1815,15 @@ namespace Chimera {
             auto &s = state();
             auto &graphics = EnhancedGraphics::state();
 
+            // D3D9 permits only cooperative-level queries and Release calls while a
+            // device is lost. Drop all SMAA resources and temporal history before the
+            // rest of this callback can issue rendering calls.
+            if(global_d3d9_device && *global_d3d9_device &&
+               EnhancedGraphics::device_unavailable(*global_d3d9_device)) {
+                release_resources();
+                return;
+            }
+
             // The world has already been rendered with the selected T2x camera sample
             // when this callback runs. Advance the sample exactly once on every exit,
             // even if capture/copy/AA fails, so a transient D3D failure cannot leave the
