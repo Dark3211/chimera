@@ -107,6 +107,7 @@
 #include "fix/index_buffer_fix.hpp"
 #include "fix/countdown_timer_fix.hpp"
 #include "fix/fixed_function.hpp"
+#include "startup_trace.hpp"
 
 namespace Chimera {
     static Chimera *chimera;
@@ -133,6 +134,13 @@ namespace Chimera {
 
             // Load the ini
             chimera->reload_ini();
+
+            // Diagnostic trace is passive: it records startup/API calls without
+            // changing Halo's video mode, device parameters, or rendering path.
+            startup_trace_initialize(chimera->get_ini());
+            startup_trace_log("Chimera constructor entered after signature scan; client=%u server=%u",
+                              static_cast<unsigned int>(chimera->feature_present("client")),
+                              static_cast<unsigned int>(chimera->feature_present("server")));
 
             // Set the path
             const char *path = chimera->get_ini()->get_value("halo.path");
@@ -180,7 +188,10 @@ namespace Chimera {
                 set_up_map_config_control();
 
                 // For renderer memes
+                startup_trace_log("Startup stage: set_up_rasterizer BEGIN");
                 set_up_rasterizer();
+                startup_trace_log("Startup stage: set_up_rasterizer END; device_storage=%p",
+                                  static_cast<void *>(global_d3d9_device));
 
                 // Well it was going to happen eventually.
                 set_up_shader_transparent_generic();
@@ -291,7 +302,9 @@ namespace Chimera {
                 set_up_interpolation();
 
                 // Set video mode
+                startup_trace_log("Startup stage: set_up_video_mode BEGIN");
                 set_up_video_mode();
+                startup_trace_log("Startup stage: set_up_video_mode END");
 
                 // Fix the damn FOV
                 set_up_fov_fix();
@@ -684,6 +697,7 @@ namespace Chimera {
     }
 
     void initial_tick() {
+        startup_trace_log("Startup stage: first initial_tick/preframe BEGIN");
         remove_preframe_event(initial_tick);
         if(chimera->feature_present("client")) {
             // Set up the text hook?
@@ -760,6 +774,7 @@ namespace Chimera {
         setup_lua_scripting();
 
         enable_output(true);
+        startup_trace_log("Startup stage: initial_tick/preframe END");
     }
 
     const std::vector<Command> &Chimera::get_commands() const noexcept {
