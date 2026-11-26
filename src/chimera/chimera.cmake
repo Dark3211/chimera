@@ -58,6 +58,7 @@ add_library(chimera STATIC
     src/chimera/annoyance/watson.cpp
     src/chimera/bookmark/bookmark.cpp
     src/chimera/chimera.cpp
+    src/chimera/startup_trace.cpp
     src/chimera/command/command.cpp
     src/chimera/command/hotkey.cpp
     src/chimera/config/config.cpp
