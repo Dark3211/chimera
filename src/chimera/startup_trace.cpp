@@ -257,9 +257,17 @@ namespace Chimera {
 
             static LONG present_count = 0;
             static ULONGLONG last_summary_tick = 0;
+            static ULONGLONG last_failure_tick = 0;
+            static HRESULT last_failure = S_OK;
             const LONG number = InterlockedIncrement(&present_count);
             const ULONGLONG now = GetTickCount64();
-            if(number <= 8 || FAILED(result) || now - last_summary_tick >= 1000) {
+            const bool new_failure = FAILED(result) &&
+                (result != last_failure || now - last_failure_tick >= 1000);
+            if(new_failure) {
+                last_failure = result;
+                last_failure_tick = now;
+            }
+            if(number <= 8 || new_failure || now - last_summary_tick >= 1000) {
                 startup_trace_log(
                     "D3D9 Present #%ld HRESULT=0x%08lx destination-window=%p",
                     static_cast<long>(number),
