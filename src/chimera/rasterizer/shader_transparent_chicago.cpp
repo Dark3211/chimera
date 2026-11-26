@@ -105,13 +105,14 @@ namespace Chimera {
     static std::uint16_t chicago_numeric_bitmap_index(std::uint16_t current_index,
         std::uint16_t permutation, std::uint8_t numeric_counter_limit, RenderAnimation *animation,
         Bitmap *bitmap, bool countdown_timer) noexcept {
-        if(!bitmap || bitmap->bitmap_data.count <= 0 || !animation || !animation->values) return current_index;
+        if(!bitmap || bitmap->bitmap_data.count == 0) return current_index;
         const short base = static_cast<short>(bitmap->bitmap_data.count);
         if(base <= 0) return current_index;
         if(countdown_timer && numeric_countdown_timer_get_available()) {
             const short index = numeric_countdown_timer_get(static_cast<short>(permutation));
             if(index >= 0 && index < base) return static_cast<std::uint16_t>(index);
         }
+        if(!animation || !animation->values) return current_index;
         const short source_index = base == 8 ? 3 : 0;
         const short counter_limit = static_cast<short>(numeric_counter_limit);
         short counter = PIN(fast_ftol_floor(0.5f + animation->values[source_index] * static_cast<float>(counter_limit)), 0, counter_limit);
@@ -401,15 +402,15 @@ namespace Chimera {
 
         rasterizer_set_framebuffer_blend_function(shader_data->chicago.framebuffer_blend_function);
 
-                        // Numeric bitmap indexing
-        if(TEST_FLAG(shader_data->chicago_extended.flags, SHADER_TRANSPARENT_CHICAGO_FLAGS_NUMERIC_BIT) &&
-           group->animation && group->animation->values && shader_data->chicago_extended.maps.count > 0) {
-            auto *first_map = chicago_get_extended_map(shader_data, 0);
+        // Numeric bitmap indexing
+        if(TEST_FLAG(shader_data->chicago.flags, SHADER_TRANSPARENT_CHICAGO_FLAGS_NUMERIC_BIT) &&
+           group->animation && shader_data->chicago.maps.count > 0) {
+            auto *first_map = chicago_get_map(shader_data, 0);
             auto *bitmap = first_map ? get_bitmap_tag(first_map->map.tag_id) : nullptr;
             bitmap_index = chicago_numeric_bitmap_index(
-                bitmap_index, group->shader_permutation_index, shader_data->chicago_extended.numeric_counter_limit,
+                bitmap_index, group->shader_permutation_index, shader_data->chicago.numeric_counter_limit,
                 group->animation, bitmap,
-                TEST_FLAG(shader_data->chicago_extended.extra_flags, SHADER_TRANSPARENT_CHICAGO_EXTRA_FLAGS_NUMERIC_COUNTDOWN_TIMER)
+                TEST_FLAG(shader_data->chicago.extra_flags, SHADER_TRANSPARENT_CHICAGO_EXTRA_FLAGS_NUMERIC_COUNTDOWN_TIMER)
             );
         }
 
@@ -624,22 +625,15 @@ namespace Chimera {
         rasterizer_set_framebuffer_blend_function(shader_data->chicago_extended.framebuffer_blend_function);
 
         // Numeric bitmap indexing
-        if(TEST_FLAG(shader_data->chicago_extended.flags, SHADER_TRANSPARENT_CHICAGO_FLAGS_NUMERIC_BIT) && group->animation && shader_data->chicago_extended.maps.count > 0) {
-            short base = get_bitmap_tag(chicago_get_extended_map(shader_data, 0)->map.tag_id)->bitmap_data.count;
-            if(TEST_FLAG(shader_data->chicago_extended.extra_flags, SHADER_TRANSPARENT_CHICAGO_EXTRA_FLAGS_NUMERIC_COUNTDOWN_TIMER)) {
-                bitmap_index = numeric_countdown_timer_get(group->shader_permutation_index);
-            }
-            else {
-                short numeric_counter_source_index = (base == 8) ? 3 : 0;
-
-                short numeric_counter_limit = shader_data->chicago_extended.numeric_counter_limit;
-                short numeric_counter = PIN(fast_ftol_floor(0.5f + group->animation->values[numeric_counter_source_index] * static_cast<float>(numeric_counter_limit)), 0, numeric_counter_limit);
-                for(short i = 0; i < group->shader_permutation_index; i++) {
-                    numeric_counter /= base;
-                }
-
-                bitmap_index = numeric_counter % base;
-            }
+        if(TEST_FLAG(shader_data->chicago_extended.flags, SHADER_TRANSPARENT_CHICAGO_FLAGS_NUMERIC_BIT) &&
+           group->animation && shader_data->chicago_extended.maps.count > 0) {
+            auto *first_map = chicago_get_extended_map(shader_data, 0);
+            auto *bitmap = first_map ? get_bitmap_tag(first_map->map.tag_id) : nullptr;
+            bitmap_index = chicago_numeric_bitmap_index(
+                bitmap_index, group->shader_permutation_index, shader_data->chicago_extended.numeric_counter_limit,
+                group->animation, bitmap,
+                TEST_FLAG(shader_data->chicago_extended.extra_flags, SHADER_TRANSPARENT_CHICAGO_EXTRA_FLAGS_NUMERIC_COUNTDOWN_TIMER)
+            );
         }
 
         // Maps
