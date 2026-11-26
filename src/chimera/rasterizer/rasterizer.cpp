@@ -504,6 +504,14 @@ namespace Chimera {
         create_pixel_shader(diffuse, &chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_DIFFUSE]);
         create_pixel_shader(texture, &chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_TEXTURE]);
         create_pixel_shader(occlusion_test, &chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_OCCLUSION]);
+
+        // Chicago's SM3 path is optional. Failed creation leaves the entries null,
+        // allowing the dispatch hook to use Gearbox's original fixed-function path.
+        if(d3d9_device_caps->PixelShaderVersion >= 0xffff0300 &&
+           d3d9_device_caps->VertexShaderVersion >= 0xfffe0300) {
+            create_pixel_shader(transparent_chicago, &chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_TRANSPARENT_CHICAGO]);
+            create_pixel_shader(transparent_chicago_cube, &chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_TRANSPARENT_CHICAGO_CUBE]);
+        }
     }
 
     void rasterizer_release_pixel_shaders() noexcept {

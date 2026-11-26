@@ -120,3 +120,10 @@ extern const size_t texture_size;
 
 extern unsigned char occlusion_test[];
 extern const size_t occlusion_test_size;
+
+
+extern unsigned char transparent_chicago[];
+extern const size_t transparent_chicago_size;
+
+extern unsigned char transparent_chicago_cube[];
+extern const size_t transparent_chicago_cube_size;

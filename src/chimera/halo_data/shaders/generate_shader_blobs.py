@@ -132,3 +132,7 @@ if __name__ == '__main__':
     generate_shader_blobs("diffuse", sys.argv[1] + "pixel/diffuse.cso", 3)
     generate_shader_blobs("texture", sys.argv[1] + "pixel/texture.cso", 3)
     generate_shader_blobs("occlusion_test", sys.argv[1] + "pixel/occlusion_test.cso", 3)
+
+
+    generate_shader_blobs("transparent_chicago", sys.argv[1] + "pixel/transparent_chicago.cso", 3)
+    generate_shader_blobs("transparent_chicago_cube", sys.argv[1] + "pixel/transparent_chicago_cube.cso", 3)

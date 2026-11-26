@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+#include <cstring>
+
 #include "chicago_fix.hpp"
 #include "map_hacks/map_hacks.hpp"
 #include "../chimera.hpp"
@@ -24,6 +26,10 @@ namespace Chimera {
         void chicago_extended_multiply2x_set_xbox_blending_asm() noexcept;
 
         void chicago_set_projective_divide_asm() noexcept;
+        void chicago_set_up_pixel_shader_asm() noexcept;
+        void chicago_extended_set_up_pixel_shader_asm() noexcept;
+        const void *chicago_draw_original_ptr = nullptr;
+        const void *chicago_extended_draw_original_ptr = nullptr;
     }
 
     extern "C" void chicago_multiply_set_xbox_blending(_shader *shader, std::uint32_t stage, DWORD tss_option_argument) noexcept {
@@ -73,6 +79,10 @@ namespace Chimera {
     }
 
     void chicago_fog_fix(TransparentGeometryGroup *group) noexcept {
+        if(!group || !global_d3d9_device || !*global_d3d9_device ||
+           !d3d9_device_caps || !global_window_parameters) {
+            return;
+        }
         // Test for the literal potatos that are the reason this is broken in the first place.
         if(d3d9_device_caps->MaxTextureBlendStages < 5 || d3d9_device_caps->MaxSimultaneousTextures < 3 || !(d3d9_device_caps->PrimitiveMiscCaps & D3DPMISCCAPS_PERSTAGECONSTANT)) {
             return;
@@ -121,16 +131,20 @@ namespace Chimera {
     }
 
     extern "C" void chicago_projective_divide_first_map(TransparentGeometryGroup *group) noexcept {
+        if(!group || !group->shader || !global_d3d9_device || !*global_d3d9_device ||
+           !is_readable_memory_range(group->shader, sizeof(_shader))) {
+            return;
+        }
         _shader *shader = reinterpret_cast<_shader *>(group->shader);
         // We only want to enable projective divide on stage 0 if the first map is 2D
         bool first_map_is_cube = false;
         if(shader->type == SHADER_TYPE_TRANSPARENT_CHICAGO) {
             ShaderTransparentChicago *chicago_shader = reinterpret_cast<ShaderTransparentChicago *>(group->shader);
-            first_map_is_cube = chicago_shader->chicago.type > SHADER_TRANSPARENT_GENERIC_TYPE_2D_MAP ? true : false;
+            first_map_is_cube = chicago_shader->chicago.type > SHADER_TRANSPARENT_CHICAGO_TYPE_2D_MAP ? true : false;
         }
         else if(shader->type == SHADER_TYPE_TRANSPARENT_CHICAGO_EXTENDED) {
             ShaderTransparentChicagoExtended *extended_shader = reinterpret_cast<ShaderTransparentChicagoExtended *>(group->shader);
-            first_map_is_cube = extended_shader->chicago_extended.type > SHADER_TRANSPARENT_GENERIC_TYPE_2D_MAP ? true : false;
+            first_map_is_cube = extended_shader->chicago_extended.type > SHADER_TRANSPARENT_CHICAGO_TYPE_2D_MAP ? true : false;
         }
         else {
             // Something seriously borkus must have happened for this to ever happen
@@ -159,10 +173,44 @@ namespace Chimera {
     }
 
     void reset_texture_transform_flags() noexcept {
-        IDirect3DDevice9_SetTextureStageState(*global_d3d9_device, 0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE);
+        if(global_d3d9_device && *global_d3d9_device) {
+            IDirect3DDevice9_SetTextureStageState(*global_d3d9_device, 0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE);
+        }
     }
 
     void set_up_chicago_fix() noexcept {
+        // Install the optional SM3 backend via Halo's dispatch table. Validate the
+        // table and targets before patching. The assembly trampoline returns to the
+        // original Gearbox draw whenever the renderer returns false.
+        if(chimera_rasterizer_enabled) {
+            auto *switch_signature = get_chimera().get_signature("transparent_shader_draw_switch_sig").data();
+            if(switch_signature && is_readable_memory_range(switch_signature + 3, sizeof(std::byte *))) {
+                std::byte *dispatch_table = nullptr;
+                std::memcpy(&dispatch_table, switch_signature + 3, sizeof(dispatch_table));
+                if(dispatch_table && is_readable_memory_range(dispatch_table, 7 * sizeof(void *))) {
+                    std::byte *chicago_entry = nullptr;
+                    std::byte *extended_entry = nullptr;
+                    std::memcpy(&chicago_entry, dispatch_table + 5 * sizeof(void *), sizeof(chicago_entry));
+                    std::memcpy(&extended_entry, dispatch_table + 6 * sizeof(void *), sizeof(extended_entry));
+                    static Hook chicago_draw_hook, extended_draw_hook;
+                    if(chicago_entry && is_executable_memory_range(chicago_entry + 5, 16)) {
+                        write_function_override(chicago_entry + 5, chicago_draw_hook,
+                            reinterpret_cast<const void *>(chicago_set_up_pixel_shader_asm),
+                            &chicago_draw_original_ptr);
+                        if(!chicago_draw_hook.address) chicago_draw_original_ptr = nullptr;
+                    }
+                    if(extended_entry && is_executable_memory_range(extended_entry + 5, 16)) {
+                        write_function_override(extended_entry + 5, extended_draw_hook,
+                            reinterpret_cast<const void *>(chicago_extended_set_up_pixel_shader_asm),
+                            &chicago_extended_draw_original_ptr);
+                        if(!extended_draw_hook.address) chicago_extended_draw_original_ptr = nullptr;
+                    }
+                }
+            }
+        }
+
+        // Keep the original multiply and projective-divide corrections for the
+        // fixed-function fallback when SM3 is unavailable or shader creation fails.
         // Fix multiply and multiply2x blend functions.
         // We'll check the gearbox blending flag added in H1A for if we want borked rendering for some tags.
         static Hook multiply, multiply2x, extended_multiply, extended_multiply2x;
