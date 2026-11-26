@@ -46,19 +46,7 @@ namespace Chimera {
         startup_trace_log("Halo Reset call-site hook reached: device=%p queued_events=%zu",
                           static_cast<void *>(device),
                           reset_events.size());
-        if(present) {
-            startup_trace_log(
-                "Halo Reset call-site parameters: Windowed=%u BackBuffer=%lux%lu Format=%u Swap=%u Flags=0x%08lx Refresh=%lu Interval=0x%08lx",
-                static_cast<unsigned int>(present->Windowed),
-                static_cast<unsigned long>(present->BackBufferWidth),
-                static_cast<unsigned long>(present->BackBufferHeight),
-                static_cast<unsigned int>(present->BackBufferFormat),
-                static_cast<unsigned int>(present->SwapEffect),
-                static_cast<unsigned long>(present->Flags),
-                static_cast<unsigned long>(present->FullScreen_RefreshRateInHz),
-                static_cast<unsigned long>(present->PresentationInterval)
-            );
-        }
+        startup_trace_on_reset_call(device, present);
         GraphicsRuntimeMetrics::reset_begin();
         call_in_order(reset_events, device, present);
     }
