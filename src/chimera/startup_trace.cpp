@@ -538,6 +538,13 @@ namespace Chimera {
         }
     }
 
+    void startup_trace_log_window(const char *label, void *window) noexcept {
+        if(!trace_enabled) {
+            return;
+        }
+        log_window(label, reinterpret_cast<HWND>(window));
+    }
+
     void startup_trace_log(const char *format, ...) noexcept {
         if(!trace_enabled || trace_file == INVALID_HANDLE_VALUE || !format) {
             return;
