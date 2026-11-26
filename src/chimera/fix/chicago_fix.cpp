@@ -9,6 +9,9 @@
 #include "../halo_data/shader_defs.hpp"
 #include "../halo_data/rasterizer_common.hpp"
 #include "../halo_data/game_variables.hpp"
+#include "../halo_data/game_functions.hpp"
+#include "../rasterizer/rasterizer_vertex_shaders.hpp"
+#include "../rasterizer/rasterizer_transparent_geometry.hpp"
 #include "../math_trig/math_trig.hpp"
 
 
@@ -91,7 +94,7 @@ namespace Chimera {
         else if(shader->type == SHADER_TYPE_TRANSPARENT_CHICAGO_EXTENDED) {
             ShaderTransparentChicagoExtended *extended_shader = reinterpret_cast<ShaderTransparentChicagoExtended *>(group->shader);
             framebuffer_blend_function = extended_shader->chicago_extended.framebuffer_blend_function;
-            stage = extended_shader->chicago_extended.maps_4_stage.count;
+            stage = extended_shader->chicago_extended.maps.count;
         }
 
         if(TEST_FLAG(group->geometry_flags, RASTERIZER_GEOMETRY_FLAGS_SKY_BIT) && framebuffer_blend_function == SHADER_FRAMEBUFFER_BLEND_FUNCTION_ALPHA_BLEND) {
@@ -137,7 +140,20 @@ namespace Chimera {
         if(!first_map_is_cube) {
             IDirect3DDevice9_SetTextureStageState(*global_d3d9_device, 0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_PROJECTED);
         }
-        
+
+        // Extra Chicago layers can change the vertex shader. Restore the shader and
+        // declaration required by the parent geometry group before the final draw.
+        const short vertex_shader_permutation = shader_get_vertex_shader_permutation(reinterpret_cast<std::byte *>(group->shader));
+        const short vertex_type = rasterizer_transparent_geometry_get_primary_vertex_type(group);
+        if(vertex_shader_permutation >= 0 && vertex_type >= 0) {
+            auto *vertex_shader = rasterizer_get_vertex_shader_for_permutation(static_cast<std::uint16_t>(vertex_shader_permutation), vertex_type);
+            auto *vertex_declaration = rasterizer_get_vertex_declaration(vertex_type);
+            if(vertex_shader && vertex_declaration) {
+                IDirect3DDevice9_SetVertexShader(*global_d3d9_device, vertex_shader);
+                IDirect3DDevice9_SetVertexDeclaration(*global_d3d9_device, vertex_declaration);
+            }
+        }
+
         // Fix fog blending when the sky bit is set and the framebuffer blend function is alpha blend.
         chicago_fog_fix(group);
     }

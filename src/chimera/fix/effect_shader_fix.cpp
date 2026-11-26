@@ -15,6 +15,7 @@
 #include "../math_trig/math_trig.hpp"
 #include "../rasterizer/rasterizer.hpp"
 #include "../rasterizer/rasterizer_vertex_shaders.hpp"
+#include "map_hacks/map_hacks.hpp"
 
 
 namespace Chimera {
@@ -40,7 +41,7 @@ namespace Chimera {
         ShaderEffect *shader = reinterpret_cast<ShaderEffect *>(group->shader);
         effect_shader_permutation_index = SHADER_EFFECT_EFFECT_MULTITEXTURE_NONLINEAR_TINT;
 
-        if(shader->effect.secondary_map.tag_id == TagID::null_id() || shader->effect.secondary_map_anchor == SHADER_EFFECT_PARTICLE_ANCHOR_ZSPRITE || d3d9_device_caps->PixelShaderVersion < 0xffff0200) {
+        if(shader->effect.secondary_map.tag_id == TagID::null_id() || shader->effect.secondary_map_anchor == SHADER_EFFECT_PARTICLE_ANCHOR_ZSPRITE || d3d9_device_caps->PixelShaderVersion < 0xffff0200 || global_fix_flags.ignore_particles_secondary_map) {
             effect_shader_permutation_index += 12;
         }
         else {

@@ -351,7 +351,8 @@
             "gearbox_multitexture_blend_modes": true,
             "gearbox_shader_environment_types": true,
             "alternate_bump_attenuation": true,
-            "hud_number_scale": true
+            "hud_number_scale": true,
+            "ignore_particles_secondary_map": true
         },
         {
             "map_name": "ambushed_again",

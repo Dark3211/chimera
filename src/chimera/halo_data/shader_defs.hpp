@@ -757,8 +757,8 @@ namespace Chimera {
         TagReference lens_flare;
 
         TagBlock extra_layers;
-        TagBlock maps_4_stage;
-        TagBlock maps_2_stage;
+        TagBlock maps;
+        TagBlock maps_ff;
         std::uint32_t extra_flags;
         PAD(0x8);
     };

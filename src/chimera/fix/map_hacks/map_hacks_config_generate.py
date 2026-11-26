@@ -84,7 +84,11 @@ if __name__ == '__main__':
         else:
             fix_config.write("false, ")
         if "block_multitexture_overlays" in config_dict:
-            fix_config.write(str(config_dict["block_multitexture_overlays"]).lower() + "},")
+            fix_config.write(str(config_dict["block_multitexture_overlays"]).lower() + ", ")
+        else:
+            fix_config.write("false, ")
+        if "ignore_particles_secondary_map" in config_dict:
+            fix_config.write(str(config_dict["ignore_particles_secondary_map"]).lower() + "},")
         else:
             fix_config.write("false },")
 

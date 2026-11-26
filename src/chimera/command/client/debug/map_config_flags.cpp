@@ -72,8 +72,7 @@ namespace Chimera {
                     auto tag_data = reinterpret_cast<Bitmap *>(tag.data);
 
                     // Clear HUD scale flags.
-                    SET_FLAG(tag_data->flags, BITMAP_FLAGS_HALF_HUD_SCALE_BIT, false);
-                    SET_FLAG(tag_data->flags, BITMAP_FLAGS_FORCE_HUD_USE_HIGHRES_SCALE_BIT, false);
+                    tag_data->flags &= ~BITMAP_SCALE_FLAGS_MASK;
                 }
             }
         }
@@ -91,6 +90,12 @@ namespace Chimera {
     bool map_config_block_multitexture_overlays(int, const char **) {
         global_fix_flags.block_multitexture_overlays = global_fix_flags.block_multitexture_overlays ? false : true;
         console_output(BOOL_TO_STR(global_fix_flags.block_multitexture_overlays));
+        return true;
+    }
+
+    bool map_config_ignore_particles_secondary_map(int, const char **) {
+        global_fix_flags.ignore_particles_secondary_map = !global_fix_flags.ignore_particles_secondary_map;
+        console_output(BOOL_TO_STR(global_fix_flags.ignore_particles_secondary_map));
         return true;
     }
 }

@@ -22,6 +22,7 @@ namespace Chimera {
         bool old_widescreen_fix; // Uses the old chimera widescreen fix method. For older maps that position central elements from corner anchors.
         bool gearbox_shader_environment_types; // shader_environment tags of type normal use base map alpha when interpolating between primary and secondary detail maps.
         bool block_multitexture_overlays; // Just get rid of them
+        bool ignore_particles_secondary_map; // Do not use the secondary map in shader_effect.
     };
 
     struct MapFixConfig {

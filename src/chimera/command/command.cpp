@@ -177,6 +177,7 @@ namespace Chimera {
         ADD_COMMAND("chimera_block_damage", "chimera_category_debug", "core", block_damage_command, false, 0, 1);
         ADD_COMMAND("chimera_show_coordinates", "chimera_category_debug", "client", show_coordinates_command, true, 0, 1);
         ADD_COMMAND("chimera_show_fps", "chimera_category_debug", "client", show_fps_command, true, 0, 1);
+        ADD_COMMAND("chimera_show_timer", "chimera_category_debug", "client", show_timer_command, true, 0, 1);
         ADD_COMMAND("chimera_tps", "chimera_category_debug", "core", tps_command, false, 0, 1);
         ADD_COMMAND("chimera_teleport", "chimera_category_debug", "core", teleport_command, false, 1, 4);
         ADD_COMMAND("chimera_script_command_dump", "chimera_category_debug", "core", script_command_dump_command, false, 0, 0);
@@ -192,6 +193,7 @@ namespace Chimera {
         ADD_COMMAND("chimera_debug_invert_detail_after_reflection", "chimera_category_debug", "client_custom_edition", map_config_detail_after_reflection, false, 0, 0);
         ADD_COMMAND("chimera_debug_old_widescreen_fix", "chimera_category_debug", "client_custom_edition", map_config_old_widescreen_fix, false, 0, 0);
         ADD_COMMAND("chimera_debug_block_multitexture_overlays", "chimera_category_debug", "client_custom_edition", map_config_block_multitexture_overlays, false, 0, 0);
+        ADD_COMMAND("chimera_debug_ignore_particles_secondary_map", "chimera_category_debug", "client_custom_edition", map_config_ignore_particles_secondary_map, false, 0, 0);
 
         // Enhancements
         this->p_commands.emplace_back("chimera_block_all_bullshit", localize("chimera_category_enhancement"), "client", localize("chimera_block_all_bullshit_help"), Chimera::block_all_bullshit_command, false, 0, 0);

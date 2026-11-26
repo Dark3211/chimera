@@ -21,6 +21,7 @@ namespace Chimera {
         IDirect3DDevice9_SetPixelShader(*global_d3d9_device, chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_DIFFUSE]);
         IDirect3DDevice9_SetTextureStageState(*global_d3d9_device, 0, D3DTSS_COLOROP, D3DTOP_DISABLE);
         IDirect3DDevice9_SetTextureStageState(*global_d3d9_device, 0, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
+        IDirect3DDevice9_SetFVF(*global_d3d9_device, 0);
     }
 
     void environment_model_shadow_use_psh() noexcept {
@@ -88,6 +89,22 @@ namespace Chimera {
         IDirect3DDevice9_SetFVF(*global_d3d9_device, 0);
     }
 
+    void detail_object_draw_use_psh() noexcept {
+        if(!global_d3d9_device || !*global_d3d9_device ||
+           !d3d9_device_caps || d3d9_device_caps->PixelShaderVersion < 0xffff0200) {
+            return;
+        }
+
+        auto *shader = chimera_pixel_shaders[CHIMERA_PIXEL_SHADER_MODULATE];
+        if(!shader) {
+            return;
+        }
+
+        IDirect3DDevice9_SetPixelShader(*global_d3d9_device, shader);
+        IDirect3DDevice9_SetTextureStageState(*global_d3d9_device, 0, D3DTSS_COLOROP, D3DTOP_DISABLE);
+        IDirect3DDevice9_SetTextureStageState(*global_d3d9_device, 0, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
+    }
+
     void set_up_fixed_function_fix() noexcept {
         // Nuke FF shadow memes
         static Hook border_hook, model_shadow_hook;
@@ -109,5 +126,9 @@ namespace Chimera {
         auto *sprite = get_chimera().get_signature("widget_sprite_begin_sig").data();
         write_jmp_call(occlusion, occlusion_hook, nullptr, reinterpret_cast<std::byte *>(widget_occlusion_test_use_psh));
         write_jmp_call(sprite, sprite_hook, nullptr, reinterpret_cast<std::byte *>(widget_sprite_use_vsh));
+
+        static Hook detail_obj_hook;
+        auto *detail_obj = get_chimera().get_signature("detail_object_begin_sig").data();
+        write_jmp_call(detail_obj, detail_obj_hook, nullptr, reinterpret_cast<std::byte *>(detail_object_draw_use_psh));
     }
 }
