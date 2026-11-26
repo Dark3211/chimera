@@ -203,42 +203,6 @@ namespace Chimera {
             return true;
         }
 
-        static void install_device_reset_hook(IDirect3DDevice9 *device) noexcept {
-            if(!device) {
-                return;
-            }
-
-            auto **vtable = *reinterpret_cast<void ***>(device);
-            if(!vtable) {
-                startup_trace_log("IDirect3DDevice9 vtable is null; Reset hook not installed");
-                return;
-            }
-
-            const void *original = nullptr;
-            if(!patch_vtable_entry(
-                vtable,
-                16, // IDirect3DDevice9::Reset
-                reinterpret_cast<const void *>(+[](IDirect3DDevice9 *, D3DPRESENT_PARAMETERS *) -> HRESULT {
-                    return D3DERR_INVALIDCALL;
-                }),
-                &original
-            )) {
-                startup_trace_log("Could not validate IDirect3DDevice9::Reset vtable slot");
-                return;
-            }
-
-            // Replace the temporary sentinel with the real traced entry point.
-            // The original pointer captured above is retained for the trampoline call.
-            if(!original_device_reset) {
-                static_assert(sizeof(original_device_reset) == sizeof(original));
-                std::memcpy(&original_device_reset, &original, sizeof(original_device_reset));
-            }
-            startup_trace_log("IDirect3DDevice9::Reset hook installed: device=%p vtable=%p original=%p",
-                              static_cast<void *>(device),
-                              static_cast<void *>(vtable),
-                              const_cast<void *>(original));
-        }
-
         static HRESULT WINAPI traced_device_reset(
             IDirect3DDevice9 *device,
             D3DPRESENT_PARAMETERS *params
