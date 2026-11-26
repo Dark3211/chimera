@@ -262,12 +262,18 @@ namespace Chimera {
         if(get_chimera().get_ini()->get_value_bool("video_mode.borderless").value_or(false)) {
             // Get our window
             window = GetActiveWindow();
+            startup_trace_log("Borderless handler: active window=%p foreground=%p",
+                              static_cast<void *>(window),
+                              static_cast<void *>(GetForegroundWindow()));
             if(!window) {
+                startup_trace_log("Borderless handler: no active window; removing the preframe event");
                 goto cleanup;
             }
+            log_window("Borderless handler before change", window);
 
             // If the window isn't the foreground window, wait until it is before doing the thing.
             if(window != GetForegroundWindow()) {
+                startup_trace_log("Borderless handler: window is not foreground; delaying to a later frame");
                 return;
             }
 
@@ -275,17 +281,47 @@ namespace Chimera {
             monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
             monitor_info.cbSize = sizeof(monitor_info);
             if(!GetMonitorInfo(monitor, &monitor_info)) {
+                startup_trace_log("Borderless handler: GetMonitorInfo failed, Win32=%lu",
+                                  static_cast<unsigned long>(GetLastError()));
                 goto cleanup;
             }
+            startup_trace_log("Borderless monitor rectangle=(%ld,%ld)-(%ld,%ld)",
+                              static_cast<long>(monitor_info.rcMonitor.left),
+                              static_cast<long>(monitor_info.rcMonitor.top),
+                              static_cast<long>(monitor_info.rcMonitor.right),
+                              static_cast<long>(monitor_info.rcMonitor.bottom));
 
             // Work our magic!
-            ShowWindow(window, SW_HIDE);
-            SetWindowLong(window, GWL_STYLE, 0);
-            SetWindowPos(window, NULL, 0, 0, monitor_info.rcMonitor.right, monitor_info.rcMonitor.bottom, 0);
+            const BOOL hide_result = ShowWindow(window, SW_HIDE);
+            startup_trace_log("Borderless handler: ShowWindow(SW_HIDE) previous-visible=%u",
+                              static_cast<unsigned int>(hide_result));
+            SetLastError(ERROR_SUCCESS);
+            const LONG old_style = SetWindowLong(window, GWL_STYLE, 0);
+            startup_trace_log("Borderless handler: SetWindowLong old-style=0x%08lx Win32=%lu",
+                              static_cast<unsigned long>(old_style),
+                              static_cast<unsigned long>(GetLastError()));
+            SetLastError(ERROR_SUCCESS);
+            const BOOL position_result = SetWindowPos(
+                window,
+                NULL,
+                0,
+                0,
+                monitor_info.rcMonitor.right,
+                monitor_info.rcMonitor.bottom,
+                0
+            );
+            startup_trace_log("Borderless handler: SetWindowPos result=%u Win32=%lu",
+                              static_cast<unsigned int>(position_result),
+                              static_cast<unsigned long>(GetLastError()));
+            log_window("Borderless handler after change", window);
+        }
+        else {
+            startup_trace_log("Borderless handler invoked but video_mode.borderless is false");
         }
 
         cleanup:
         remove_preframe_event(set_borderless_window);
+        startup_trace_log("Halo borderless preframe handler END");
     }
 
     extern "C" void now_set_borderless_windowed_mode() noexcept {
