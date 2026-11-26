@@ -86,20 +86,10 @@ namespace Chimera {
         return true;
     }
 
-    static bool chicago_validate_layers(const TagBlock &block) noexcept {
-        if(block.count == 0) return true;
-        if(block.count > 64 || !block.address) return false;
-        for(std::uint32_t i = 0; i < block.count; i++) {
-            auto *data = get_tag_block_data(const_cast<TagBlock *>(&block), i, sizeof(TagReference));
-            if(!data || !is_readable_memory_range(data, sizeof(TagReference))) return false;
-            auto *layer = reinterpret_cast<TagReference *>(data);
-            auto *tag = get_tag(layer->tag_id);
-            if(!tag || !is_readable_memory_range(tag, sizeof(Tag)) || !tag->data ||
-               !is_readable_memory_range(tag->data, sizeof(_shader))) return false;
-            const auto type = reinterpret_cast<_shader *>(tag->data)->type;
-            if(type < SHADER_TYPE_SCREEN || type >= NUMBER_OF_SHADER_TYPES) return false;
-        }
-        return true;
+    static bool chicago_validate_layer_block(const TagBlock &block) noexcept {
+        // The renderer uses a 16-bit layer index. Bound it and validate the base
+        // pointer once; individual references are checked immediately before use.
+        return block.count <= 64 && (block.count == 0 || block.address != nullptr);
     }
 
     static std::uint16_t chicago_numeric_bitmap_index(std::uint16_t current_index,
@@ -357,7 +347,7 @@ namespace Chimera {
         if(shader_data->chicago.type < SHADER_TRANSPARENT_CHICAGO_TYPE_2D_MAP ||
            shader_data->chicago.type >= NUMBER_OF_SHADER_TRANSPARENT_CHICAGO_TYPES ||
            !chicago_validate_map_block(shader_data->chicago.maps) ||
-           !chicago_validate_layers(shader_data->chicago.extra_layers)) return true;
+           !chicago_validate_layer_block(shader_data->chicago.extra_layers)) return true;
         const auto shader_slot = shader_data->chicago.type == SHADER_TRANSPARENT_CHICAGO_TYPE_2D_MAP
             ? CHIMERA_PIXEL_SHADER_TRANSPARENT_CHICAGO : CHIMERA_PIXEL_SHADER_TRANSPARENT_CHICAGO_CUBE;
         if(!chimera_pixel_shaders[shader_slot]) return false;
@@ -383,7 +373,10 @@ namespace Chimera {
             group_layer.sorted_index = -1;
             auto *layer = chicago_get_layer(shader_data, layer_index);
             auto *layer_tag = layer ? get_tag(layer->tag_id) : nullptr;
-            if(!layer_tag || !layer_tag->data) continue;
+            if(!layer_tag || !is_readable_memory_range(layer_tag, sizeof(Tag)) ||
+               !layer_tag->data || !is_readable_memory_range(layer_tag->data, sizeof(_shader))) continue;
+            const auto layer_type = reinterpret_cast<_shader *>(layer_tag->data)->type;
+            if(layer_type < SHADER_TYPE_SCREEN || layer_type >= NUMBER_OF_SHADER_TYPES) continue;
             group_layer.shader = layer_tag->data;
 
             rasterizer_transparent_geometry_group_draw(&group_layer, is_dirty);
@@ -579,7 +572,7 @@ namespace Chimera {
         if(shader_data->chicago_extended.type < SHADER_TRANSPARENT_CHICAGO_TYPE_2D_MAP ||
            shader_data->chicago_extended.type >= NUMBER_OF_SHADER_TRANSPARENT_CHICAGO_TYPES ||
            !chicago_validate_map_block(shader_data->chicago_extended.maps) ||
-           !chicago_validate_layers(shader_data->chicago_extended.extra_layers)) return true;
+           !chicago_validate_layer_block(shader_data->chicago_extended.extra_layers)) return true;
         const auto shader_slot = shader_data->chicago_extended.type == SHADER_TRANSPARENT_CHICAGO_TYPE_2D_MAP
             ? CHIMERA_PIXEL_SHADER_TRANSPARENT_CHICAGO : CHIMERA_PIXEL_SHADER_TRANSPARENT_CHICAGO_CUBE;
         if(!chimera_pixel_shaders[shader_slot]) return false;
@@ -605,7 +598,10 @@ namespace Chimera {
             group_layer.sorted_index = -1;
             auto *layer = chicago_get_extended_layer(shader_data, layer_index);
             auto *layer_tag = layer ? get_tag(layer->tag_id) : nullptr;
-            if(!layer_tag || !layer_tag->data) continue;
+            if(!layer_tag || !is_readable_memory_range(layer_tag, sizeof(Tag)) ||
+               !layer_tag->data || !is_readable_memory_range(layer_tag->data, sizeof(_shader))) continue;
+            const auto layer_type = reinterpret_cast<_shader *>(layer_tag->data)->type;
+            if(layer_type < SHADER_TYPE_SCREEN || layer_type >= NUMBER_OF_SHADER_TYPES) continue;
             group_layer.shader = layer_tag->data;
 
             rasterizer_transparent_geometry_group_draw(&group_layer, is_dirty);
