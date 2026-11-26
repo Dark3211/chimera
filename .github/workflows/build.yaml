@@ -34,7 +34,7 @@ jobs:
             p7zip
             mingw-w64-i686-gcc
             mingw-w64-i686-cmake
-            mingw-w64-i686-make
+            make
             mingw-w64-i686-python
 
       - name: "Verify toolchain"
@@ -52,7 +52,7 @@ jobs:
         shell: msys2 {0}
         run: |-
           cmake -S . -B build \
-            -G "MinGW Makefiles" \
+            -G "MSYS Makefiles" \
             -DCMAKE_BUILD_TYPE=Release
 
           cmake --build build --parallel
