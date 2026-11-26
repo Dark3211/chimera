@@ -916,6 +916,87 @@ namespace Chimera {
         log_present_parameters("Halo Reset call-site parameters", params);
         log_current_display_mode("Immediately before Halo Reset");
 
+        if(device) {
+            D3DDEVICE_CREATION_PARAMETERS creation {};
+            const HRESULT creation_result = device->GetCreationParameters(&creation);
+            startup_trace_log(
+                "D3D9 device creation parameters: HRESULT=0x%08lx adapter=%u device_type=%u focus_window=%p behavior=0x%08lx",
+                static_cast<unsigned long>(creation_result),
+                creation.AdapterOrdinal,
+                static_cast<unsigned int>(creation.DeviceType),
+                static_cast<void *>(creation.hFocusWindow),
+                static_cast<unsigned long>(creation.BehaviorFlags)
+            );
+
+            IDirect3D9 *d3d = nullptr;
+            const HRESULT get_d3d_result = device->GetDirect3D(&d3d);
+            startup_trace_log(
+                "IDirect3DDevice9::GetDirect3D HRESULT=0x%08lx interface=%p",
+                static_cast<unsigned long>(get_d3d_result),
+                static_cast<void *>(d3d)
+            );
+            if(SUCCEEDED(get_d3d_result) && d3d) {
+                D3DDISPLAYMODE current_adapter_mode {};
+                const HRESULT adapter_mode_result = d3d->GetAdapterDisplayMode(
+                    creation.AdapterOrdinal,
+                    &current_adapter_mode
+                );
+                startup_trace_log(
+                    "D3D9 adapter current mode: HRESULT=0x%08lx %ux%u %uHz format=%u",
+                    static_cast<unsigned long>(adapter_mode_result),
+                    current_adapter_mode.Width,
+                    current_adapter_mode.Height,
+                    current_adapter_mode.RefreshRate,
+                    static_cast<unsigned int>(current_adapter_mode.Format)
+                );
+
+                if(params) {
+                    const D3DFORMAT requested_format = params->BackBufferFormat != D3DFMT_UNKNOWN
+                        ? params->BackBufferFormat
+                        : current_adapter_mode.Format;
+                    const UINT mode_count = d3d->GetAdapterModeCount(
+                        creation.AdapterOrdinal,
+                        requested_format
+                    );
+                    unsigned int matching_modes = 0;
+                    for(UINT mode_index = 0; mode_index < mode_count; mode_index++) {
+                        D3DDISPLAYMODE mode {};
+                        if(FAILED(d3d->EnumAdapterModes(
+                            creation.AdapterOrdinal,
+                            requested_format,
+                            mode_index,
+                            &mode
+                        ))) {
+                            continue;
+                        }
+                        if(mode.Width == params->BackBufferWidth &&
+                           mode.Height == params->BackBufferHeight) {
+                            startup_trace_log(
+                                "D3D9 adapter matching mode #%u: %ux%u %uHz format=%u%s",
+                                mode_index,
+                                mode.Width,
+                                mode.Height,
+                                mode.RefreshRate,
+                                static_cast<unsigned int>(mode.Format),
+                                mode.RefreshRate == params->FullScreen_RefreshRateInHz
+                                    ? " [REQUESTED REFRESH SUPPORTED]"
+                                    : ""
+                            );
+                            matching_modes++;
+                        }
+                    }
+                    startup_trace_log(
+                        "D3D9 adapter reports %u mode(s) for requested resolution %lux%lu and format %u",
+                        matching_modes,
+                        static_cast<unsigned long>(params->BackBufferWidth),
+                        static_cast<unsigned long>(params->BackBufferHeight),
+                        static_cast<unsigned int>(requested_format)
+                    );
+                }
+                d3d->Release();
+            }
+        }
+
         if(params && !params->Windowed && params->FullScreen_RefreshRateInHz > 0) {
             unsigned int matching_modes = 0;
             for(DWORD mode_index = 0; mode_index < 512; mode_index++) {
