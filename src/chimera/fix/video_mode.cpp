@@ -269,7 +269,7 @@ namespace Chimera {
                 startup_trace_log("Borderless handler: no active window; removing the preframe event");
                 goto cleanup;
             }
-            log_window("Borderless handler before change", window);
+            startup_trace_log_window("Borderless handler before change", static_cast<void *>(window));
 
             // If the window isn't the foreground window, wait until it is before doing the thing.
             if(window != GetForegroundWindow()) {
@@ -313,7 +313,7 @@ namespace Chimera {
             startup_trace_log("Borderless handler: SetWindowPos result=%u Win32=%lu",
                               static_cast<unsigned int>(position_result),
                               static_cast<unsigned long>(GetLastError()));
-            log_window("Borderless handler after change", window);
+            startup_trace_log_window("Borderless handler after change", static_cast<void *>(window));
         }
         else {
             startup_trace_log("Borderless handler invoked but video_mode.borderless is false");
