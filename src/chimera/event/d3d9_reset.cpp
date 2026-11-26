@@ -6,6 +6,7 @@
 #include "../signature/signature.hpp"
 #include "../rasterizer/graphics_runtime_metrics.hpp"
 #include "../output/output.hpp"
+#include "../startup_trace.hpp"
 
 namespace Chimera {
     static std::vector<Event<ResetEventFunction>> reset_events;
@@ -42,6 +43,22 @@ namespace Chimera {
     }
 
     extern "C" void do_d3d9_reset_event(LPDIRECT3DDEVICE9 device, D3DPRESENT_PARAMETERS *present) {
+        startup_trace_log("Halo Reset call-site hook reached: device=%p queued_events=%zu",
+                          static_cast<void *>(device),
+                          reset_events.size());
+        if(present) {
+            startup_trace_log(
+                "Halo Reset call-site parameters: Windowed=%u BackBuffer=%lux%lu Format=%u Swap=%u Flags=0x%08lx Refresh=%lu Interval=0x%08lx",
+                static_cast<unsigned int>(present->Windowed),
+                static_cast<unsigned long>(present->BackBufferWidth),
+                static_cast<unsigned long>(present->BackBufferHeight),
+                static_cast<unsigned int>(present->BackBufferFormat),
+                static_cast<unsigned int>(present->SwapEffect),
+                static_cast<unsigned long>(present->Flags),
+                static_cast<unsigned long>(present->FullScreen_RefreshRateInHz),
+                static_cast<unsigned long>(present->PresentationInterval)
+            );
+        }
         GraphicsRuntimeMetrics::reset_begin();
         call_in_order(reset_events, device, present);
     }
