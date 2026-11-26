@@ -24,6 +24,7 @@
 #include "../event/frame.hpp"
 #include "../event/game_loop.hpp"
 #include "../event/interface_render.hpp"
+#include "../startup_trace.hpp"
 
 namespace Chimera {
 
@@ -914,16 +915,22 @@ namespace Chimera {
 
     static void set_up_runtime_graphics_on_preframe() noexcept {
         if(set_up_runtime_graphics_if_device_ready()) {
+            startup_trace_log(
+                "Deferred rasterizer setup completed on preframe; D3D9 device=%p",
+                static_cast<void *>(global_d3d9_device ? *global_d3d9_device : nullptr)
+            );
             remove_preframe_event(set_up_runtime_graphics_on_preframe);
         }
     }
 
     void set_up_rasterizer() noexcept {
+        startup_trace_log("Rasterizer setup BEGIN");
         auto *device_pointer_signature = get_chimera().get_signature("model_af_set_sampler_states_sig").data();
         auto *caps_pointer_signature = get_chimera().get_signature("d3d9_device_caps_sig").data();
         if(!is_executable_memory_range(device_pointer_signature, 1 + sizeof(std::byte *)) ||
            !is_executable_memory_range(caps_pointer_signature, 1 + sizeof(std::byte *))) {
             console_error("Chimera rasterizer disabled: required D3D9 signatures were not validated.");
+            startup_trace_log("Rasterizer setup ABORT: required D3D9 signatures were not executable");
             return;
         }
         std::byte *device_pointer_storage = nullptr;
@@ -933,10 +940,17 @@ namespace Chimera {
         if(!is_readable_memory_range(device_pointer_storage, sizeof(IDirect3DDevice9 *)) ||
            !is_readable_memory_range(caps_pointer_storage, sizeof(D3DCAPS9))) {
             console_error("Chimera rasterizer disabled: D3D9 signature targets were invalid.");
+            startup_trace_log("Rasterizer setup ABORT: D3D9 signature target pointers were unreadable");
             return;
         }
         global_d3d9_device = reinterpret_cast<IDirect3DDevice9 **>(device_pointer_storage);
         d3d9_device_caps = reinterpret_cast<D3DCAPS9 *>(caps_pointer_storage);
+        startup_trace_log(
+            "Rasterizer D3D9 globals resolved: device-slot=%p device-now=%p caps=%p",
+            static_cast<void *>(global_d3d9_device),
+            static_cast<void *>(global_d3d9_device ? *global_d3d9_device : nullptr),
+            static_cast<void *>(d3d9_device_caps)
+        );
         const auto *debug_ini = get_chimera().get_ini();
         const bool debug_diagnostics = debug_ini &&
             debug_ini->get_value_bool("debug.diagnostics").value_or(false);
@@ -958,10 +972,18 @@ namespace Chimera {
         // constructor is still running. Prefer the real device immediately when available;
         // otherwise defer only the graphics capability-dependent setup to preframe.
         if(!set_up_runtime_graphics_if_device_ready()) {
+            startup_trace_log(
+                "Rasterizer runtime graphics setup deferred: current D3D9 device=%p",
+                static_cast<void *>(global_d3d9_device ? *global_d3d9_device : nullptr)
+            );
             add_preframe_event(set_up_runtime_graphics_on_preframe, EVENT_PRIORITY_BEFORE);
+        }
+        else {
+            startup_trace_log("Rasterizer runtime graphics setup completed during constructor");
         }
 
         chimera_rasterizer_enabled = true;
+        startup_trace_log("Rasterizer setup END; enabled=%u", static_cast<unsigned int>(chimera_rasterizer_enabled));
     }
 
 }
