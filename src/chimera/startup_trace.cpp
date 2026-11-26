@@ -691,6 +691,57 @@ namespace Chimera {
         }
     }
 
+    void startup_trace_on_reset_call(
+        IDirect3DDevice9 *device,
+        D3DPRESENT_PARAMETERS *params
+    ) noexcept {
+        if(!trace_enabled) {
+            return;
+        }
+
+        startup_trace_log(
+            "Halo Reset call-site: device=%p params=%p",
+            static_cast<void *>(device),
+            static_cast<void *>(params)
+        );
+        log_present_parameters("Halo Reset call-site parameters", params);
+        log_current_display_mode("Immediately before Halo Reset");
+
+        if(params && !params->Windowed && params->FullScreen_RefreshRateInHz > 0) {
+            unsigned int matching_modes = 0;
+            for(DWORD mode_index = 0; mode_index < 512; mode_index++) {
+                DEVMODEA mode {};
+                mode.dmSize = sizeof(mode);
+                if(!EnumDisplaySettingsA(nullptr, mode_index, &mode)) {
+                    break;
+                }
+                if(mode.dmPelsWidth == params->BackBufferWidth &&
+                   mode.dmPelsHeight == params->BackBufferHeight) {
+                    startup_trace_log(
+                        "Desktop mode candidate #%lu: %lux%lu %luHz %lu-bpp",
+                        static_cast<unsigned long>(mode_index),
+                        static_cast<unsigned long>(mode.dmPelsWidth),
+                        static_cast<unsigned long>(mode.dmPelsHeight),
+                        static_cast<unsigned long>(mode.dmDisplayFrequency),
+                        static_cast<unsigned long>(mode.dmBitsPerPel)
+                    );
+                    matching_modes++;
+                }
+            }
+            startup_trace_log(
+                "Display modes matching requested fullscreen resolution %lux%lu: %u",
+                static_cast<unsigned long>(params->BackBufferWidth),
+                static_cast<unsigned long>(params->BackBufferHeight),
+                matching_modes
+            );
+        }
+
+        // Halo's call-site hook runs immediately before the original IDirect3DDevice9::Reset.
+        // Install the COM hooks here so this very first Reset and all subsequent Present calls
+        // are captured, even though d3d9.dll was dynamically loaded after Chimera initialized.
+        install_device_reset_hook_real(device);
+    }
+
     void startup_trace_log_window(const char *label, void *window) noexcept {
         if(!trace_enabled) {
             return;
