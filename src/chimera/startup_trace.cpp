@@ -242,6 +242,88 @@ namespace Chimera {
             );
         }
 
+        static const char *cooperative_level_name(HRESULT result) noexcept {
+            switch(result) {
+                case D3D_OK: return "D3D_OK";
+                case D3DERR_DEVICELOST: return "D3DERR_DEVICELOST";
+                case D3DERR_DEVICENOTRESET: return "D3DERR_DEVICENOTRESET";
+                case D3DERR_INVALIDCALL: return "D3DERR_INVALIDCALL";
+                default: return "OTHER";
+            }
+        }
+
+        static void log_vtable_entry_details(const char *label, const void *entry) noexcept {
+            if(!entry) {
+                startup_trace_log("%s: entry=null", label);
+                return;
+            }
+
+            MEMORY_BASIC_INFORMATION memory {};
+            if(VirtualQuery(entry, &memory, sizeof(memory))) {
+                startup_trace_log(
+                    "%s: entry=%p allocation_base=%p region_base=%p region_size=%llu state=0x%08lx protect=0x%08lx type=0x%08lx",
+                    label,
+                    entry,
+                    memory.AllocationBase,
+                    memory.BaseAddress,
+                    static_cast<unsigned long long>(memory.RegionSize),
+                    static_cast<unsigned long>(memory.State),
+                    static_cast<unsigned long>(memory.Protect),
+                    static_cast<unsigned long>(memory.Type)
+                );
+            }
+            else {
+                startup_trace_log("%s: entry=%p VirtualQuery failed Win32=%lu",
+                                  label,
+                                  entry,
+                                  static_cast<unsigned long>(GetLastError()));
+            }
+            log_calling_module(label, entry);
+        }
+
+        static void log_device_vtable(const char *label, IDirect3DDevice9 *device) noexcept {
+            static void **last_vtable = nullptr;
+            static void *last_reset_entry = nullptr;
+            static void *last_present_entry = nullptr;
+
+            if(!device) {
+                startup_trace_log("%s: device=null", label);
+                return;
+            }
+
+            auto **vtable = *reinterpret_cast<void ***>(device);
+            if(!vtable) {
+                startup_trace_log("%s: device=%p vtable=null", label, static_cast<void *>(device));
+                return;
+            }
+
+            const bool vtable_changed = vtable != last_vtable;
+            const bool reset_changed = vtable_changed || vtable[16] != last_reset_entry;
+            const bool present_changed = vtable_changed || vtable[17] != last_present_entry;
+            if(!reset_changed && !present_changed) {
+                return;
+            }
+
+            startup_trace_log(
+                "%s: device=%p vtable=%p Reset[16]=%p Present[17]=%p",
+                label,
+                static_cast<void *>(device),
+                static_cast<void *>(vtable),
+                vtable[16],
+                vtable[17]
+            );
+            if(reset_changed) {
+                log_vtable_entry_details("D3D9 vtable Reset[16] target", vtable[16]);
+            }
+            if(present_changed) {
+                log_vtable_entry_details("D3D9 vtable Present[17] target", vtable[17]);
+            }
+
+            last_vtable = vtable;
+            last_reset_entry = vtable[16];
+            last_present_entry = vtable[17];
+        }
+
         static HRESULT WINAPI traced_device_reset(
             IDirect3DDevice9 *device,
             D3DPRESENT_PARAMETERS *params
@@ -255,6 +337,8 @@ namespace Chimera {
                 static_cast<unsigned long>(GetCurrentThreadId())
             );
             log_calling_module("D3D9 Reset caller", __builtin_return_address(0));
+            log_device_vtable("D3D9 Reset vtable at entry", device);
+            startup_trace_log_device_cooperative_level("D3D9 Reset immediately before native call", device);
             log_present_parameters("Reset input", params);
             log_current_display_mode("Before Reset");
 
@@ -264,8 +348,11 @@ namespace Chimera {
             }
 
             const HRESULT result = original_device_reset(device, params);
-            startup_trace_log("D3D9 Reset #%ld END HRESULT=0x%08lx", static_cast<long>(number),
+            startup_trace_log("D3D9 Reset #%ld END HRESULT=0x%08lx",
+                              static_cast<long>(number),
                               static_cast<unsigned long>(result));
+            startup_trace_log_device_cooperative_level("D3D9 Reset immediately after native call", device);
+            log_device_vtable("D3D9 Reset vtable after native call", device);
             log_present_parameters("Reset output", params);
             log_current_display_mode("After Reset");
             return result;
@@ -325,30 +412,50 @@ namespace Chimera {
                 return;
             }
 
-            if(vtable[16] == reinterpret_cast<void *>(traced_device_reset)) {
+            const bool reset_needs_hook = vtable[16] != reinterpret_cast<void *>(traced_device_reset);
+            const bool present_needs_hook = vtable[17] != reinterpret_cast<void *>(traced_device_present);
+            if(!reset_needs_hook && !present_needs_hook) {
                 return;
             }
 
-            const void *original = nullptr;
-            if(!patch_vtable_entry(
-                vtable,
-                16, // IDirect3DDevice9::Reset
-                reinterpret_cast<const void *>(traced_device_reset),
-                &original
-            )) {
-                return;
+            startup_trace_log(
+                "D3D9 vtable hook verification: device=%p vtable=%p Reset[16]=%p Present[17]=%p reset_rehook=%u present_rehook=%u",
+                static_cast<void *>(device),
+                static_cast<void *>(vtable),
+                vtable[16],
+                vtable[17],
+                static_cast<unsigned int>(reset_needs_hook),
+                static_cast<unsigned int>(present_needs_hook)
+            );
+
+            if(reset_needs_hook) {
+                log_vtable_entry_details("Reset[16] target before Chimera trace hook", vtable[16]);
+                const void *original = nullptr;
+                if(!patch_vtable_entry(
+                    vtable,
+                    16, // IDirect3DDevice9::Reset
+                    reinterpret_cast<const void *>(traced_device_reset),
+                    &original
+                )) {
+                    startup_trace_log("IDirect3DDevice9::Reset hook could not be installed");
+                }
+                else {
+                    if(!original_device_reset) {
+                        static_assert(sizeof(original_device_reset) == sizeof(original));
+                        std::memcpy(&original_device_reset, &original, sizeof(original_device_reset));
+                    }
+                    startup_trace_log(
+                        "IDirect3DDevice9::Reset hook installed: device=%p vtable=%p observed_original=%p stored_original=%p",
+                        static_cast<void *>(device),
+                        static_cast<void *>(vtable),
+                        const_cast<void *>(original),
+                        reinterpret_cast<void *>(original_device_reset)
+                    );
+                }
             }
 
-            if(!original_device_reset) {
-                static_assert(sizeof(original_device_reset) == sizeof(original));
-                std::memcpy(&original_device_reset, &original, sizeof(original_device_reset));
-            }
-            startup_trace_log("IDirect3DDevice9::Reset hook installed: device=%p vtable=%p original=%p",
-                              static_cast<void *>(device),
-                              static_cast<void *>(vtable),
-                              const_cast<void *>(original));
-
-            if(vtable[17] != reinterpret_cast<void *>(traced_device_present)) {
+            if(present_needs_hook) {
+                log_vtable_entry_details("Present[17] target before Chimera trace hook", vtable[17]);
                 const void *present_original = nullptr;
                 if(patch_vtable_entry(
                     vtable,
@@ -360,14 +467,19 @@ namespace Chimera {
                         static_assert(sizeof(original_device_present) == sizeof(present_original));
                         std::memcpy(&original_device_present, &present_original, sizeof(original_device_present));
                     }
-                    startup_trace_log("IDirect3DDevice9::Present hook installed: device=%p original=%p",
-                                      static_cast<void *>(device),
-                                      const_cast<void *>(present_original));
+                    startup_trace_log(
+                        "IDirect3DDevice9::Present hook installed: device=%p observed_original=%p stored_original=%p",
+                        static_cast<void *>(device),
+                        const_cast<void *>(present_original),
+                        reinterpret_cast<void *>(original_device_present)
+                    );
                 }
                 else {
                     startup_trace_log("IDirect3DDevice9::Present hook could not be installed");
                 }
             }
+
+            log_device_vtable("D3D9 vtable after hook verification", device);
         }
 
         static HRESULT WINAPI traced_create_device(
@@ -949,7 +1061,9 @@ namespace Chimera {
         log_present_parameters("Halo Reset call-site parameters", params);
         log_current_display_mode("Immediately before Halo Reset");
 
-        if(device) {
+        const HRESULT cooperative_result =
+            startup_trace_log_device_cooperative_level("Halo Reset call-site device state", device);
+        if(device && cooperative_result == D3D_OK) {
             D3DDEVICE_CREATION_PARAMETERS creation {};
             const HRESULT creation_result = device->GetCreationParameters(&creation);
             startup_trace_log(
@@ -1029,6 +1143,13 @@ namespace Chimera {
                 d3d->Release();
             }
         }
+        else if(device) {
+            startup_trace_log(
+                "Skipping GetCreationParameters/GetDirect3D: device cooperative level is %s (0x%08lx)",
+                cooperative_level_name(cooperative_result),
+                static_cast<unsigned long>(cooperative_result)
+            );
+        }
 
         if(params && !params->Windowed && params->FullScreen_RefreshRateInHz > 0) {
             unsigned int matching_modes = 0;
@@ -1063,6 +1184,29 @@ namespace Chimera {
         // Install the COM hooks here so this very first Reset and all subsequent Present calls
         // are captured, even though d3d9.dll was dynamically loaded after Chimera initialized.
         install_device_reset_hook_real(device);
+    }
+
+    HRESULT startup_trace_log_device_cooperative_level(
+        const char *label,
+        IDirect3DDevice9 *device
+    ) noexcept {
+        if(!trace_enabled) {
+            return S_FALSE;
+        }
+        if(!device) {
+            startup_trace_log("%s: TestCooperativeLevel skipped because device=null",
+                              label ? label : "D3D9 device");
+            return E_POINTER;
+        }
+
+        const HRESULT result = device->TestCooperativeLevel();
+        startup_trace_log(
+            "%s: TestCooperativeLevel=%s HRESULT=0x%08lx",
+            label ? label : "D3D9 device",
+            cooperative_level_name(result),
+            static_cast<unsigned long>(result)
+        );
+        return result;
     }
 
     void startup_trace_log_window(const char *label, void *window) noexcept {

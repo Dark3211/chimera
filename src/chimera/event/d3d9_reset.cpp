@@ -9,7 +9,13 @@
 #include "../startup_trace.hpp"
 
 namespace Chimera {
-    static std::vector<Event<ResetEventFunction>> reset_events;
+    struct D3D9ResetEvent {
+        ResetEventFunction function;
+        EventPriority priority;
+        const char *debug_name;
+    };
+
+    static std::vector<D3D9ResetEvent> reset_events;
     static bool reset_hook_installed = false;
 
     static void enable_d3d9_reset_hook();
@@ -18,15 +24,19 @@ namespace Chimera {
         void on_d3d9_reset_asm();
     }
 
-    void add_d3d9_reset_event(const ResetEventFunction function, EventPriority priority) {
+    void add_d3d9_reset_event(
+        const ResetEventFunction function,
+        EventPriority priority,
+        const char *debug_name
+    ) {
         // Remove if exists
         remove_d3d9_reset_event(function);
 
         // Enable hook if necessary
         enable_d3d9_reset_hook();
 
-        // Add the event
-        reset_events.emplace_back(Event<ResetEventFunction> { function, priority });
+        // Add the event and its stable diagnostic name.
+        reset_events.emplace_back(D3D9ResetEvent { function, priority, debug_name });
     }
 
     void remove_d3d9_reset_event(const ResetEventFunction function) {
@@ -43,12 +53,50 @@ namespace Chimera {
     }
 
     extern "C" void do_d3d9_reset_event(LPDIRECT3DDEVICE9 device, D3DPRESENT_PARAMETERS *present) {
+        // Keep the same snapshot semantics as call_in_order(): callbacks may add or
+        // remove registrations, but those changes apply to the next Reset operation.
+        const auto events = reset_events;
         startup_trace_log("Halo Reset call-site hook reached: device=%p queued_events=%zu",
                           static_cast<void *>(device),
-                          reset_events.size());
+                          events.size());
         startup_trace_on_reset_call(device, present);
         GraphicsRuntimeMetrics::reset_begin();
-        call_in_order(reset_events, device, present);
+
+        std::size_t callback_index = 0;
+        const auto run_priority = [&](EventPriority priority) {
+            for(const auto &event : events) {
+                if(event.priority != priority || !event.function) {
+                    continue;
+                }
+
+                const auto index = ++callback_index;
+                const char *name = event.debug_name ? event.debug_name : "(unnamed reset callback)";
+                startup_trace_log(
+                    "D3D9 Reset callback #%zu BEGIN name=%s function=%p priority=%u",
+                    index,
+                    name,
+                    reinterpret_cast<void *>(event.function),
+                    static_cast<unsigned int>(event.priority)
+                );
+                startup_trace_log_device_cooperative_level("Before D3D9 Reset callback", device);
+                event.function(device, present);
+                startup_trace_log_device_cooperative_level("After D3D9 Reset callback", device);
+                startup_trace_log(
+                    "D3D9 Reset callback #%zu END name=%s function=%p",
+                    index,
+                    name,
+                    reinterpret_cast<void *>(event.function)
+                );
+            }
+        };
+
+        run_priority(EVENT_PRIORITY_BEFORE);
+        run_priority(EVENT_PRIORITY_DEFAULT);
+        run_priority(EVENT_PRIORITY_AFTER);
+        run_priority(EVENT_PRIORITY_FINAL);
+        startup_trace_log("D3D9 Reset callbacks completed: invoked=%zu registered=%zu",
+                          callback_index,
+                          events.size());
     }
 
     static void enable_d3d9_reset_hook() {

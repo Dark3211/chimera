@@ -14,6 +14,7 @@ namespace Chimera {
     /** Write a timestamped startup diagnostic line when tracing is enabled. */
     void startup_trace_log(const char *format, ...) noexcept;
     void startup_trace_log_window(const char *label, void *window) noexcept;
+    HRESULT startup_trace_log_device_cooperative_level(const char *label, IDirect3DDevice9 *device) noexcept;
 
     /** Called immediately before Halo's native Reset call; captures its first result and future Present calls. */
     void startup_trace_on_reset_call(IDirect3DDevice9 *device, D3DPRESENT_PARAMETERS *params) noexcept;

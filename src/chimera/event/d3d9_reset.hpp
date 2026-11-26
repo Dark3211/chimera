@@ -20,7 +20,11 @@ namespace Chimera {
      * @param function This is the function to add
      * @param priority This is the priority used to determine call order.
      */
-    void add_d3d9_reset_event(const ResetEventFunction function, EventPriority priority = EventPriority::EVENT_PRIORITY_DEFAULT);
+    void add_d3d9_reset_event(
+        const ResetEventFunction function,
+        EventPriority priority = EventPriority::EVENT_PRIORITY_DEFAULT,
+        const char *debug_name = nullptr
+    );
 
     /**
      * Remove an Reset event if the function is being used as an event.

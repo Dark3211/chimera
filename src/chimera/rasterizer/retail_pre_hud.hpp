@@ -304,7 +304,7 @@ namespace Chimera {
             graphics.settings.smaa_exclude_hud = true;
             if(use_smaa) {
                 graphics.settings.fxaa = true;
-                add_d3d9_reset_event(SMAA::on_reset, EVENT_PRIORITY_BEFORE);
+                add_d3d9_reset_event(SMAA::on_reset, EVENT_PRIORITY_BEFORE, "SMAA::on_reset");
                 add_game_exit_event(SMAA::release_resources, EVENT_PRIORITY_BEFORE);
             }
         }

@@ -334,11 +334,11 @@ namespace Chimera {
             return false;
         }
 
-        add_d3d9_reset_event(EnhancedGraphics::on_reset, EVENT_PRIORITY_BEFORE);
+        add_d3d9_reset_event(EnhancedGraphics::on_reset, EVENT_PRIORITY_BEFORE, "EnhancedGraphics::on_reset");
         add_game_exit_event(EnhancedGraphics::release_resources, EVENT_PRIORITY_BEFORE);
 
         if(smaa) {
-            add_d3d9_reset_event(SMAA::on_reset, EVENT_PRIORITY_BEFORE);
+            add_d3d9_reset_event(SMAA::on_reset, EVENT_PRIORITY_BEFORE, "SMAA::on_reset");
             add_game_exit_event(SMAA::release_resources, EVENT_PRIORITY_BEFORE);
         }
 
@@ -368,7 +368,7 @@ namespace Chimera {
 
         graphics.settings.smaa_exclude_hud = false;
         add_d3d9_end_scene_after_event(EnhancedGraphics::on_end_scene_after, EVENT_PRIORITY_AFTER);
-        add_d3d9_reset_event(EnhancedGraphics::on_reset, EVENT_PRIORITY_BEFORE);
+        add_d3d9_reset_event(EnhancedGraphics::on_reset, EVENT_PRIORITY_BEFORE, "EnhancedGraphics::on_reset");
         add_game_exit_event(EnhancedGraphics::release_resources, EVENT_PRIORITY_BEFORE);
 
         console_error(

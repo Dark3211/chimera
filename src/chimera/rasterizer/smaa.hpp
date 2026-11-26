@@ -2043,7 +2043,7 @@ namespace Chimera {
                 return;
             }
 
-            add_d3d9_reset_event(on_reset, EVENT_PRIORITY_BEFORE);
+            add_d3d9_reset_event(on_reset, EVENT_PRIORITY_BEFORE, "SMAA::on_reset");
             add_game_exit_event(release_resources, EVENT_PRIORITY_BEFORE);
         }
     }

@@ -774,7 +774,7 @@ namespace Chimera {
                 add_d3d9_end_scene_after_event(on_end_scene_after, EVENT_PRIORITY_AFTER);
             }
 
-            add_d3d9_reset_event(on_reset, EVENT_PRIORITY_BEFORE);
+            add_d3d9_reset_event(on_reset, EVENT_PRIORITY_BEFORE, "EnhancedGraphics::on_reset");
             add_game_exit_event(release_resources, EVENT_PRIORITY_BEFORE);
         }
     }
