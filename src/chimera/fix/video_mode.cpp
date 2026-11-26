@@ -8,6 +8,7 @@
 #include "../signature/signature.hpp"
 #include "../signature/hook.hpp"
 #include "../event/frame.hpp"
+#include "../startup_trace.hpp"
 
 #include <windows.h>
 #include <d3d9.h>
@@ -253,6 +254,7 @@ namespace Chimera {
     }
 
     static void set_borderless_window() noexcept {
+        startup_trace_log("Halo borderless preframe handler BEGIN");
         HWND window;
         HMONITOR monitor;
         MONITORINFO monitor_info;
@@ -291,9 +293,28 @@ namespace Chimera {
     }
 
     extern "C" void override_d3d_present_parameters(D3DPRESENT_PARAMETERS *params) noexcept {
+        static unsigned long parameter_call_count = 0;
+        const auto call_number = ++parameter_call_count;
         if(!params) {
+            startup_trace_log("Halo presentation-parameter hook #%lu received null parameters",
+                              call_number);
             return;
         }
+
+        startup_trace_log(
+            "Halo presentation-parameter hook #%lu BEFORE: Windowed=%u BackBuffer=%lux%lu Format=%u Count=%lu Swap=%u Flags=0x%08lx hDeviceWindow=%p Refresh=%lu Interval=0x%08lx",
+            call_number,
+            static_cast<unsigned int>(params->Windowed),
+            static_cast<unsigned long>(params->BackBufferWidth),
+            static_cast<unsigned long>(params->BackBufferHeight),
+            static_cast<unsigned int>(params->BackBufferFormat),
+            static_cast<unsigned long>(params->BackBufferCount),
+            static_cast<unsigned int>(params->SwapEffect),
+            static_cast<unsigned long>(params->Flags),
+            static_cast<void *>(params->hDeviceWindow),
+            static_cast<unsigned long>(params->FullScreen_RefreshRateInHz),
+            static_cast<unsigned long>(params->PresentationInterval)
+        );
 
         auto *ini = get_chimera().get_ini();
         if(ini->get_value_bool("video_mode.enabled").value_or(false)) {
@@ -311,6 +332,22 @@ namespace Chimera {
         // separate from Chimera's post-process shader: selecting msaa2/msaa4/msaa8 never
         // enables the old FXAA path.
         apply_graphics_msaa(params);
+        startup_trace_log(
+            "Halo presentation-parameter hook #%lu AFTER: Windowed=%u BackBuffer=%lux%lu Format=%u Count=%lu Swap=%u MultiSample=%u Quality=%lu Flags=0x%08lx hDeviceWindow=%p Refresh=%lu Interval=0x%08lx",
+            call_number,
+            static_cast<unsigned int>(params->Windowed),
+            static_cast<unsigned long>(params->BackBufferWidth),
+            static_cast<unsigned long>(params->BackBufferHeight),
+            static_cast<unsigned int>(params->BackBufferFormat),
+            static_cast<unsigned long>(params->BackBufferCount),
+            static_cast<unsigned int>(params->SwapEffect),
+            static_cast<unsigned int>(params->MultiSampleType),
+            static_cast<unsigned long>(params->MultiSampleQuality),
+            static_cast<unsigned long>(params->Flags),
+            static_cast<void *>(params->hDeviceWindow),
+            static_cast<unsigned long>(params->FullScreen_RefreshRateInHz),
+            static_cast<unsigned long>(params->PresentationInterval)
+        );
     }
 
     void set_up_video_mode() noexcept {
@@ -318,6 +355,15 @@ namespace Chimera {
         bool pc = chimera.feature_present("client_resolution_pc");
         bool demo = chimera.feature_present("client_resolution_demo");
         auto *ini = chimera.get_ini();
+        const bool video_mode_enabled = ini && ini->get_value_bool("video_mode.enabled").value_or(false);
+
+        startup_trace_log(
+            "set_up_video_mode: pc_resolution=%u demo_resolution=%u video_mode.enabled=%u graphics_msaa=%u",
+            static_cast<unsigned int>(pc),
+            static_cast<unsigned int>(demo),
+            static_cast<unsigned int>(video_mode_enabled),
+            requested_graphics_msaa_samples()
+        );
 
         // The presentation-parameter signatures are shared by all supported client
         // executables, including Custom Edition. Install these hooks for MSAA even when
@@ -327,6 +373,7 @@ namespace Chimera {
         }
 
         if(!pc && !demo) {
+            startup_trace_log("set_up_video_mode: no PC/demo resolution signatures; returning before legacy resolution setup");
             return;
         }
 
@@ -342,7 +389,8 @@ namespace Chimera {
         std::uint32_t default_height = 600;
         std::uint32_t default_refresh_rate = 60;
 
-        if(!ini->get_value_bool("video_mode.enabled").value_or(false)) {
+        if(!video_mode_enabled) {
+            startup_trace_log("set_up_video_mode: video_mode.enabled is false; retaining Halo's default resolution");
             return;
         }
 
@@ -371,6 +419,15 @@ namespace Chimera {
             default_refresh_rate = parsed_refresh_rate;
         }
         vsync = ini->get_value_bool("video_mode.vsync").value_or(vsync);
+        startup_trace_log(
+            "set_up_video_mode: configured default resolution=%ux%u refresh=%u vsync=%u windowed=%u borderless=%u",
+            default_width,
+            default_height,
+            default_refresh_rate,
+            static_cast<unsigned int>(vsync),
+            static_cast<unsigned int>(ini->get_value_bool("video_mode.windowed").value_or(false)),
+            static_cast<unsigned int>(ini->get_value_bool("video_mode.borderless").value_or(false))
+        );
 
         // Don't fallback the resolution to 800x600
         auto fallback_resolution_sig = chimera.get_signature("fallback_resolution_sig").data();
