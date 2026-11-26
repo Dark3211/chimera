@@ -529,6 +529,10 @@ namespace Chimera {
                strict_pre_hud_mode(graphics.settings) || !device) {
                 return;
             }
+            if(device_unavailable(device)) {
+                release_resources();
+                return;
+            }
 
             struct ProcessingGuard {
                 bool &processing;
@@ -659,6 +663,10 @@ namespace Chimera {
             }
 
             auto *device = *global_d3d9_device;
+            if(device_unavailable(device)) {
+                release_resources();
+                return;
+            }
 
             struct ProcessingGuard {
                 bool &processing;
