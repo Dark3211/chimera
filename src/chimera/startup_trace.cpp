@@ -16,6 +16,7 @@
 namespace Chimera {
     namespace {
         using Direct3DCreate9Function = IDirect3D9 *(WINAPI *)(UINT);
+        using GetProcAddressFunction = FARPROC (WINAPI *)(HMODULE, LPCSTR);
         using CreateDeviceFunction = HRESULT (WINAPI *)(
             IDirect3D9 *,
             UINT,
@@ -53,11 +54,13 @@ namespace Chimera {
         static Hook change_display_settings_ex_w_hook;
 
         static Direct3DCreate9Function original_direct3d_create9 = nullptr;
+        static GetProcAddressFunction original_get_proc_address = nullptr;
         static ChangeDisplaySettingsAFunction original_change_display_settings_a = nullptr;
         static ChangeDisplaySettingsWFunction original_change_display_settings_w = nullptr;
         static ChangeDisplaySettingsExAFunction original_change_display_settings_ex_a = nullptr;
         static ChangeDisplaySettingsExWFunction original_change_display_settings_ex_w = nullptr;
 
+        static IDirect3D9 *WINAPI traced_direct3d_create9(UINT sdk_version);
         static CreateDeviceFunction original_create_device = nullptr;
         static DeviceResetFunction original_device_reset = nullptr;
         static DevicePresentFunction original_device_present = nullptr;
@@ -567,6 +570,164 @@ namespace Chimera {
             return false;
         }
 
+        static bool install_main_executable_import_hook(
+            const char *import_module_name,
+            const char *import_function_name,
+            const void *replacement,
+            const void **original
+        ) noexcept {
+            if(!import_module_name || !import_function_name || !replacement || !original) {
+                return false;
+            }
+
+            auto *module_base = reinterpret_cast<std::byte *>(GetModuleHandleA(nullptr));
+            if(!module_base) {
+                startup_trace_log("IAT hook: main executable module handle is null");
+                return false;
+            }
+
+            auto *dos_header = reinterpret_cast<IMAGE_DOS_HEADER *>(module_base);
+            if(dos_header->e_magic != IMAGE_DOS_SIGNATURE || dos_header->e_lfanew <= 0) {
+                startup_trace_log("IAT hook: invalid DOS header");
+                return false;
+            }
+
+            auto *nt_headers = reinterpret_cast<IMAGE_NT_HEADERS *>(module_base + dos_header->e_lfanew);
+            if(nt_headers->Signature != IMAGE_NT_SIGNATURE) {
+                startup_trace_log("IAT hook: invalid NT header");
+                return false;
+            }
+
+            const auto &directory =
+                nt_headers->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+            if(directory.VirtualAddress == 0 || directory.Size == 0) {
+                startup_trace_log("IAT hook: executable has no import directory");
+                return false;
+            }
+
+            auto *descriptor = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR *>(module_base + directory.VirtualAddress);
+            for(; descriptor->Name != 0; descriptor++) {
+                const char *module_name = reinterpret_cast<const char *>(module_base + descriptor->Name);
+                if(lstrcmpiA(module_name, import_module_name) != 0) {
+                    continue;
+                }
+
+                if(descriptor->OriginalFirstThunk == 0) {
+                    startup_trace_log(
+                        "IAT hook unavailable: %s import table has no OriginalFirstThunk; cannot safely resolve names",
+                        import_module_name
+                    );
+                    return false;
+                }
+
+                auto *lookup = reinterpret_cast<IMAGE_THUNK_DATA *>(
+                    module_base + descriptor->OriginalFirstThunk
+                );
+                auto *iat = reinterpret_cast<IMAGE_THUNK_DATA *>(module_base + descriptor->FirstThunk);
+                bool installed = false;
+
+                for(; lookup->u1.AddressOfData != 0 && iat->u1.Function != 0; lookup++, iat++) {
+                    if(IMAGE_SNAP_BY_ORDINAL(lookup->u1.Ordinal)) {
+                        continue;
+                    }
+
+                    auto *name = reinterpret_cast<IMAGE_IMPORT_BY_NAME *>(
+                        module_base + lookup->u1.AddressOfData
+                    );
+                    const char *symbol_name = reinterpret_cast<const char *>(name->Name);
+                    if(std::strcmp(symbol_name, import_function_name) != 0) {
+                        continue;
+                    }
+
+                    DWORD old_protection = 0;
+                    if(!VirtualProtect(&iat->u1.Function, sizeof(iat->u1.Function), PAGE_READWRITE, &old_protection)) {
+                        startup_trace_log(
+                            "IAT hook failed for %s!%s: VirtualProtect Win32=%lu",
+                            import_module_name,
+                            import_function_name,
+                            static_cast<unsigned long>(GetLastError())
+                        );
+                        continue;
+                    }
+
+                    const auto current = reinterpret_cast<const void *>(
+                        static_cast<std::uintptr_t>(iat->u1.Function)
+                    );
+                    if(current != replacement) {
+                        *original = current;
+                        iat->u1.Function = static_cast<ULONG_PTR>(
+                            reinterpret_cast<std::uintptr_t>(replacement)
+                        );
+                    }
+                    else if(!*original) {
+                        *original = current;
+                    }
+
+                    DWORD ignored = 0;
+                    VirtualProtect(&iat->u1.Function, sizeof(iat->u1.Function), old_protection, &ignored);
+                    FlushInstructionCache(GetCurrentProcess(), &iat->u1.Function, sizeof(iat->u1.Function));
+                    startup_trace_log(
+                        "IAT hook installed: %s!%s slot=%p original=%p",
+                        import_module_name,
+                        import_function_name,
+                        static_cast<void *>(&iat->u1.Function),
+                        const_cast<void *>(*original)
+                    );
+                    installed = true;
+                }
+
+                if(!installed) {
+                    startup_trace_log(
+                        "IAT hook unavailable: executable imports %s but not %s",
+                        import_module_name,
+                        import_function_name
+                    );
+                }
+                return installed;
+            }
+
+            startup_trace_log("IAT hook unavailable: executable does not import module %s", import_module_name);
+            return false;
+        }
+
+        static FARPROC WINAPI traced_get_proc_address(HMODULE module, LPCSTR function_name) {
+            if(!original_get_proc_address) {
+                startup_trace_log("GetProcAddress trace ABORT: original function pointer is null");
+                return nullptr;
+            }
+
+            FARPROC address = original_get_proc_address(module, function_name);
+            if(!address || !module || !function_name ||
+               reinterpret_cast<std::uintptr_t>(function_name) <= 0xFFFFU ||
+               std::strcmp(function_name, "Direct3DCreate9") != 0) {
+                return address;
+            }
+
+            char module_path[MAX_PATH] {};
+            const DWORD path_length = GetModuleFileNameA(
+                module,
+                module_path,
+                static_cast<DWORD>(sizeof(module_path))
+            );
+            if(path_length == 0 || path_length >= sizeof(module_path)) {
+                return address;
+            }
+
+            const char *basename = std::strrchr(module_path, '\\');
+            basename = basename ? basename + 1 : module_path;
+            if(lstrcmpiA(basename, "d3d9.dll") != 0) {
+                return address;
+            }
+
+            static_assert(sizeof(original_direct3d_create9) == sizeof(address));
+            std::memcpy(&original_direct3d_create9, &address, sizeof(original_direct3d_create9));
+            startup_trace_log(
+                "GetProcAddress captured d3d9.dll!Direct3DCreate9 at %p; returning traced wrapper",
+                reinterpret_cast<void *>(address)
+            );
+            return reinterpret_cast<FARPROC>(traced_direct3d_create9);
+        }
+
         static LONG WINAPI traced_change_display_settings_a(DEVMODEA *mode, DWORD flags) {
             startup_trace_log("ChangeDisplaySettingsA BEGIN flags=0x%08lx", static_cast<unsigned long>(flags));
             log_display_mode_a("ChangeDisplaySettingsA", mode);
@@ -652,6 +813,18 @@ namespace Chimera {
                 static_assert(sizeof(original_change_display_settings_a) == sizeof(original));
                 std::memcpy(&original_change_display_settings_a, &original, sizeof(original_change_display_settings_a));
             }
+            else {
+                original = nullptr;
+                if(install_main_executable_import_hook(
+                    "USER32.dll",
+                    "ChangeDisplaySettingsA",
+                    reinterpret_cast<const void *>(traced_change_display_settings_a),
+                    &original
+                )) {
+                    static_assert(sizeof(original_change_display_settings_a) == sizeof(original));
+                    std::memcpy(&original_change_display_settings_a, &original, sizeof(original_change_display_settings_a));
+                }
+            }
 
             original = nullptr;
             if(install_export_hook(
@@ -663,6 +836,18 @@ namespace Chimera {
             )) {
                 static_assert(sizeof(original_change_display_settings_w) == sizeof(original));
                 std::memcpy(&original_change_display_settings_w, &original, sizeof(original_change_display_settings_w));
+            }
+            else {
+                original = nullptr;
+                if(install_main_executable_import_hook(
+                    "USER32.dll",
+                    "ChangeDisplaySettingsW",
+                    reinterpret_cast<const void *>(traced_change_display_settings_w),
+                    &original
+                )) {
+                    static_assert(sizeof(original_change_display_settings_w) == sizeof(original));
+                    std::memcpy(&original_change_display_settings_w, &original, sizeof(original_change_display_settings_w));
+                }
             }
 
             original = nullptr;
@@ -676,6 +861,18 @@ namespace Chimera {
                 static_assert(sizeof(original_change_display_settings_ex_a) == sizeof(original));
                 std::memcpy(&original_change_display_settings_ex_a, &original, sizeof(original_change_display_settings_ex_a));
             }
+            else {
+                original = nullptr;
+                if(install_main_executable_import_hook(
+                    "USER32.dll",
+                    "ChangeDisplaySettingsExA",
+                    reinterpret_cast<const void *>(traced_change_display_settings_ex_a),
+                    &original
+                )) {
+                    static_assert(sizeof(original_change_display_settings_ex_a) == sizeof(original));
+                    std::memcpy(&original_change_display_settings_ex_a, &original, sizeof(original_change_display_settings_ex_a));
+                }
+            }
 
             original = nullptr;
             if(install_export_hook(
@@ -687,6 +884,18 @@ namespace Chimera {
             )) {
                 static_assert(sizeof(original_change_display_settings_ex_w) == sizeof(original));
                 std::memcpy(&original_change_display_settings_ex_w, &original, sizeof(original_change_display_settings_ex_w));
+            }
+            else {
+                original = nullptr;
+                if(install_main_executable_import_hook(
+                    "USER32.dll",
+                    "ChangeDisplaySettingsExW",
+                    reinterpret_cast<const void *>(traced_change_display_settings_ex_w),
+                    &original
+                )) {
+                    static_assert(sizeof(original_change_display_settings_ex_w) == sizeof(original));
+                    std::memcpy(&original_change_display_settings_ex_w, &original, sizeof(original_change_display_settings_ex_w));
+                }
             }
         }
     }
@@ -872,6 +1081,18 @@ namespace Chimera {
         log_current_display_mode("Process attach / Chimera initialization");
 
         startup_trace_log("installing Direct3D9 and display-mode API hooks");
+
+        const void *get_proc_original = nullptr;
+        if(install_main_executable_import_hook(
+            "KERNEL32.dll",
+            "GetProcAddress",
+            reinterpret_cast<const void *>(traced_get_proc_address),
+            &get_proc_original
+        )) {
+            static_assert(sizeof(original_get_proc_address) == sizeof(get_proc_original));
+            std::memcpy(&original_get_proc_address, &get_proc_original, sizeof(original_get_proc_address));
+        }
+
         HMODULE d3d9_module = GetModuleHandleA("d3d9.dll");
         if(!d3d9_module) {
             startup_trace_log("d3d9.dll is not loaded yet; Direct3DCreate9 cannot be hooked at this stage");
