@@ -414,6 +414,85 @@ namespace Chimera {
             return true;
         }
 
+        static bool install_main_executable_iat_hook(
+            const void *target,
+            const void *replacement,
+            const void **original
+        ) noexcept {
+            if(!target || !replacement || !original) {
+                return false;
+            }
+
+            auto *module_base = reinterpret_cast<std::byte *>(GetModuleHandleA(nullptr));
+            if(!module_base) {
+                startup_trace_log("D3D9 IAT fallback: main executable module handle is null");
+                return false;
+            }
+
+            auto *dos_header = reinterpret_cast<IMAGE_DOS_HEADER *>(module_base);
+            if(dos_header->e_magic != IMAGE_DOS_SIGNATURE || dos_header->e_lfanew <= 0) {
+                startup_trace_log("D3D9 IAT fallback: invalid DOS header");
+                return false;
+            }
+
+            auto *nt_headers = reinterpret_cast<IMAGE_NT_HEADERS *>(module_base + dos_header->e_lfanew);
+            if(nt_headers->Signature != IMAGE_NT_SIGNATURE) {
+                startup_trace_log("D3D9 IAT fallback: invalid NT header");
+                return false;
+            }
+
+            const auto &import_directory =
+                nt_headers->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+            if(import_directory.VirtualAddress == 0 || import_directory.Size == 0) {
+                startup_trace_log("D3D9 IAT fallback: executable has no import directory");
+                return false;
+            }
+
+            auto *descriptor = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR *>(
+                module_base + import_directory.VirtualAddress
+            );
+            for(; descriptor->Name != 0; descriptor++) {
+                const char *imported_module = reinterpret_cast<const char *>(module_base + descriptor->Name);
+                if(std::strcmp(imported_module, "d3d9.dll") != 0) {
+                    continue;
+                }
+
+                auto *iat = reinterpret_cast<IMAGE_THUNK_DATA *>(module_base + descriptor->FirstThunk);
+                for(; iat->u1.Function != 0; iat++) {
+                    auto *current_function = reinterpret_cast<void *>(
+                        static_cast<std::uintptr_t>(iat->u1.Function)
+                    );
+                    if(current_function != target) {
+                        continue;
+                    }
+
+                    DWORD old_protection = 0;
+                    if(!VirtualProtect(&iat->u1.Function, sizeof(iat->u1.Function), PAGE_READWRITE, &old_protection)) {
+                        startup_trace_log("D3D9 IAT fallback: VirtualProtect failed, Win32=%lu",
+                                          static_cast<unsigned long>(GetLastError()));
+                        return false;
+                    }
+
+                    *original = current_function;
+                    iat->u1.Function = static_cast<ULONG_PTR>(reinterpret_cast<std::uintptr_t>(replacement));
+
+                    DWORD ignored = 0;
+                    VirtualProtect(&iat->u1.Function, sizeof(iat->u1.Function), old_protection, &ignored);
+                    FlushInstructionCache(GetCurrentProcess(), &iat->u1.Function, sizeof(iat->u1.Function));
+                    startup_trace_log("D3D9 IAT fallback installed: executable import %s!Direct3DCreate9 slot=%p original=%p",
+                                      imported_module,
+                                      static_cast<void *>(&iat->u1.Function),
+                                      current_function);
+                    return true;
+                }
+
+                startup_trace_log("D3D9 IAT fallback: d3d9.dll was imported but Direct3DCreate9 was not found in its IAT");
+            }
+
+            startup_trace_log("D3D9 IAT fallback: executable does not import d3d9.dll");
+            return false;
+        }
+
         static LONG WINAPI traced_change_display_settings_a(DEVMODEA *mode, DWORD flags) {
             startup_trace_log("ChangeDisplaySettingsA BEGIN flags=0x%08lx", static_cast<unsigned long>(flags));
             log_display_mode_a("ChangeDisplaySettingsA", mode);
@@ -684,6 +763,19 @@ namespace Chimera {
                 )) {
                     static_assert(sizeof(original_direct3d_create9) == sizeof(original));
                     std::memcpy(&original_direct3d_create9, &original, sizeof(original_direct3d_create9));
+                }
+                else {
+                    // The function prologue detour may be rejected by a wrapper or
+                    // an unexpected system build. Fall back to the game's IAT.
+                    original = nullptr;
+                    if(install_main_executable_iat_hook(
+                        reinterpret_cast<const void *>(direct3d_create9_address),
+                        reinterpret_cast<const void *>(traced_direct3d_create9),
+                        &original
+                    )) {
+                        static_assert(sizeof(original_direct3d_create9) == sizeof(original));
+                        std::memcpy(&original_direct3d_create9, &original, sizeof(original_direct3d_create9));
+                    }
                 }
             }
         }
