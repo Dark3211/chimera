@@ -11,6 +11,7 @@ namespace Chimera {
 
     /** Write a timestamped startup diagnostic line when tracing is enabled. */
     void startup_trace_log(const char *format, ...) noexcept;
+    void startup_trace_log_window(const char *label, void *window) noexcept;
 }
 
 #endif
