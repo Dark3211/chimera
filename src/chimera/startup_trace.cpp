@@ -34,6 +34,7 @@ namespace Chimera {
         static bool trace_enabled = false;
         static bool trace_initialized = false;
         static HANDLE trace_file = INVALID_HANDLE_VALUE;
+        static char trace_file_path[MAX_PATH] {};
         static LONG trace_lock = 0;
         static LARGE_INTEGER trace_start {};
         static LARGE_INTEGER trace_frequency {};
@@ -699,15 +700,17 @@ namespace Chimera {
             nullptr
         );
 
-        if(trace_file == INVALID_HANDLE_VALUE) {
+        if(trace_file != INVALID_HANDLE_VALUE) {
+            std::snprintf(trace_file_path, sizeof(trace_file_path), "%s", "chimera_startup_trace.log");
+        }
+        else {
             char temp_path[MAX_PATH] {};
-            char log_path[MAX_PATH] {};
             const DWORD temp_length = GetTempPathA(static_cast<DWORD>(sizeof(temp_path)), temp_path);
             if(temp_length > 0 && temp_length < sizeof(temp_path)) {
-                std::snprintf(log_path, sizeof(log_path), "%schimera_startup_trace_%lu.log",
+                std::snprintf(trace_file_path, sizeof(trace_file_path), "%schimera_startup_trace_%lu.log",
                               temp_path, static_cast<unsigned long>(GetCurrentProcessId()));
                 trace_file = CreateFileA(
-                    log_path,
+                    trace_file_path,
                     GENERIC_WRITE,
                     FILE_SHARE_READ | FILE_SHARE_WRITE,
                     nullptr,
@@ -730,7 +733,10 @@ namespace Chimera {
         GetCurrentDirectoryA(static_cast<DWORD>(sizeof(current_directory)), current_directory);
 
         startup_trace_log("========== CHIMERA STARTUP TRACE BEGIN ==========");
-        startup_trace_log("log file opened; cwd=\"%s\" exe=\"%s\"", current_directory, executable_path);
+        startup_trace_log("log file opened: path=\"%s\" cwd=\"%s\" exe=\"%s\"",
+                          trace_file_path,
+                          current_directory,
+                          executable_path);
         startup_trace_log("command line: %s", GetCommandLineA());
         startup_trace_log("system metrics: primary=%dx%d virtual=%dx%d origin=(%d,%d)",
                           GetSystemMetrics(SM_CXSCREEN),
