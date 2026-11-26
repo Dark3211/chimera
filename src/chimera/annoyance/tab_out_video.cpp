@@ -3,12 +3,25 @@
 #include "../chimera.hpp"
 #include "../signature/hook.hpp"
 #include "../signature/signature.hpp"
+#include "../rasterizer/rasterizer.hpp"
 
 // decorated with prefix tab_out_video_ to avoid name clashes later
 extern "C" {
     std::uint8_t *tab_out_video_disable_video_ptr = nullptr;
     const void* tab_out_video_device_subroutine_original = nullptr;
     void tab_out_video_reacquire_device_subroutine_asm() noexcept; // dont call this directly
+    std::uint32_t tab_out_video_device_requires_reset() noexcept;
+}
+
+extern "C" std::uint32_t tab_out_video_device_requires_reset() noexcept {
+    auto **device_storage = Chimera::global_d3d9_device;
+    if(!device_storage || !*device_storage) {
+        return 0;
+    }
+
+    // Do not let the background-playback optimization suppress Halo's normal
+    // recovery once a lost D3D9 device has become resettable.
+    return (*device_storage)->TestCooperativeLevel() == D3DERR_DEVICENOTRESET ? 1U : 0U;
 }
 
 namespace Chimera {
