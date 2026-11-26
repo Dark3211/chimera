@@ -26,6 +26,13 @@ namespace Chimera {
             IDirect3DDevice9 **
         );
         using DeviceResetFunction = HRESULT (WINAPI *)(IDirect3DDevice9 *, D3DPRESENT_PARAMETERS *);
+        using DevicePresentFunction = HRESULT (WINAPI *)(
+            IDirect3DDevice9 *,
+            const RECT *,
+            const RECT *,
+            HWND,
+            const RGNDATA *
+        );
         using ChangeDisplaySettingsAFunction = LONG (WINAPI *)(DEVMODEA *, DWORD);
         using ChangeDisplaySettingsWFunction = LONG (WINAPI *)(DEVMODEW *, DWORD);
         using ChangeDisplaySettingsExAFunction = LONG (WINAPI *)(LPCSTR, DEVMODEA *, HWND, DWORD, LPVOID);
@@ -53,6 +60,7 @@ namespace Chimera {
 
         static CreateDeviceFunction original_create_device = nullptr;
         static DeviceResetFunction original_device_reset = nullptr;
+        static DevicePresentFunction original_device_present = nullptr;
 
         static void log_current_display_mode(const char *label) noexcept {
             DEVMODEA mode {};
@@ -227,6 +235,42 @@ namespace Chimera {
             return result;
         }
 
+        static HRESULT WINAPI traced_device_present(
+            IDirect3DDevice9 *device,
+            const RECT *source_rect,
+            const RECT *destination_rect,
+            HWND destination_window,
+            const RGNDATA *dirty_region
+        ) {
+            if(!original_device_present) {
+                startup_trace_log("D3D9 Present ABORT: original function pointer is null");
+                return D3DERR_INVALIDCALL;
+            }
+
+            const HRESULT result = original_device_present(
+                device,
+                source_rect,
+                destination_rect,
+                destination_window,
+                dirty_region
+            );
+
+            static LONG present_count = 0;
+            static ULONGLONG last_summary_tick = 0;
+            const LONG number = InterlockedIncrement(&present_count);
+            const ULONGLONG now = GetTickCount64();
+            if(number <= 8 || FAILED(result) || now - last_summary_tick >= 1000) {
+                startup_trace_log(
+                    "D3D9 Present #%ld HRESULT=0x%08lx destination-window=%p",
+                    static_cast<long>(number),
+                    static_cast<unsigned long>(result),
+                    static_cast<void *>(destination_window)
+                );
+                last_summary_tick = now;
+            }
+            return result;
+        }
+
         static void install_device_reset_hook_real(IDirect3DDevice9 *device) noexcept {
             if(!device) {
                 return;
@@ -259,6 +303,27 @@ namespace Chimera {
                               static_cast<void *>(device),
                               static_cast<void *>(vtable),
                               const_cast<void *>(original));
+
+            if(vtable[17] != reinterpret_cast<void *>(traced_device_present)) {
+                const void *present_original = nullptr;
+                if(patch_vtable_entry(
+                    vtable,
+                    17, // IDirect3DDevice9::Present
+                    reinterpret_cast<const void *>(traced_device_present),
+                    &present_original
+                )) {
+                    if(!original_device_present) {
+                        static_assert(sizeof(original_device_present) == sizeof(present_original));
+                        std::memcpy(&original_device_present, &present_original, sizeof(original_device_present));
+                    }
+                    startup_trace_log("IDirect3DDevice9::Present hook installed: device=%p original=%p",
+                                      static_cast<void *>(device),
+                                      const_cast<void *>(present_original));
+                }
+                else {
+                    startup_trace_log("IDirect3DDevice9::Present hook could not be installed");
+                }
+            }
         }
 
         static HRESULT WINAPI traced_create_device(
