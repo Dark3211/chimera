@@ -215,13 +215,46 @@ namespace Chimera {
             return true;
         }
 
+        static void log_calling_module(const char *label, const void *return_address) noexcept {
+            HMODULE module = nullptr;
+            if(!return_address || !GetModuleHandleExA(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                reinterpret_cast<LPCSTR>(return_address),
+                &module
+            )) {
+                startup_trace_log("%s: return_address=%p module=unresolved Win32=%lu",
+                                  label,
+                                  return_address,
+                                  static_cast<unsigned long>(GetLastError()));
+                return;
+            }
+
+            char module_path[MAX_PATH] {};
+            const DWORD length = GetModuleFileNameA(module, module_path, static_cast<DWORD>(sizeof(module_path)));
+            const auto base = reinterpret_cast<std::uintptr_t>(module);
+            const auto address = reinterpret_cast<std::uintptr_t>(return_address);
+            startup_trace_log(
+                "%s: return_address=%p module=%s RVA=0x%08lx",
+                label,
+                return_address,
+                length > 0 && length < sizeof(module_path) ? module_path : "(path unavailable)",
+                static_cast<unsigned long>(address >= base ? address - base : 0)
+            );
+        }
+
         static HRESULT WINAPI traced_device_reset(
             IDirect3DDevice9 *device,
             D3DPRESENT_PARAMETERS *params
         ) {
             static LONG reset_count = 0;
             const LONG number = InterlockedIncrement(&reset_count);
-            startup_trace_log("D3D9 Reset #%ld BEGIN device=%p", static_cast<long>(number), static_cast<void *>(device));
+            startup_trace_log(
+                "D3D9 Reset #%ld BEGIN device=%p thread=%lu",
+                static_cast<long>(number),
+                static_cast<void *>(device),
+                static_cast<unsigned long>(GetCurrentThreadId())
+            );
+            log_calling_module("D3D9 Reset caller", __builtin_return_address(0));
             log_present_parameters("Reset input", params);
             log_current_display_mode("Before Reset");
 
