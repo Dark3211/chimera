@@ -19,6 +19,7 @@
 #include "../fix/widescreen_fix.hpp"
 #include "../halo_data/hud_fonts.hpp"
 #include "error_box.hpp"
+#include "../startup_trace.hpp"
 
 namespace Chimera {
     #include "color_codes.hpp"
@@ -941,35 +942,37 @@ namespace Chimera {
         }
     }
 
+    static void release_d3dx_font_for_device_reset(LPD3DXFONT &font) noexcept {
+        if(!font) {
+            return;
+        }
+
+        // D3DX fonts retain default-pool textures and internal state blocks.
+        // OnLostDevice releases those resources before IDirect3DDevice9::Reset.
+        const HRESULT lost_result = font->OnLostDevice();
+        if(FAILED(lost_result)) {
+            startup_trace_log(
+                "ID3DXFont::OnLostDevice failed: font=%p HRESULT=0x%08lx",
+                static_cast<void *>(font),
+                static_cast<unsigned long>(lost_result)
+            );
+        }
+
+        font->Release();
+        font = nullptr;
+    }
+
     static void on_reset(LPDIRECT3DDEVICE9, D3DPRESENT_PARAMETERS *) {
         text_list.clear();
-        if(small_font_override) {
-            small_font_override->Release();
-            small_font_override = nullptr;
-        }
-        if(large_font_override) {
-            large_font_override->Release();
-            large_font_override = nullptr;
-        }
-        if(console_font_override) {
-            console_font_override->Release();
-            console_font_override = nullptr;
-        }
-        if(system_font_override) {
-            system_font_override->Release();
-            system_font_override = nullptr;
-        }
-        if(smaller_font_override) {
-            smaller_font_override->Release();
-            smaller_font_override = nullptr;
-        }
-        if(ticker_font_override) {
-            ticker_font_override->Release();
-            ticker_font_override = nullptr;
-        }
+        release_d3dx_font_for_device_reset(small_font_override);
+        release_d3dx_font_for_device_reset(large_font_override);
+        release_d3dx_font_for_device_reset(console_font_override);
+        release_d3dx_font_for_device_reset(system_font_override);
+        release_d3dx_font_for_device_reset(smaller_font_override);
+        release_d3dx_font_for_device_reset(ticker_font_override);
+
         for(auto &font : map_custom_overrides) {
-            font.override->Release();
-            font.override = nullptr;
+            release_d3dx_font_for_device_reset(font.override);
         }
         dev = nullptr;
     }
@@ -1046,7 +1049,7 @@ namespace Chimera {
                 }
 
                 add_d3d9_end_scene_event(on_add_scene);
-                add_d3d9_reset_event(on_reset);
+                add_d3d9_reset_event(on_reset, EVENT_PRIORITY_DEFAULT, "draw_text::on_reset");
                 add_map_load_event(clear_custom_font_overrides, EVENT_PRIORITY_BEFORE);
 
                 // Hell yes
