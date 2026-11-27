@@ -549,6 +549,9 @@ namespace Chimera {
             D3DPRESENT_PARAMETERS *params
         ) {
             static LONG reset_count = 0;
+            // Once Reset has failed, D3D9 restricts valid device calls to Reset,
+            // TestCooperativeLevel, and Release. Do not run state inspection on retries.
+            static bool previous_reset_failed = false;
             const LONG number = InterlockedIncrement(&reset_count);
             const DWORD reset_thread_id = GetCurrentThreadId();
             const auto created_device = InterlockedCompareExchangePointer(
@@ -600,7 +603,15 @@ namespace Chimera {
             startup_trace_log_device_cooperative_level("D3D9 Reset immediately before native call", device);
             log_present_parameters("Reset input", params);
             log_reset_window_thread(params ? params->hDeviceWindow : nullptr);
-            log_reset_bound_resources(device);
+            if(!previous_reset_failed) {
+                log_reset_bound_resources(device);
+            }
+            else {
+                startup_trace_log(
+                    "Reset bound-resource inspection skipped: previous Reset failed; "
+                    "only lost-device-safe calls are used on retries"
+                );
+            }
             log_current_display_mode("Before Reset");
 
             if(!original_device_reset) {
@@ -609,6 +620,7 @@ namespace Chimera {
             }
 
             const HRESULT result = original_device_reset(device, params);
+            previous_reset_failed = FAILED(result);
             startup_trace_log("D3D9 Reset #%ld END HRESULT=0x%08lx",
                               static_cast<long>(number),
                               static_cast<unsigned long>(result));
