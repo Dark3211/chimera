@@ -1274,6 +1274,13 @@ namespace Chimera {
         log_window(label, reinterpret_cast<HWND>(window));
     }
 
+    void startup_trace_log_address_module(const char *label, const void *address) noexcept {
+        if(!trace_enabled) {
+            return;
+        }
+        log_calling_module(label ? label : "D3D9 callback implementation", address);
+    }
+
     void startup_trace_log(const char *format, ...) noexcept {
         if(!trace_enabled || trace_file == INVALID_HANDLE_VALUE || !format) {
             return;
