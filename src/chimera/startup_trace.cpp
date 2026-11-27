@@ -34,6 +34,8 @@ namespace Chimera {
             HWND,
             const RGNDATA *
         );
+        using DeviceBeginSceneFunction = HRESULT (WINAPI *)(IDirect3DDevice9 *);
+        using DeviceEndSceneFunction = HRESULT (WINAPI *)(IDirect3DDevice9 *);
         using ChangeDisplaySettingsAFunction = LONG (WINAPI *)(DEVMODEA *, DWORD);
         using ChangeDisplaySettingsWFunction = LONG (WINAPI *)(DEVMODEW *, DWORD);
         using ChangeDisplaySettingsExAFunction = LONG (WINAPI *)(LPCSTR, DEVMODEA *, HWND, DWORD, LPVOID);
@@ -64,6 +66,9 @@ namespace Chimera {
         static CreateDeviceFunction original_create_device = nullptr;
         static DeviceResetFunction original_device_reset = nullptr;
         static DevicePresentFunction original_device_present = nullptr;
+        static DeviceBeginSceneFunction original_device_begin_scene = nullptr;
+        static DeviceEndSceneFunction original_device_end_scene = nullptr;
+        static volatile LONG traced_device_scene_depth = 0;
         // The D3D9 runtime requires Reset on the thread that created the device.
         // Keep this diagnostic identity so a rejected Reset can be attributed correctly.
         static PVOID volatile traced_device_instance = nullptr;
@@ -227,10 +232,41 @@ namespace Chimera {
                 reinterpret_cast<LPCSTR>(return_address),
                 &module
             )) {
-                startup_trace_log("%s: return_address=%p module=unresolved Win32=%lu",
-                                  label,
-                                  return_address,
-                                  static_cast<unsigned long>(GetLastError()));
+                const DWORD module_error = GetLastError();
+                MEMORY_BASIC_INFORMATION memory {};
+                if(return_address && VirtualQuery(return_address, &memory, sizeof(memory))) {
+                    char allocation_module[MAX_PATH] {};
+                    DWORD module_path_length = 0;
+                    if(memory.Type == MEM_IMAGE && memory.AllocationBase) {
+                        module_path_length = GetModuleFileNameA(
+                            static_cast<HMODULE>(memory.AllocationBase),
+                            allocation_module,
+                            static_cast<DWORD>(sizeof(allocation_module))
+                        );
+                    }
+                    startup_trace_log(
+                        "%s: return_address=%p module=unresolved Win32=%lu memory_base=%p "
+                        "allocation_base=%p state=0x%08lx protect=0x%08lx type=0x%08lx "
+                        "allocation_module=%s",
+                        label,
+                        return_address,
+                        static_cast<unsigned long>(module_error),
+                        memory.BaseAddress,
+                        memory.AllocationBase,
+                        static_cast<unsigned long>(memory.State),
+                        static_cast<unsigned long>(memory.Protect),
+                        static_cast<unsigned long>(memory.Type),
+                        module_path_length > 0 && module_path_length < sizeof(allocation_module)
+                            ? allocation_module : "(not an image module)"
+                    );
+                }
+                else {
+                    startup_trace_log("%s: return_address=%p module=unresolved Win32=%lu VirtualQuery failed Win32=%lu",
+                                      label,
+                                      return_address,
+                                      static_cast<unsigned long>(module_error),
+                                      static_cast<unsigned long>(GetLastError()));
+                }
                 return;
             }
 
@@ -599,6 +635,31 @@ namespace Chimera {
                 );
             }
             log_calling_module("D3D9 Reset caller", __builtin_return_address(0));
+            if(number <= 4) {
+                void *stack_frames[10] {};
+                const USHORT stack_count = CaptureStackBackTrace(
+                    0,
+                    static_cast<DWORD>(sizeof(stack_frames) / sizeof(stack_frames[0])),
+                    stack_frames,
+                    nullptr
+                );
+                startup_trace_log("D3D9 Reset captured stack frames=%u", static_cast<unsigned int>(stack_count));
+                for(USHORT stack_index = 0; stack_index < stack_count; stack_index++) {
+                    char stack_label[64] {};
+                    std::snprintf(
+                        stack_label,
+                        sizeof(stack_label),
+                        "D3D9 Reset stack frame #%u",
+                        static_cast<unsigned int>(stack_index)
+                    );
+                    log_calling_module(stack_label, stack_frames[stack_index]);
+                }
+            }
+            const LONG scene_depth_at_reset = InterlockedCompareExchange(&traced_device_scene_depth, 0, 0);
+            startup_trace_log(
+                "D3D9 scene state at Reset: active_scene_depth=%ld",
+                static_cast<long>(scene_depth_at_reset)
+            );
             log_device_vtable("D3D9 Reset vtable at entry", device);
             const HRESULT reset_cooperative_level =
                 startup_trace_log_device_cooperative_level("D3D9 Reset immediately before native call", device);
@@ -625,6 +686,15 @@ namespace Chimera {
 
             const HRESULT result = original_device_reset(device, params);
             previous_reset_failed = FAILED(result);
+            if(SUCCEEDED(result)) {
+                const LONG stale_scene_depth = InterlockedExchange(&traced_device_scene_depth, 0);
+                if(stale_scene_depth != 0) {
+                    startup_trace_log(
+                        "D3D9 scene tracker cleared after successful Reset: previous_depth=%ld",
+                        static_cast<long>(stale_scene_depth)
+                    );
+                }
+            }
             startup_trace_log("D3D9 Reset #%ld END HRESULT=0x%08lx",
                               static_cast<long>(number),
                               static_cast<unsigned long>(result));
@@ -714,6 +784,56 @@ namespace Chimera {
             return result;
         }
 
+        static HRESULT WINAPI traced_device_begin_scene(IDirect3DDevice9 *device) {
+            if(!original_device_begin_scene) {
+                startup_trace_log("D3D9 BeginScene ABORT: original function pointer is null");
+                return D3DERR_INVALIDCALL;
+            }
+
+            const HRESULT result = original_device_begin_scene(device);
+            if(SUCCEEDED(result)) {
+                const LONG depth = InterlockedIncrement(&traced_device_scene_depth);
+                if(depth > 1) {
+                    startup_trace_log(
+                        "D3D9 BeginScene nested unexpectedly: active_scene_depth=%ld",
+                        static_cast<long>(depth)
+                    );
+                }
+            }
+            else if(result != D3DERR_DEVICELOST) {
+                startup_trace_log(
+                    "D3D9 BeginScene failed: HRESULT=0x%08lx",
+                    static_cast<unsigned long>(result)
+                );
+            }
+            return result;
+        }
+
+        static HRESULT WINAPI traced_device_end_scene(IDirect3DDevice9 *device) {
+            if(!original_device_end_scene) {
+                startup_trace_log("D3D9 EndScene ABORT: original function pointer is null");
+                return D3DERR_INVALIDCALL;
+            }
+
+            const HRESULT result = original_device_end_scene(device);
+            if(SUCCEEDED(result)) {
+                const LONG previous_depth = InterlockedCompareExchange(&traced_device_scene_depth, 0, 0);
+                if(previous_depth > 0) {
+                    InterlockedDecrement(&traced_device_scene_depth);
+                }
+                else {
+                    startup_trace_log("D3D9 EndScene succeeded with no tracked active scene");
+                }
+            }
+            else if(result != D3DERR_DEVICELOST) {
+                startup_trace_log(
+                    "D3D9 EndScene failed: HRESULT=0x%08lx",
+                    static_cast<unsigned long>(result)
+                );
+            }
+            return result;
+        }
+
         static void install_device_reset_hook_real(IDirect3DDevice9 *device) noexcept {
             if(!device) {
                 return;
@@ -726,18 +846,27 @@ namespace Chimera {
 
             const bool reset_needs_hook = vtable[16] != reinterpret_cast<void *>(traced_device_reset);
             const bool present_needs_hook = vtable[17] != reinterpret_cast<void *>(traced_device_present);
-            if(!reset_needs_hook && !present_needs_hook) {
+            const bool begin_scene_needs_hook = vtable[41] != reinterpret_cast<void *>(traced_device_begin_scene);
+            const bool end_scene_needs_hook = vtable[42] != reinterpret_cast<void *>(traced_device_end_scene);
+            if(!reset_needs_hook && !present_needs_hook &&
+               !begin_scene_needs_hook && !end_scene_needs_hook) {
                 return;
             }
 
             startup_trace_log(
-                "D3D9 vtable hook verification: device=%p vtable=%p Reset[16]=%p Present[17]=%p reset_rehook=%u present_rehook=%u",
+                "D3D9 vtable hook verification: device=%p vtable=%p Reset[16]=%p Present[17]=%p "
+                "BeginScene[41]=%p EndScene[42]=%p reset_rehook=%u present_rehook=%u "
+                "begin_scene_rehook=%u end_scene_rehook=%u",
                 static_cast<void *>(device),
                 static_cast<void *>(vtable),
                 vtable[16],
                 vtable[17],
+                vtable[41],
+                vtable[42],
                 static_cast<unsigned int>(reset_needs_hook),
-                static_cast<unsigned int>(present_needs_hook)
+                static_cast<unsigned int>(present_needs_hook),
+                static_cast<unsigned int>(begin_scene_needs_hook),
+                static_cast<unsigned int>(end_scene_needs_hook)
             );
 
             if(reset_needs_hook) {
@@ -788,6 +917,54 @@ namespace Chimera {
                 }
                 else {
                     startup_trace_log("IDirect3DDevice9::Present hook could not be installed");
+                }
+            }
+
+            if(begin_scene_needs_hook) {
+                const void *begin_scene_original = nullptr;
+                if(patch_vtable_entry(
+                    vtable,
+                    41, // IDirect3DDevice9::BeginScene
+                    reinterpret_cast<const void *>(traced_device_begin_scene),
+                    &begin_scene_original
+                )) {
+                    if(!original_device_begin_scene) {
+                        static_assert(sizeof(original_device_begin_scene) == sizeof(begin_scene_original));
+                        std::memcpy(&original_device_begin_scene, &begin_scene_original, sizeof(original_device_begin_scene));
+                    }
+                    startup_trace_log(
+                        "IDirect3DDevice9::BeginScene hook installed: device=%p observed_original=%p stored_original=%p",
+                        static_cast<void *>(device),
+                        const_cast<void *>(begin_scene_original),
+                        reinterpret_cast<void *>(original_device_begin_scene)
+                    );
+                }
+                else {
+                    startup_trace_log("IDirect3DDevice9::BeginScene hook could not be installed");
+                }
+            }
+
+            if(end_scene_needs_hook) {
+                const void *end_scene_original = nullptr;
+                if(patch_vtable_entry(
+                    vtable,
+                    42, // IDirect3DDevice9::EndScene
+                    reinterpret_cast<const void *>(traced_device_end_scene),
+                    &end_scene_original
+                )) {
+                    if(!original_device_end_scene) {
+                        static_assert(sizeof(original_device_end_scene) == sizeof(end_scene_original));
+                        std::memcpy(&original_device_end_scene, &end_scene_original, sizeof(original_device_end_scene));
+                    }
+                    startup_trace_log(
+                        "IDirect3DDevice9::EndScene hook installed: device=%p observed_original=%p stored_original=%p",
+                        static_cast<void *>(device),
+                        const_cast<void *>(end_scene_original),
+                        reinterpret_cast<void *>(original_device_end_scene)
+                    );
+                }
+                else {
+                    startup_trace_log("IDirect3DDevice9::EndScene hook could not be installed");
                 }
             }
 
