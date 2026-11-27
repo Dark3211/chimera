@@ -13,6 +13,7 @@ namespace Chimera {
 
     /** Write a timestamped startup diagnostic line when tracing is enabled. */
     void startup_trace_log(const char *format, ...) noexcept;
+    void startup_trace_log_address_module(const char *label, const void *address) noexcept;
     void startup_trace_log_window(const char *label, void *window) noexcept;
     HRESULT startup_trace_log_device_cooperative_level(const char *label, IDirect3DDevice9 *device) noexcept;
 
