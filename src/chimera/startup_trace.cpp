@@ -64,6 +64,11 @@ namespace Chimera {
         static CreateDeviceFunction original_create_device = nullptr;
         static DeviceResetFunction original_device_reset = nullptr;
         static DevicePresentFunction original_device_present = nullptr;
+        // The D3D9 runtime requires Reset on the thread that created the device.
+        // Keep this diagnostic identity so a rejected Reset can be attributed correctly.
+        static PVOID volatile traced_device_instance = nullptr;
+        static volatile LONG traced_device_creation_thread_id = 0;
+        static volatile LONG traced_device_creation_flags = 0;
 
         static void log_current_display_mode(const char *label) noexcept {
             DEVMODEA mode {};
@@ -330,12 +335,51 @@ namespace Chimera {
         ) {
             static LONG reset_count = 0;
             const LONG number = InterlockedIncrement(&reset_count);
+            const DWORD reset_thread_id = GetCurrentThreadId();
+            const auto created_device = InterlockedCompareExchangePointer(
+                &traced_device_instance,
+                nullptr,
+                nullptr
+            );
+            const DWORD creation_thread_id = static_cast<DWORD>(
+                InterlockedCompareExchange(&traced_device_creation_thread_id, 0, 0)
+            );
+            const DWORD creation_flags = static_cast<DWORD>(
+                InterlockedCompareExchange(&traced_device_creation_flags, 0, 0)
+            );
+            const bool creation_identity_matches =
+                created_device == static_cast<PVOID>(device) && creation_thread_id != 0;
+            const bool reset_thread_matches =
+                creation_identity_matches && reset_thread_id == creation_thread_id;
+            const bool multithreaded_creation =
+                creation_identity_matches && (creation_flags & D3DCREATE_MULTITHREADED) != 0;
+
             startup_trace_log(
-                "D3D9 Reset #%ld BEGIN device=%p thread=%lu",
+                "D3D9 Reset #%ld BEGIN device=%p thread=%lu created_device=%p creation_thread=%lu thread_match=%u multithreaded_creation=%u",
                 static_cast<long>(number),
                 static_cast<void *>(device),
-                static_cast<unsigned long>(GetCurrentThreadId())
+                static_cast<unsigned long>(reset_thread_id),
+                created_device,
+                static_cast<unsigned long>(creation_thread_id),
+                static_cast<unsigned int>(reset_thread_matches),
+                static_cast<unsigned int>(multithreaded_creation)
             );
+            if(creation_identity_matches && !reset_thread_matches) {
+                startup_trace_log(
+                    "D3D9 Reset THREAD MISMATCH: Reset thread=%lu, device creation thread=%lu, D3DCREATE_MULTITHREADED=%u",
+                    static_cast<unsigned long>(reset_thread_id),
+                    static_cast<unsigned long>(creation_thread_id),
+                    static_cast<unsigned int>(multithreaded_creation)
+                );
+            }
+            else if(!creation_identity_matches) {
+                startup_trace_log(
+                    "D3D9 Reset thread comparison unavailable: Reset device=%p tracked device=%p creation_thread=%lu",
+                    static_cast<void *>(device),
+                    created_device,
+                    static_cast<unsigned long>(creation_thread_id)
+                );
+            }
             log_calling_module("D3D9 Reset caller", __builtin_return_address(0));
             log_device_vtable("D3D9 Reset vtable at entry", device);
             startup_trace_log_device_cooperative_level("D3D9 Reset immediately before native call", device);
@@ -493,14 +537,17 @@ namespace Chimera {
         ) {
             static LONG create_count = 0;
             const LONG number = InterlockedIncrement(&create_count);
+            const DWORD create_thread_id = GetCurrentThreadId();
             startup_trace_log(
-                "D3D9 CreateDevice #%ld BEGIN d3d=%p adapter=%u type=%u focus=%p behavior=0x%08lx",
+                "D3D9 CreateDevice #%ld BEGIN d3d=%p adapter=%u type=%u focus=%p thread=%lu behavior=0x%08lx multithreaded=%u",
                 static_cast<long>(number),
                 static_cast<void *>(d3d),
                 adapter,
                 static_cast<unsigned int>(device_type),
                 static_cast<void *>(focus_window),
-                static_cast<unsigned long>(behavior_flags)
+                static_cast<unsigned long>(create_thread_id),
+                static_cast<unsigned long>(behavior_flags),
+                static_cast<unsigned int>((behavior_flags & D3DCREATE_MULTITHREADED) != 0)
             );
             log_present_parameters("CreateDevice input", params);
             log_current_display_mode("Before CreateDevice");
@@ -531,6 +578,17 @@ namespace Chimera {
             log_current_display_mode("After CreateDevice");
 
             if(SUCCEEDED(result) && device) {
+                InterlockedExchangePointer(&traced_device_instance, static_cast<PVOID>(device));
+                InterlockedExchange(&traced_device_creation_flags, static_cast<LONG>(behavior_flags));
+                // Publish the thread ID last so readers never treat a partial identity as valid.
+                InterlockedExchange(&traced_device_creation_thread_id, static_cast<LONG>(create_thread_id));
+                startup_trace_log(
+                    "D3D9 device creation identity captured: device=%p creation_thread=%lu behavior=0x%08lx multithreaded=%u",
+                    static_cast<void *>(device),
+                    static_cast<unsigned long>(create_thread_id),
+                    static_cast<unsigned long>(behavior_flags),
+                    static_cast<unsigned int>((behavior_flags & D3DCREATE_MULTITHREADED) != 0)
+                );
                 install_device_reset_hook_real(device);
             }
             return result;
@@ -1273,7 +1331,9 @@ namespace Chimera {
             return;
         }
         trace_initialized = true;
-        trace_enabled = ini ? ini->get_value_bool("debug.startup_trace").value_or(true) : true;
+        // This tracer patches D3D9 vtables and performs synchronous file I/O.
+        // Keep it opt-in so normal gameplay does not inherit diagnostic overhead.
+        trace_enabled = ini && ini->get_value_bool("debug.startup_trace").value_or(false);
         if(!trace_enabled) {
             return;
         }
