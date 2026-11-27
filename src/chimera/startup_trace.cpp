@@ -74,6 +74,36 @@ namespace Chimera {
         static PVOID volatile traced_device_instance = nullptr;
         static volatile LONG traced_device_creation_thread_id = 0;
         static volatile LONG traced_device_creation_flags = 0;
+        static volatile LONG traced_device_scene_tracking_uncertain = 0;
+        static volatile LONG traced_device_first_failure_reported = 0;
+        static volatile LONG traced_device_reset_stack_captured = 0;
+        static volatile LONG traced_device_reset_failure_reported = 0;
+
+        enum class D3D9TraceEventKind : LONG {
+            begin_scene = 1,
+            end_scene = 2,
+            present_failure = 3,
+            cooperative_lost = 4,
+            reset_begin = 5,
+            reset_result = 6
+        };
+
+        struct D3D9TraceEvent {
+            volatile LONG published_sequence;
+            ULONGLONG tick;
+            DWORD thread_id;
+            LONG kind;
+            HRESULT result;
+            HRESULT cooperative_before;
+            HRESULT cooperative_after;
+            LONG scene_depth_before;
+            LONG scene_depth_after;
+            const void *caller;
+        };
+
+        static constexpr LONG d3d9_trace_event_capacity = 512;
+        static D3D9TraceEvent traced_device_events[d3d9_trace_event_capacity] {};
+        static volatile LONG traced_device_event_sequence = 0;
 
         static void log_current_display_mode(const char *label) noexcept {
             DEVMODEA mode {};
@@ -291,6 +321,212 @@ namespace Chimera {
                 case D3DERR_INVALIDCALL: return "D3DERR_INVALIDCALL";
                 default: return "OTHER";
             }
+        }
+
+        static const char *d3d9_trace_event_name(LONG kind) noexcept {
+            switch(static_cast<D3D9TraceEventKind>(kind)) {
+                case D3D9TraceEventKind::begin_scene: return "BeginScene";
+                case D3D9TraceEventKind::end_scene: return "EndScene";
+                case D3D9TraceEventKind::present_failure: return "PresentFailure";
+                case D3D9TraceEventKind::cooperative_lost: return "CooperativeLost";
+                case D3D9TraceEventKind::reset_begin: return "ResetBegin";
+                case D3D9TraceEventKind::reset_result: return "ResetResult";
+                default: return "Unknown";
+            }
+        }
+
+        static LONG record_d3d9_event(
+            D3D9TraceEventKind kind,
+            HRESULT result,
+            HRESULT cooperative_before,
+            HRESULT cooperative_after,
+            LONG scene_depth_before,
+            LONG scene_depth_after,
+            const void *caller
+        ) noexcept {
+            const LONG sequence = InterlockedIncrement(&traced_device_event_sequence);
+            D3D9TraceEvent &event =
+                traced_device_events[static_cast<unsigned long>(sequence - 1) %
+                                     static_cast<unsigned long>(d3d9_trace_event_capacity)];
+
+            InterlockedExchange(&event.published_sequence, 0);
+            event.tick = GetTickCount64();
+            event.thread_id = GetCurrentThreadId();
+            event.kind = static_cast<LONG>(kind);
+            event.result = result;
+            event.cooperative_before = cooperative_before;
+            event.cooperative_after = cooperative_after;
+            event.scene_depth_before = scene_depth_before;
+            event.scene_depth_after = scene_depth_after;
+            event.caller = caller;
+            MemoryBarrier();
+            InterlockedExchange(&event.published_sequence, sequence);
+            return sequence;
+        }
+
+        static void dump_recent_d3d9_events(const char *reason) noexcept {
+            const LONG last_sequence = InterlockedCompareExchange(&traced_device_event_sequence, 0, 0);
+            const LONG first_sequence = last_sequence > d3d9_trace_event_capacity
+                ? last_sequence - d3d9_trace_event_capacity + 1
+                : 1;
+
+            startup_trace_log(
+                "========== D3D9 EVENT HISTORY BEGIN reason=%s first=%ld last=%ld capacity=%ld ==========",
+                reason ? reason : "(unspecified)",
+                static_cast<long>(first_sequence),
+                static_cast<long>(last_sequence),
+                static_cast<long>(d3d9_trace_event_capacity)
+            );
+
+            for(LONG sequence = first_sequence; sequence <= last_sequence; sequence++) {
+                D3D9TraceEvent &event =
+                    traced_device_events[static_cast<unsigned long>(sequence - 1) %
+                                         static_cast<unsigned long>(d3d9_trace_event_capacity)];
+                if(InterlockedCompareExchange(&event.published_sequence, 0, 0) != sequence) {
+                    continue;
+                }
+
+                const ULONGLONG tick = event.tick;
+                const DWORD thread_id = event.thread_id;
+                const LONG kind = event.kind;
+                const HRESULT result = event.result;
+                const HRESULT cooperative_before = event.cooperative_before;
+                const HRESULT cooperative_after = event.cooperative_after;
+                const LONG depth_before = event.scene_depth_before;
+                const LONG depth_after = event.scene_depth_after;
+                const void *caller = event.caller;
+                MemoryBarrier();
+
+                if(InterlockedCompareExchange(&event.published_sequence, 0, 0) != sequence) {
+                    continue;
+                }
+
+                startup_trace_log(
+                    "D3D9 EVENT #%ld tick=%llu tid=%lu type=%s HRESULT=0x%08lx "
+                    "cooperative_before=0x%08lx cooperative_after=0x%08lx "
+                    "scene_depth=%ld->%ld caller=%p",
+                    static_cast<long>(sequence),
+                    static_cast<unsigned long long>(tick),
+                    static_cast<unsigned long>(thread_id),
+                    d3d9_trace_event_name(kind),
+                    static_cast<unsigned long>(result),
+                    static_cast<unsigned long>(cooperative_before),
+                    static_cast<unsigned long>(cooperative_after),
+                    static_cast<long>(depth_before),
+                    static_cast<long>(depth_after),
+                    caller
+                );
+                if(caller) {
+                    log_calling_module("D3D9 event caller", caller);
+                }
+            }
+
+            startup_trace_log("========== D3D9 EVENT HISTORY END ==========");
+        }
+
+        static void log_return_address_bytes(const char *label, const void *return_address) noexcept {
+            if(!return_address) {
+                startup_trace_log("%s: return address is null; code bytes unavailable", label);
+                return;
+            }
+
+            const std::uintptr_t address = reinterpret_cast<std::uintptr_t>(return_address);
+            const std::uintptr_t start = address >= 16 ? address - 16 : address;
+            BYTE bytes[32] {};
+            SIZE_T bytes_read = 0;
+            const BOOL read_result = ReadProcessMemory(
+                GetCurrentProcess(),
+                reinterpret_cast<LPCVOID>(start),
+                bytes,
+                sizeof(bytes),
+                &bytes_read
+            );
+            if(!read_result && bytes_read == 0) {
+                startup_trace_log(
+                    "%s: ReadProcessMemory failed address=%p Win32=%lu",
+                    label,
+                    return_address,
+                    static_cast<unsigned long>(GetLastError())
+                );
+                return;
+            }
+
+            char byte_text[128] {};
+            std::size_t used = 0;
+            for(SIZE_T index = 0; index < bytes_read && used < sizeof(byte_text) - 4; index++) {
+                const int written = std::snprintf(
+                    byte_text + used,
+                    sizeof(byte_text) - used,
+                    "%s%02X",
+                    used == 0 ? "" : " ",
+                    static_cast<unsigned int>(bytes[index])
+                );
+                if(written <= 0 || static_cast<std::size_t>(written) >= sizeof(byte_text) - used) {
+                    break;
+                }
+                used += static_cast<std::size_t>(written);
+            }
+
+            startup_trace_log(
+                "%s: return_address=%p bytes_start=%p bytes_read=%llu bytes=%s",
+                label,
+                return_address,
+                reinterpret_cast<const void *>(start),
+                static_cast<unsigned long long>(bytes_read),
+                byte_text
+            );
+        }
+
+        static void log_diagnostic_stack(const char *label) noexcept {
+            void *stack_frames[12] {};
+            const USHORT stack_count = CaptureStackBackTrace(
+                1,
+                static_cast<DWORD>(sizeof(stack_frames) / sizeof(stack_frames[0])),
+                stack_frames,
+                nullptr
+            );
+            startup_trace_log(
+                "%s: captured stack frames=%u",
+                label,
+                static_cast<unsigned int>(stack_count)
+            );
+            for(USHORT stack_index = 0; stack_index < stack_count; stack_index++) {
+                char stack_label[80] {};
+                std::snprintf(
+                    stack_label,
+                    sizeof(stack_label),
+                    "%s frame #%u",
+                    label,
+                    static_cast<unsigned int>(stack_index)
+                );
+                log_calling_module(stack_label, stack_frames[stack_index]);
+            }
+        }
+
+        static void report_first_d3d9_failure(
+            const char *label,
+            HRESULT result,
+            HRESULT cooperative_before,
+            HRESULT cooperative_after,
+            const void *caller
+        ) noexcept {
+            if(InterlockedCompareExchange(&traced_device_first_failure_reported, 1, 0) != 0) {
+                return;
+            }
+
+            startup_trace_log(
+                "========== FIRST D3D9 FAILURE OBSERVED source=%s HRESULT=0x%08lx "
+                "cooperative_before=0x%08lx cooperative_after=0x%08lx ==========",
+                label ? label : "(unknown)",
+                static_cast<unsigned long>(result),
+                static_cast<unsigned long>(cooperative_before),
+                static_cast<unsigned long>(cooperative_after)
+            );
+            log_calling_module("First D3D9 failure caller", caller);
+            log_return_address_bytes("First D3D9 failure caller code", caller);
+            log_diagnostic_stack("First D3D9 failure stack");
+            dump_recent_d3d9_events("first D3D9 failure");
+            startup_trace_log("========== FIRST D3D9 FAILURE REPORT END ==========");
         }
 
         static void log_vtable_entry_details(const char *label, const void *entry) noexcept {
@@ -634,35 +870,41 @@ namespace Chimera {
                     static_cast<unsigned long>(creation_thread_id)
                 );
             }
-            log_calling_module("D3D9 Reset caller", __builtin_return_address(0));
-            if(number <= 4) {
-                void *stack_frames[10] {};
-                const USHORT stack_count = CaptureStackBackTrace(
-                    0,
-                    static_cast<DWORD>(sizeof(stack_frames) / sizeof(stack_frames[0])),
-                    stack_frames,
-                    nullptr
-                );
-                startup_trace_log("D3D9 Reset captured stack frames=%u", static_cast<unsigned int>(stack_count));
-                for(USHORT stack_index = 0; stack_index < stack_count; stack_index++) {
-                    char stack_label[64] {};
-                    std::snprintf(
-                        stack_label,
-                        sizeof(stack_label),
-                        "D3D9 Reset stack frame #%u",
-                        static_cast<unsigned int>(stack_index)
-                    );
-                    log_calling_module(stack_label, stack_frames[stack_index]);
-                }
+            const void *reset_caller = __builtin_return_address(0);
+            log_calling_module("D3D9 Reset caller", reset_caller);
+            log_return_address_bytes("D3D9 Reset caller code", reset_caller);
+            bool capture_reset_stack = number <= 4;
+            if(capture_reset_stack) {
+                InterlockedExchange(&traced_device_reset_stack_captured, 1);
             }
+            else {
+                capture_reset_stack =
+                    InterlockedCompareExchange(&traced_device_reset_stack_captured, 1, 0) == 0;
+            }
+            if(capture_reset_stack) {
+                log_diagnostic_stack("D3D9 Reset call stack");
+            }
+
             const LONG scene_depth_at_reset = InterlockedCompareExchange(&traced_device_scene_depth, 0, 0);
+            const LONG scene_tracking_uncertain =
+                InterlockedCompareExchange(&traced_device_scene_tracking_uncertain, 0, 0);
             startup_trace_log(
-                "D3D9 scene state at Reset: active_scene_depth=%ld",
-                static_cast<long>(scene_depth_at_reset)
+                "D3D9 scene state at Reset: active_scene_depth=%ld tracking=%s",
+                static_cast<long>(scene_depth_at_reset),
+                scene_tracking_uncertain ? "UNCERTAIN_AFTER_FAILED_SCENE_CALL" : "KNOWN"
             );
             log_device_vtable("D3D9 Reset vtable at entry", device);
             const HRESULT reset_cooperative_level =
                 startup_trace_log_device_cooperative_level("D3D9 Reset immediately before native call", device);
+            record_d3d9_event(
+                D3D9TraceEventKind::reset_begin,
+                S_FALSE,
+                reset_cooperative_level,
+                S_FALSE,
+                scene_depth_at_reset,
+                scene_depth_at_reset,
+                reset_caller
+            );
             log_present_parameters("Reset input", params);
             log_reset_window_thread(params ? params->hDeviceWindow : nullptr);
             if(reset_cooperative_level == D3D_OK && !previous_reset_failed) {
@@ -688,17 +930,51 @@ namespace Chimera {
             previous_reset_failed = FAILED(result);
             if(SUCCEEDED(result)) {
                 const LONG stale_scene_depth = InterlockedExchange(&traced_device_scene_depth, 0);
-                if(stale_scene_depth != 0) {
+                const LONG stale_uncertain = InterlockedExchange(&traced_device_scene_tracking_uncertain, 0);
+                if(stale_scene_depth != 0 || stale_uncertain != 0) {
                     startup_trace_log(
-                        "D3D9 scene tracker cleared after successful Reset: previous_depth=%ld",
-                        static_cast<long>(stale_scene_depth)
+                        "D3D9 scene tracker reset after successful Reset: previous_depth=%ld previous_tracking_uncertain=%ld",
+                        static_cast<long>(stale_scene_depth),
+                        static_cast<long>(stale_uncertain)
                     );
                 }
+                InterlockedExchange(&traced_device_first_failure_reported, 0);
+                InterlockedExchange(&traced_device_reset_stack_captured, 0);
+                InterlockedExchange(&traced_device_reset_failure_reported, 0);
             }
+
             startup_trace_log("D3D9 Reset #%ld END HRESULT=0x%08lx",
                               static_cast<long>(number),
                               static_cast<unsigned long>(result));
-            startup_trace_log_device_cooperative_level("D3D9 Reset immediately after native call", device);
+            const HRESULT post_reset_cooperative_level =
+                startup_trace_log_device_cooperative_level("D3D9 Reset immediately after native call", device);
+            const LONG scene_depth_after_reset =
+                InterlockedCompareExchange(&traced_device_scene_depth, 0, 0);
+            record_d3d9_event(
+                D3D9TraceEventKind::reset_result,
+                result,
+                reset_cooperative_level,
+                post_reset_cooperative_level,
+                scene_depth_at_reset,
+                scene_depth_after_reset,
+                reset_caller
+            );
+
+            if(FAILED(result) &&
+               InterlockedCompareExchange(&traced_device_reset_failure_reported, 1, 0) == 0) {
+                startup_trace_log(
+                    "========== FIRST D3D9 RESET FAILURE reset_number=%ld HRESULT=0x%08lx "
+                    "scene_depth=%ld scene_tracking_uncertain=%ld ==========",
+                    static_cast<long>(number),
+                    static_cast<unsigned long>(result),
+                    static_cast<long>(scene_depth_at_reset),
+                    static_cast<long>(scene_tracking_uncertain)
+                );
+                log_diagnostic_stack("First failed Reset stack");
+                dump_recent_d3d9_events("first failed Reset");
+                startup_trace_log("========== FIRST D3D9 RESET FAILURE REPORT END ==========");
+            }
+
             log_device_vtable("D3D9 Reset vtable after native call", device);
             log_present_parameters("Reset output", params);
             log_current_display_mode("After Reset");
@@ -713,37 +989,55 @@ namespace Chimera {
             const RGNDATA *dirty_region
         ) {
             static ULONGLONG last_resource_snapshot_tick = 0;
-            static bool lost_state_reported = false;
-            const ULONGLONG snapshot_tick = GetTickCount64();
+            static ULONGLONG last_summary_tick = 0;
+            static ULONGLONG last_failure_tick = 0;
+            static HRESULT last_failure = S_OK;
+            static LONG present_count = 0;
+
+            const ULONGLONG now = GetTickCount64();
+            const LONG scene_depth_before =
+                InterlockedCompareExchange(&traced_device_scene_depth, 0, 0);
+            HRESULT cooperative_before = S_FALSE;
+
             if(device) {
-                const HRESULT cooperative_level = IDirect3DDevice9_TestCooperativeLevel(device);
-                if(cooperative_level == D3D_OK) {
-                    lost_state_reported = false;
+                cooperative_before = IDirect3DDevice9_TestCooperativeLevel(device);
+                if(cooperative_before == D3D_OK) {
                     if(last_resource_snapshot_tick == 0 ||
-                       snapshot_tick - last_resource_snapshot_tick >= 2000) {
+                       now - last_resource_snapshot_tick >= 2000) {
                         startup_trace_log(
                             "D3D9 healthy resource snapshot BEGIN tick=%llu device=%p",
-                            static_cast<unsigned long long>(snapshot_tick),
+                            static_cast<unsigned long long>(now),
                             static_cast<void *>(device)
                         );
                         log_reset_bound_resources(device);
                         startup_trace_log(
                             "D3D9 healthy resource snapshot END tick=%llu",
-                            static_cast<unsigned long long>(snapshot_tick)
+                            static_cast<unsigned long long>(now)
                         );
-                        last_resource_snapshot_tick = snapshot_tick;
+                        last_resource_snapshot_tick = now;
                     }
                 }
-                else if(!lost_state_reported) {
-                    startup_trace_log(
-                        "D3D9 healthy resource snapshots paused: TestCooperativeLevel=0x%08lx "
-                        "last_snapshot_age_ms=%llu",
-                        static_cast<unsigned long>(cooperative_level),
-                        static_cast<unsigned long long>(
-                            last_resource_snapshot_tick == 0 ? 0 : snapshot_tick - last_resource_snapshot_tick
-                        )
+                else if(InterlockedCompareExchange(&traced_device_first_failure_reported, 0, 0) == 0) {
+                    const void *caller = __builtin_return_address(0);
+                    record_d3d9_event(
+                        D3D9TraceEventKind::cooperative_lost,
+                        cooperative_before,
+                        D3D_OK,
+                        cooperative_before,
+                        scene_depth_before,
+                        scene_depth_before,
+                        caller
                     );
-                    lost_state_reported = true;
+                    if(scene_depth_before > 0) {
+                        InterlockedExchange(&traced_device_scene_tracking_uncertain, 1);
+                    }
+                    report_first_d3d9_failure(
+                        "TestCooperativeLevel before Present",
+                        cooperative_before,
+                        D3D_OK,
+                        cooperative_before,
+                        caller
+                    );
                 }
             }
 
@@ -760,23 +1054,62 @@ namespace Chimera {
                 dirty_region
             );
 
-            static LONG present_count = 0;
-            static ULONGLONG last_summary_tick = 0;
-            static ULONGLONG last_failure_tick = 0;
-            static HRESULT last_failure = S_OK;
+            HRESULT cooperative_after = S_FALSE;
+            if(device && FAILED(result)) {
+                cooperative_after = IDirect3DDevice9_TestCooperativeLevel(device);
+            }
+
             const LONG number = InterlockedIncrement(&present_count);
-            const ULONGLONG now = GetTickCount64();
             const bool new_failure = FAILED(result) &&
                 (result != last_failure || now - last_failure_tick >= 1000);
             if(new_failure) {
                 last_failure = result;
                 last_failure_tick = now;
             }
+
+            if(FAILED(result)) {
+                const void *caller = __builtin_return_address(0);
+                record_d3d9_event(
+                    D3D9TraceEventKind::present_failure,
+                    result,
+                    cooperative_before,
+                    cooperative_after,
+                    scene_depth_before,
+                    InterlockedCompareExchange(&traced_device_scene_depth, 0, 0),
+                    caller
+                );
+                if(result == D3DERR_DEVICELOST || cooperative_after != D3D_OK) {
+                    if(scene_depth_before > 0) {
+                        InterlockedExchange(&traced_device_scene_tracking_uncertain, 1);
+                    }
+                    report_first_d3d9_failure(
+                        "IDirect3DDevice9::Present",
+                        result,
+                        cooperative_before,
+                        cooperative_after,
+                        caller
+                    );
+                }
+                else if(new_failure) {
+                    startup_trace_log(
+                        "D3D9 Present failure: count=%ld HRESULT=0x%08lx cooperative_before=0x%08lx cooperative_after=0x%08lx",
+                        static_cast<long>(number),
+                        static_cast<unsigned long>(result),
+                        static_cast<unsigned long>(cooperative_before),
+                        static_cast<unsigned long>(cooperative_after)
+                    );
+                    log_diagnostic_stack("D3D9 Present failure stack");
+                }
+            }
+
             if(number <= 8 || new_failure || now - last_summary_tick >= 1000) {
                 startup_trace_log(
-                    "D3D9 Present #%ld HRESULT=0x%08lx destination-window=%p",
+                    "D3D9 Present #%ld HRESULT=0x%08lx cooperative_before=0x%08lx "
+                    "cooperative_after=0x%08lx destination-window=%p",
                     static_cast<long>(number),
                     static_cast<unsigned long>(result),
+                    static_cast<unsigned long>(cooperative_before),
+                    static_cast<unsigned long>(cooperative_after),
                     static_cast<void *>(destination_window)
                 );
                 last_summary_tick = now;
@@ -790,20 +1123,54 @@ namespace Chimera {
                 return D3DERR_INVALIDCALL;
             }
 
+            const LONG depth_before =
+                InterlockedCompareExchange(&traced_device_scene_depth, 0, 0);
             const HRESULT result = original_device_begin_scene(device);
+            LONG depth_after = depth_before;
+            const void *caller = __builtin_return_address(0);
+
             if(SUCCEEDED(result)) {
-                const LONG depth = InterlockedIncrement(&traced_device_scene_depth);
-                if(depth > 1) {
+                depth_after = InterlockedIncrement(&traced_device_scene_depth);
+                if(depth_after > 1) {
                     startup_trace_log(
                         "D3D9 BeginScene nested unexpectedly: active_scene_depth=%ld",
-                        static_cast<long>(depth)
+                        static_cast<long>(depth_after)
+                    );
+                }
+                if(depth_before == 0) {
+                    InterlockedExchange(&traced_device_scene_tracking_uncertain, 0);
+                }
+            }
+            else {
+                InterlockedExchange(&traced_device_scene_tracking_uncertain, 1);
+                if(result != D3DERR_DEVICELOST) {
+                    startup_trace_log(
+                        "D3D9 BeginScene failed: HRESULT=0x%08lx",
+                        static_cast<unsigned long>(result)
                     );
                 }
             }
-            else if(result != D3DERR_DEVICELOST) {
-                startup_trace_log(
-                    "D3D9 BeginScene failed: HRESULT=0x%08lx",
-                    static_cast<unsigned long>(result)
+
+            record_d3d9_event(
+                D3D9TraceEventKind::begin_scene,
+                result,
+                S_FALSE,
+                S_FALSE,
+                depth_before,
+                depth_after,
+                caller
+            );
+
+            if(FAILED(result)) {
+                const HRESULT cooperative_after = device
+                    ? IDirect3DDevice9_TestCooperativeLevel(device)
+                    : E_POINTER;
+                report_first_d3d9_failure(
+                    "IDirect3DDevice9::BeginScene",
+                    result,
+                    S_FALSE,
+                    cooperative_after,
+                    caller
                 );
             }
             return result;
@@ -815,20 +1182,55 @@ namespace Chimera {
                 return D3DERR_INVALIDCALL;
             }
 
+            const LONG depth_before =
+                InterlockedCompareExchange(&traced_device_scene_depth, 0, 0);
             const HRESULT result = original_device_end_scene(device);
+            const void *caller = __builtin_return_address(0);
+            LONG depth_after = depth_before;
+
             if(SUCCEEDED(result)) {
-                const LONG previous_depth = InterlockedCompareExchange(&traced_device_scene_depth, 0, 0);
-                if(previous_depth > 0) {
-                    InterlockedDecrement(&traced_device_scene_depth);
+                if(depth_before > 0) {
+                    depth_after = InterlockedDecrement(&traced_device_scene_depth);
                 }
                 else {
                     startup_trace_log("D3D9 EndScene succeeded with no tracked active scene");
                 }
+
+                if(depth_after == 0) {
+                    InterlockedExchange(&traced_device_scene_tracking_uncertain, 0);
+                }
             }
-            else if(result != D3DERR_DEVICELOST) {
+            else {
+                // In particular, D3DERR_DEVICELOST does not tell us whether the
+                // runtime closed the scene. Do not misreport the cached depth as
+                // proof that a scene is still open.
+                InterlockedExchange(&traced_device_scene_tracking_uncertain, 1);
                 startup_trace_log(
-                    "D3D9 EndScene failed: HRESULT=0x%08lx",
+                    "D3D9 EndScene failed: HRESULT=0x%08lx; scene depth is now uncertain",
                     static_cast<unsigned long>(result)
+                );
+            }
+
+            record_d3d9_event(
+                D3D9TraceEventKind::end_scene,
+                result,
+                S_FALSE,
+                S_FALSE,
+                depth_before,
+                depth_after,
+                caller
+            );
+
+            if(FAILED(result)) {
+                const HRESULT cooperative_after = device
+                    ? IDirect3DDevice9_TestCooperativeLevel(device)
+                    : E_POINTER;
+                report_first_d3d9_failure(
+                    "IDirect3DDevice9::EndScene",
+                    result,
+                    S_FALSE,
+                    cooperative_after,
+                    caller
                 );
             }
             return result;
