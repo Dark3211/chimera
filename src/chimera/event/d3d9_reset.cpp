@@ -78,6 +78,10 @@ namespace Chimera {
                     reinterpret_cast<void *>(event.function),
                     static_cast<unsigned int>(event.priority)
                 );
+                startup_trace_log_address_module(
+                    "D3D9 Reset callback implementation",
+                    reinterpret_cast<const void *>(event.function)
+                );
                 startup_trace_log_device_cooperative_level("Before D3D9 Reset callback", device);
                 event.function(device, present);
                 startup_trace_log_device_cooperative_level("After D3D9 Reset callback", device);
