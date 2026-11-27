@@ -438,7 +438,11 @@ namespace Chimera {
 
         if(group_draw_original) {
             add_map_load_event(clear_target_index_buffers, EVENT_PRIORITY_BEFORE);
-            add_d3d9_reset_event(clear_target_index_buffers_on_reset, EVENT_PRIORITY_BEFORE);
+            add_d3d9_reset_event(
+                clear_target_index_buffers_on_reset,
+                EVENT_PRIORITY_BEFORE,
+                "clear_target_index_buffers_on_reset"
+            );
             installed = true;
         }
     }
