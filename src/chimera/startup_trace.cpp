@@ -329,6 +329,221 @@ namespace Chimera {
             last_present_entry = vtable[17];
         }
 
+        static void log_reset_window_thread(HWND window) noexcept {
+            if(!window) {
+                startup_trace_log("Reset window thread: hwnd=null");
+                return;
+            }
+
+            DWORD process_id = 0;
+            const DWORD window_thread = GetWindowThreadProcessId(window, &process_id);
+            const DWORD current_thread = GetCurrentThreadId();
+            startup_trace_log(
+                "Reset window thread: hwnd=%p valid=%u window_thread=%lu current_thread=%lu "
+                "window_process=%lu current_process=%lu same_thread=%u iconic=%u visible=%u "
+                "foreground=%p active=%p focus=%p",
+                static_cast<void *>(window),
+                static_cast<unsigned int>(IsWindow(window)),
+                static_cast<unsigned long>(window_thread),
+                static_cast<unsigned long>(current_thread),
+                static_cast<unsigned long>(process_id),
+                static_cast<unsigned long>(GetCurrentProcessId()),
+                static_cast<unsigned int>(window_thread != 0 && window_thread == current_thread),
+                static_cast<unsigned int>(IsIconic(window)),
+                static_cast<unsigned int>(IsWindowVisible(window)),
+                static_cast<void *>(GetForegroundWindow()),
+                static_cast<void *>(GetActiveWindow()),
+                static_cast<void *>(GetFocus())
+            );
+        }
+
+        static void log_reset_bound_resources(IDirect3DDevice9 *device) noexcept {
+            if(!device) {
+                startup_trace_log("Reset bound-resource inspection skipped: device=null");
+                return;
+            }
+
+            IDirect3DSurface9 *back_buffer = nullptr;
+            const HRESULT back_buffer_result = IDirect3DDevice9_GetBackBuffer(
+                device,
+                0,
+                0,
+                D3DBACKBUFFER_TYPE_MONO,
+                &back_buffer
+            );
+            startup_trace_log(
+                "Reset bound-resource inspection: GetBackBuffer HRESULT=0x%08lx surface=%p",
+                static_cast<unsigned long>(back_buffer_result),
+                static_cast<void *>(back_buffer)
+            );
+
+            for(DWORD target_index = 0; target_index < 4; target_index++) {
+                IDirect3DSurface9 *surface = nullptr;
+                const HRESULT result = IDirect3DDevice9_GetRenderTarget(device, target_index, &surface);
+                if(FAILED(result) || !surface) {
+                    if(target_index == 0) {
+                        startup_trace_log(
+                            "Reset bound render target #%lu unavailable: HRESULT=0x%08lx",
+                            static_cast<unsigned long>(target_index),
+                            static_cast<unsigned long>(result)
+                        );
+                    }
+                    continue;
+                }
+
+                D3DSURFACE_DESC description {};
+                const HRESULT description_result = IDirect3DSurface9_GetDesc(surface, &description);
+                startup_trace_log(
+                    "Reset bound render target #%lu: surface=%p desc_hr=0x%08lx "
+                    "type=%u format=%u size=%lux%lu usage=0x%08lx pool=%u implicit_backbuffer=%u",
+                    static_cast<unsigned long>(target_index),
+                    static_cast<void *>(surface),
+                    static_cast<unsigned long>(description_result),
+                    static_cast<unsigned int>(description.Type),
+                    static_cast<unsigned int>(description.Format),
+                    static_cast<unsigned long>(description.Width),
+                    static_cast<unsigned long>(description.Height),
+                    static_cast<unsigned long>(description.Usage),
+                    static_cast<unsigned int>(description.Pool),
+                    static_cast<unsigned int>(back_buffer && surface == back_buffer)
+                );
+                surface->Release();
+            }
+
+            IDirect3DSurface9 *depth_surface = nullptr;
+            const HRESULT depth_result = IDirect3DDevice9_GetDepthStencilSurface(device, &depth_surface);
+            if(SUCCEEDED(depth_result) && depth_surface) {
+                D3DSURFACE_DESC description {};
+                const HRESULT description_result = IDirect3DSurface9_GetDesc(depth_surface, &description);
+                startup_trace_log(
+                    "Reset bound depth-stencil: surface=%p desc_hr=0x%08lx "
+                    "format=%u size=%lux%lu usage=0x%08lx pool=%u",
+                    static_cast<void *>(depth_surface),
+                    static_cast<unsigned long>(description_result),
+                    static_cast<unsigned int>(description.Format),
+                    static_cast<unsigned long>(description.Width),
+                    static_cast<unsigned long>(description.Height),
+                    static_cast<unsigned long>(description.Usage),
+                    static_cast<unsigned int>(description.Pool)
+                );
+                depth_surface->Release();
+            }
+            else {
+                startup_trace_log(
+                    "Reset bound depth-stencil unavailable: HRESULT=0x%08lx",
+                    static_cast<unsigned long>(depth_result)
+                );
+            }
+
+            for(DWORD stage = 0; stage < 16; stage++) {
+                IDirect3DBaseTexture9 *texture = nullptr;
+                const HRESULT result = IDirect3DDevice9_GetTexture(device, stage, &texture);
+                if(FAILED(result) || !texture) {
+                    continue;
+                }
+
+                const D3DRESOURCETYPE resource_type = IDirect3DBaseTexture9_GetType(texture);
+                if(resource_type == D3DRTYPE_TEXTURE) {
+                    auto *texture_2d = static_cast<IDirect3DTexture9 *>(texture);
+                    D3DSURFACE_DESC description {};
+                    const HRESULT description_result = IDirect3DTexture9_GetLevelDesc(texture_2d, 0, &description);
+                    startup_trace_log(
+                        "Reset bound texture stage=%lu: texture=%p type=%u desc_hr=0x%08lx "
+                        "format=%u size=%lux%lu usage=0x%08lx pool=%u",
+                        static_cast<unsigned long>(stage),
+                        static_cast<void *>(texture),
+                        static_cast<unsigned int>(resource_type),
+                        static_cast<unsigned long>(description_result),
+                        static_cast<unsigned int>(description.Format),
+                        static_cast<unsigned long>(description.Width),
+                        static_cast<unsigned long>(description.Height),
+                        static_cast<unsigned long>(description.Usage),
+                        static_cast<unsigned int>(description.Pool)
+                    );
+                }
+                else {
+                    startup_trace_log(
+                        "Reset bound texture stage=%lu: texture=%p type=%u",
+                        static_cast<unsigned long>(stage),
+                        static_cast<void *>(texture),
+                        static_cast<unsigned int>(resource_type)
+                    );
+                }
+                texture->Release();
+            }
+
+            for(UINT stream = 0; stream < 16; stream++) {
+                IDirect3DVertexBuffer9 *buffer = nullptr;
+                UINT offset = 0;
+                UINT stride = 0;
+                const HRESULT result = IDirect3DDevice9_GetStreamSource(
+                    device,
+                    stream,
+                    &buffer,
+                    &offset,
+                    &stride
+                );
+                if(FAILED(result) || !buffer) {
+                    continue;
+                }
+
+                D3DVERTEXBUFFER_DESC description {};
+                const HRESULT description_result = IDirect3DVertexBuffer9_GetDesc(buffer, &description);
+                startup_trace_log(
+                    "Reset bound vertex buffer stream=%u: buffer=%p desc_hr=0x%08lx "
+                    "size=%lu usage=0x%08lx fvf=0x%08lx pool=%u offset=%u stride=%u",
+                    stream,
+                    static_cast<void *>(buffer),
+                    static_cast<unsigned long>(description_result),
+                    static_cast<unsigned long>(description.Size),
+                    static_cast<unsigned long>(description.Usage),
+                    static_cast<unsigned long>(description.FVF),
+                    static_cast<unsigned int>(description.Pool),
+                    offset,
+                    stride
+                );
+                buffer->Release();
+            }
+
+            IDirect3DIndexBuffer9 *index_buffer = nullptr;
+            const HRESULT index_result = IDirect3DDevice9_GetIndices(device, &index_buffer);
+            if(SUCCEEDED(index_result) && index_buffer) {
+                D3DINDEXBUFFER_DESC description {};
+                const HRESULT description_result = IDirect3DIndexBuffer9_GetDesc(index_buffer, &description);
+                startup_trace_log(
+                    "Reset bound index buffer: buffer=%p desc_hr=0x%08lx "
+                    "size=%lu usage=0x%08lx format=%u pool=%u",
+                    static_cast<void *>(index_buffer),
+                    static_cast<unsigned long>(description_result),
+                    static_cast<unsigned long>(description.Size),
+                    static_cast<unsigned long>(description.Usage),
+                    static_cast<unsigned int>(description.Format),
+                    static_cast<unsigned int>(description.Pool)
+                );
+                index_buffer->Release();
+            }
+
+            const UINT swap_chain_count = IDirect3DDevice9_GetNumberOfSwapChains(device);
+            startup_trace_log("Reset swap-chain count=%u", swap_chain_count);
+            for(UINT index = 1; index < swap_chain_count && index < 8; index++) {
+                IDirect3DSwapChain9 *swap_chain = nullptr;
+                const HRESULT result = IDirect3DDevice9_GetSwapChain(device, index, &swap_chain);
+                startup_trace_log(
+                    "Reset additional swap-chain #%u: HRESULT=0x%08lx chain=%p",
+                    index,
+                    static_cast<unsigned long>(result),
+                    static_cast<void *>(swap_chain)
+                );
+                if(swap_chain) {
+                    swap_chain->Release();
+                }
+            }
+
+            if(back_buffer) {
+                back_buffer->Release();
+            }
+        }
+
         static HRESULT WINAPI traced_device_reset(
             IDirect3DDevice9 *device,
             D3DPRESENT_PARAMETERS *params
@@ -384,6 +599,8 @@ namespace Chimera {
             log_device_vtable("D3D9 Reset vtable at entry", device);
             startup_trace_log_device_cooperative_level("D3D9 Reset immediately before native call", device);
             log_present_parameters("Reset input", params);
+            log_reset_window_thread(params ? params->hDeviceWindow : nullptr);
+            log_reset_bound_resources(device);
             log_current_display_mode("Before Reset");
 
             if(!original_device_reset) {
