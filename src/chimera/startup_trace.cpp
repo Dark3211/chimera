@@ -359,7 +359,7 @@ namespace Chimera {
 
         static void log_reset_bound_resources(IDirect3DDevice9 *device) noexcept {
             if(!device) {
-                startup_trace_log("Reset bound-resource inspection skipped: device=null");
+                startup_trace_log("D3D9 resource snapshot skipped: device=null");
                 return;
             }
 
@@ -372,7 +372,7 @@ namespace Chimera {
                 &back_buffer
             );
             startup_trace_log(
-                "Reset bound-resource inspection: GetBackBuffer HRESULT=0x%08lx surface=%p",
+                "D3D9 resource snapshot: GetBackBuffer HRESULT=0x%08lx surface=%p",
                 static_cast<unsigned long>(back_buffer_result),
                 static_cast<void *>(back_buffer)
             );
@@ -383,7 +383,7 @@ namespace Chimera {
                 if(FAILED(result) || !surface) {
                     if(target_index == 0) {
                         startup_trace_log(
-                            "Reset bound render target #%lu unavailable: HRESULT=0x%08lx",
+                            "D3D9 bound render target #%lu unavailable: HRESULT=0x%08lx",
                             static_cast<unsigned long>(target_index),
                             static_cast<unsigned long>(result)
                         );
@@ -394,7 +394,7 @@ namespace Chimera {
                 D3DSURFACE_DESC description {};
                 const HRESULT description_result = IDirect3DSurface9_GetDesc(surface, &description);
                 startup_trace_log(
-                    "Reset bound render target #%lu: surface=%p desc_hr=0x%08lx "
+                    "D3D9 bound render target #%lu: surface=%p desc_hr=0x%08lx "
                     "type=%u format=%u size=%lux%lu usage=0x%08lx pool=%u implicit_backbuffer=%u",
                     static_cast<unsigned long>(target_index),
                     static_cast<void *>(surface),
@@ -416,7 +416,7 @@ namespace Chimera {
                 D3DSURFACE_DESC description {};
                 const HRESULT description_result = IDirect3DSurface9_GetDesc(depth_surface, &description);
                 startup_trace_log(
-                    "Reset bound depth-stencil: surface=%p desc_hr=0x%08lx "
+                    "D3D9 bound depth-stencil: surface=%p desc_hr=0x%08lx "
                     "format=%u size=%lux%lu usage=0x%08lx pool=%u",
                     static_cast<void *>(depth_surface),
                     static_cast<unsigned long>(description_result),
@@ -430,7 +430,7 @@ namespace Chimera {
             }
             else {
                 startup_trace_log(
-                    "Reset bound depth-stencil unavailable: HRESULT=0x%08lx",
+                    "D3D9 bound depth-stencil unavailable: HRESULT=0x%08lx",
                     static_cast<unsigned long>(depth_result)
                 );
             }
@@ -448,7 +448,7 @@ namespace Chimera {
                     D3DSURFACE_DESC description {};
                     const HRESULT description_result = IDirect3DTexture9_GetLevelDesc(texture_2d, 0, &description);
                     startup_trace_log(
-                        "Reset bound texture stage=%lu: texture=%p type=%u desc_hr=0x%08lx "
+                        "D3D9 bound texture stage=%lu: texture=%p type=%u desc_hr=0x%08lx "
                         "format=%u size=%lux%lu usage=0x%08lx pool=%u",
                         static_cast<unsigned long>(stage),
                         static_cast<void *>(texture),
@@ -463,7 +463,7 @@ namespace Chimera {
                 }
                 else {
                     startup_trace_log(
-                        "Reset bound texture stage=%lu: texture=%p type=%u",
+                        "D3D9 bound texture stage=%lu: texture=%p type=%u",
                         static_cast<unsigned long>(stage),
                         static_cast<void *>(texture),
                         static_cast<unsigned int>(resource_type)
@@ -490,7 +490,7 @@ namespace Chimera {
                 D3DVERTEXBUFFER_DESC description {};
                 const HRESULT description_result = IDirect3DVertexBuffer9_GetDesc(buffer, &description);
                 startup_trace_log(
-                    "Reset bound vertex buffer stream=%u: buffer=%p desc_hr=0x%08lx "
+                    "D3D9 bound vertex buffer stream=%u: buffer=%p desc_hr=0x%08lx "
                     "size=%lu usage=0x%08lx fvf=0x%08lx pool=%u offset=%u stride=%u",
                     stream,
                     static_cast<void *>(buffer),
@@ -511,7 +511,7 @@ namespace Chimera {
                 D3DINDEXBUFFER_DESC description {};
                 const HRESULT description_result = IDirect3DIndexBuffer9_GetDesc(index_buffer, &description);
                 startup_trace_log(
-                    "Reset bound index buffer: buffer=%p desc_hr=0x%08lx "
+                    "D3D9 bound index buffer: buffer=%p desc_hr=0x%08lx "
                     "size=%lu usage=0x%08lx format=%u pool=%u",
                     static_cast<void *>(index_buffer),
                     static_cast<unsigned long>(description_result),
@@ -524,12 +524,12 @@ namespace Chimera {
             }
 
             const UINT swap_chain_count = IDirect3DDevice9_GetNumberOfSwapChains(device);
-            startup_trace_log("Reset swap-chain count=%u", swap_chain_count);
+            startup_trace_log("D3D9 resource snapshot swap-chain count=%u", swap_chain_count);
             for(UINT index = 1; index < swap_chain_count && index < 8; index++) {
                 IDirect3DSwapChain9 *swap_chain = nullptr;
                 const HRESULT result = IDirect3DDevice9_GetSwapChain(device, index, &swap_chain);
                 startup_trace_log(
-                    "Reset additional swap-chain #%u: HRESULT=0x%08lx chain=%p",
+                    "D3D9 resource snapshot additional swap-chain #%u: HRESULT=0x%08lx chain=%p",
                     index,
                     static_cast<unsigned long>(result),
                     static_cast<void *>(swap_chain)
@@ -600,16 +600,20 @@ namespace Chimera {
             }
             log_calling_module("D3D9 Reset caller", __builtin_return_address(0));
             log_device_vtable("D3D9 Reset vtable at entry", device);
-            startup_trace_log_device_cooperative_level("D3D9 Reset immediately before native call", device);
+            const HRESULT reset_cooperative_level =
+                startup_trace_log_device_cooperative_level("D3D9 Reset immediately before native call", device);
             log_present_parameters("Reset input", params);
             log_reset_window_thread(params ? params->hDeviceWindow : nullptr);
-            if(!previous_reset_failed) {
+            if(reset_cooperative_level == D3D_OK && !previous_reset_failed) {
+                // This branch is only valid while the device is operational.
                 log_reset_bound_resources(device);
             }
             else {
                 startup_trace_log(
-                    "Reset bound-resource inspection skipped: previous Reset failed; "
-                    "only lost-device-safe calls are used on retries"
+                    "D3D9 resource snapshot skipped before Reset: cooperative_level=0x%08lx "
+                    "previous_reset_failed=%u; device resource queries are not valid while lost",
+                    static_cast<unsigned long>(reset_cooperative_level),
+                    static_cast<unsigned int>(previous_reset_failed)
                 );
             }
             log_current_display_mode("Before Reset");
@@ -638,6 +642,41 @@ namespace Chimera {
             HWND destination_window,
             const RGNDATA *dirty_region
         ) {
+            static ULONGLONG last_resource_snapshot_tick = 0;
+            static bool lost_state_reported = false;
+            const ULONGLONG snapshot_tick = GetTickCount64();
+            if(device) {
+                const HRESULT cooperative_level = IDirect3DDevice9_TestCooperativeLevel(device);
+                if(cooperative_level == D3D_OK) {
+                    lost_state_reported = false;
+                    if(last_resource_snapshot_tick == 0 ||
+                       snapshot_tick - last_resource_snapshot_tick >= 2000) {
+                        startup_trace_log(
+                            "D3D9 healthy resource snapshot BEGIN tick=%llu device=%p",
+                            static_cast<unsigned long long>(snapshot_tick),
+                            static_cast<void *>(device)
+                        );
+                        log_reset_bound_resources(device);
+                        startup_trace_log(
+                            "D3D9 healthy resource snapshot END tick=%llu",
+                            static_cast<unsigned long long>(snapshot_tick)
+                        );
+                        last_resource_snapshot_tick = snapshot_tick;
+                    }
+                }
+                else if(!lost_state_reported) {
+                    startup_trace_log(
+                        "D3D9 healthy resource snapshots paused: TestCooperativeLevel=0x%08lx "
+                        "last_snapshot_age_ms=%llu",
+                        static_cast<unsigned long>(cooperative_level),
+                        static_cast<unsigned long long>(
+                            last_resource_snapshot_tick == 0 ? 0 : snapshot_tick - last_resource_snapshot_tick
+                        )
+                    );
+                    lost_state_reported = true;
+                }
+            }
+
             if(!original_device_present) {
                 startup_trace_log("D3D9 Present ABORT: original function pointer is null");
                 return D3DERR_INVALIDCALL;
