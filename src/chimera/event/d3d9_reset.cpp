@@ -62,6 +62,27 @@ namespace Chimera {
         startup_trace_on_reset_call(device, present);
         GraphicsRuntimeMetrics::reset_begin();
 
+        // EXPERIMENT (branch fix/d3d9-reset-open-scene-experiment)
+        //
+        // Hypothesis: every failing Reset in the trace log reports
+        // "active_scene_depth=1", i.e. a scene may still be open when Halo calls
+        // IDirect3DDevice9::Reset. SMAA splits the scene around the pre-HUD point
+        // (EndScene -> StretchRect -> BeginScene), so it is the one module that can
+        // leave a scene open if the device is lost mid-frame.
+        //
+        // Close any scene that may still be open before Reset. This is harmless when
+        // no scene is open: EndScene() just returns D3DERR_INVALIDCALL.
+        //   S_OK (0x00000000)  -> a scene WAS open (hypothesis confirmed if Reset now succeeds)
+        //   0x8876086C         -> no scene was open (hypothesis rejected for this attempt)
+        if(device) {
+            const HRESULT end_scene_result = device->EndScene();
+            startup_trace_log(
+                "Pre-Reset EndScene experiment: HRESULT=0x%08lX (%s)",
+                static_cast<unsigned long>(end_scene_result),
+                SUCCEEDED(end_scene_result) ? "a scene was open and has been closed" : "no open scene to close"
+            );
+        }
+
         std::size_t callback_index = 0;
         const auto run_priority = [&](EventPriority priority) {
             for(const auto &event : events) {
