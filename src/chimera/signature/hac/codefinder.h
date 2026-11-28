@@ -13,10 +13,6 @@ class CodeFinder {
 	const short* signature;
 	std::vector<std::uintptr_t> locations;
 
-	PIMAGE_SECTION_HEADER GetSection(HANDLE module);
-	void findCode(HANDLE module, const short *signature, size_t size, bool fastFind);
-	void boyerFind(const short* signature, size_t sigLength, BYTE* memory, size_t memLength);
-
 public:
 	CodeFinder(HANDLE module, const short* signature, unsigned int signatureLen);
 	std::vector<std::uintptr_t>::iterator begin();
